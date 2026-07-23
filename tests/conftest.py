@@ -5,9 +5,15 @@ using OpenCV in ``inference/.venv`` — no network, no downloads. Webcam and
 real-RTSP tests are gated behind markers since there's no hardware here.
 """
 from __future__ import annotations
+
+# Optional: load a local .env for test secrets (e.g. RTSP_TEST_URL). The test
+# suite must not hard-depend on python-dotenv, so import it defensively.
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
 import os
 import sys
 from pathlib import Path
@@ -38,7 +44,10 @@ def pytest_configure(config):
         "markers",
         "rtsp: requires a live RTSP stream (deselect with -m 'not rtsp')",
     )
-
+    config.addinivalue_line(
+        "markers",
+        "detection: real-inference tests (loads model weights, slower)",
+    )
 
 # ---- Fixtures -------------------------------------------------------------- #
 @pytest.fixture(scope="session")

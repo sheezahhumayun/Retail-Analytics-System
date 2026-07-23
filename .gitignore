@@ -17,6 +17,16 @@ node_modules/
 # Logs
 *.log
 
+# Model weights (downloaded/built locally; do not commit)
+inference/models/
+*.pt
+*.onnx
+*.engine
+
+# Generated detection outputs (annotated videos, baselines)
+tests/videos/*
+!tests/videos/.gitkeep
+
 # OS
 .DS_Store
 Thumbs.db
