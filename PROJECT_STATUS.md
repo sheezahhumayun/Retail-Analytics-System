@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-23
+**Last updated:** 2026-07-25
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -12,7 +12,7 @@
 | 0 | Environment & Repository Setup | ✅ Done |
 | 1 | Video Ingestion Layer | ✅ Done |
 | 2 | Person Detection | ✅ Done |
-| 3 | Multi-Object Tracking | ⬜ Not started |
+| 3 | Multi-Object Tracking | ✅ Done |
 | 4 | Entry/Exit Counting Lines | ⬜ Not started |
 | 5 | Occupancy Analytics | ⬜ Not started |
 | 6 | Zone Management & Zone Analytics | ⬜ Not started |
@@ -383,25 +383,97 @@ data than guessing at it here.
 
 ---
 
-## Next Up: Module 3 — Multi-Object Tracking
+## ✅ Module 3 — Multi-Object Tracking — DONE
 
-Detection now hands off a stable, backend-agnostic `list[Detection]` per
-frame via `PersonDetector.detect()`, so tracking can be developed entirely
-against local footage:
+Assigns temporary, anonymous track IDs to detected people so downstream modules
+(counting, dwell, zones, heatmaps) reason about *individuals*, not per-frame
+detection blobs (PRD §11).
+
+### What was actually done
+
+1. **`inference/tracking/` package**:
+   - `types.py` — `PositionRecord` + `TrackedObject` (frozen, slotted:
+     `track_id`, `bbox`, `class_id`, `class_name`, `confidence`, `camera_id`,
+     `timestamp`, `position_history` capped at 30 frames).
+   - `tracker.py` — `Tracker` wrapping `trackers.ByteTrackTracker` (Roboflow's
+     maintained successor to deprecated `supervision.ByteTrack`). Pre-tracking
+     confidence filter + IoU NMS via `supervision.Detections.with_nms()`.
+     Confirmation gate (`min_confirmation_frames=2`) filters single-frame
+     flicker. Per-track position deque for line-cross / dwell (Modules 4 & 7).
+   - `__init__.py` + `README.md` (API, PRD §11 failure modes, known MVP
+     limitations).
+
+2. **Tests** — `tests/test_tracking.py`, **22 passed** fast + **5 passed**
+   gated (`@pytest.mark.tracking`). Covers: type immutability + derived
+   properties; pre-tracking NMS; synthetic motion (stable IDs, confirmation
+   gate, history growth/cap, reset, multi-person); real detect+track on all 3
+   sample videos.
+
+3. **Demo script** — `tests/scripts/run-tracking-demo.py`. Runs detect +
+   track over all 3 sample videos, draws bbox + track ID, writes annotated
+   mp4s to `tests/videos/`.
+
+4. **`inference/requirements.txt`** — added `supervision` + `trackers`.
+
+### Decisions made
+
+- **Algorithm: ByteTrack** via `trackers.ByteTrackTracker` — motion + IoU +
+  Kalman filter only, no re-ID embedding model. CPU overhead on top of
+  detection is negligible.
+- **`track_buffer=30`** (lost-track memory) — tuned starting point for brief
+  occlusions behind shelving; at Module 1's 10fps throttle that's ~3s wall
+  time.
+- **`min_confirmation_frames=2`** — tracks must appear in 2 consecutive
+  processed frames before being returned.
+- **`history_length=30`** — position buffer on each `TrackedObject` for
+  line-crossing direction (Module 4) and dwell (Module 7).
+- **Re-ID after long occlusion: documented, not solved** — ByteTrack may
+  assign a new ID; full re-ID is Phase 2, per task spec.
+
+### Known limitations (MVP)
+
+1. No cross-camera re-ID — one `Tracker` per camera.
+2. ID swap after occlusion longer than `track_buffer` processed frames.
+3. Module 1's frame-skipping means the tracker sees every 3rd source frame at
+   10fps; fast motion increases association errors.
+4. **Low-resolution / heavily compressed CCTV** — tracking performance degrades
+   when person detections are intermittent (common on noisy or low-bitrate
+   feeds), causing more frequent ID switches and shorter track lifetimes.
+   Detection and tracking thresholds will be evaluated and tuned across a
+   representative dataset in Module 18.
+
+### Not in scope (deferred)
+
+- BoT-SORT / DeepSORT backends → future if ByteTrack accuracy insufficient.
+- Appearance-based re-ID → Phase 2.
+- DB persistence of tracks → Module 11.
+
+### ✅ Test Checkpoint 3 — Verified
+
+- [x] `pytest tests/test_tracking.py` → 22 passed (fast suite).
+- [x] `pytest tests/test_tracking.py -m tracking` → 5 passed (real inference).
+- [x] `pytest tests/test_detection.py tests/test_video_source.py` → Module 1/2
+      regression clean (RTSP live test excluded — env-dependent).
+
+---
+
+## Next Up: Module 4 — Entry/Exit Counting Lines
+
+Tracking now hands off confirmed `list[TrackedObject]` per frame with position
+history, so line-crossing can be developed against local footage:
 
 ```python
-from inference.video import create_video_source
 from inference.detection import create_detector
+from inference.tracking import Tracker
 
-with create_video_source("sample-data/entrance.mp4") as src, create_detector() as det:
-    ok, frame = src.read()
-    detections = det.detect(frame, camera_id="entrance")  # list[Detection]
+tracker = Tracker(camera_id="entrance")
+with create_detector() as det:
+    detections = det.detect(frame, camera_id="entrance")
+    tracks = tracker.update(detections)  # list[TrackedObject]
 ```
 
-Before starting Module 3, decide:
-- Tracking algorithm (ByteTrack / DeepSORT / other, per PRD's tracking
-  section) and whether it needs a re-ID embedding model or works on motion +
-  IoU alone.
-- Whether the ~7 FPS CPU inference ceiling from Module 2 changes any tracking
-  design assumptions (e.g. track-loss tolerance across skipped frames) before
-  Module 17's perf work lands.
+Before starting Module 4, decide:
+- Line geometry representation (two endpoints + direction vector) and coordinate
+  space (downscaled frame from Module 1 vs native resolution).
+- Whether to use `supervision.LineZone` / `LineZoneAnnotator` helpers now that
+  supervision is already a dependency.

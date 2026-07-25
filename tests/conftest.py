@@ -48,6 +48,10 @@ def pytest_configure(config):
         "markers",
         "detection: real-inference tests (loads model weights, slower)",
     )
+    config.addinivalue_line(
+        "markers",
+        "tracking: real-inference tracking tests (loads model weights, slower)",
+    )
 
 # ---- Fixtures -------------------------------------------------------------- #
 @pytest.fixture(scope="session")
@@ -92,3 +96,12 @@ def sample_videos(sample_data_dir: Path) -> list[Path]:
     if not out:
         pytest.skip("no sample videos present")
     return out
+
+
+@pytest.fixture(scope="module")
+def pytorch_detector():
+    from inference.detection import create_detector
+
+    det = create_detector(backend="ultralytics")
+    yield det
+    det.release()
