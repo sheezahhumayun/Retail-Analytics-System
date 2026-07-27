@@ -126,6 +126,16 @@ def main() -> int:
 
         src.release()
 
+    occupancy_snap = None
+    if events:
+        from analytics.occupancy import OccupancyTracker
+
+        occupancy = OccupancyTracker(camera_id)
+        for ev in events:
+            occupancy_snap = occupancy.process(ev)
+        if occupancy_snap is not None:
+            print("\nOccupancy:", occupancy_snap.to_dict())
+
     print(f"\n{camera_id}: {len(events)} crossing event(s)")
     for ev in events:
         print(ev.to_dict())

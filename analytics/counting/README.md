@@ -80,6 +80,6 @@ Full admin UI → Module 16.
 
 ## Not in scope (deferred)
 
-- Occupancy rollup (`entries - exits`) → Module 5
+- Occupancy rollup → **Module 5** (`analytics/occupancy`).
 - Event bus / persistence → Modules 10–11
 - Multi-line aggregation per camera → Module 16 / backend config

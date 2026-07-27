@@ -14,7 +14,7 @@
 | 2 | Person Detection | ✅ Done |
 | 3 | Multi-Object Tracking | ✅ Done |
 | 4 | Entry/Exit Counting Lines | ✅ Done |
-| 5 | Occupancy Analytics | ⬜ Not started |
+| 5 | Occupancy Analytics | ✅ Done |
 | 6 | Zone Management & Zone Analytics | ⬜ Not started |
 | 7 | Dwell-Time Analytics | ⬜ Not started |
 | 8 | Heatmap Generation | ⬜ Not started |
@@ -526,7 +526,7 @@ the PRD §27 schema for Module 10.
 
 ### Not in scope (deferred)
 
-- Occupancy rollup (`entries - exits`) → Module 5.
+- Occupancy rollup → **Module 5** (`analytics/occupancy`).
 - Event bus / DB persistence → Modules 10–11.
 - Multi-line admin UI → Module 16.
 
@@ -539,21 +539,64 @@ the PRD §27 schema for Module 10.
 
 ---
 
-## Next Up: Module 5 — Occupancy Analytics
+## ✅ Module 5 — Occupancy Analytics — DONE
 
-Counting now emits structured ENTRY/EXIT events; occupancy is the first
-consumer:
+First **pure analytics** module — dashboard metrics from Module 4 ENTRY/EXIT
+events, no computer vision (PRD §13). Preview of the Analytics Engine
+(Module 10).
 
-```python
-from analytics.counting import LineCounter, CrossingEvent, EventType
+### What was actually done
 
-for event in counter.update(tracks):
-    if event.event_type == EventType.ENTRY:
-        occupancy += 1
-    elif event.event_type == EventType.EXIT:
-        occupancy -= 1
-```
+1. **`analytics/occupancy/` package**:
+   - `types.py` — `OccupancyScope` (`camera` / `store` / `zone` for Module 6),
+     `OccupancySnapshot` with PRD §13 fields + `to_dict()`.
+   - `tracker.py` — `OccupancyTracker`: `current_occupancy = entries − exits`
+     (floored at 0), `today_visitors`, `today_exits`, `peak_occupancy`,
+     `peak_occupancy_time`; automatic midnight rollover (UTC default, IANA tz
+     when `tzdata` installed).
+   - `aggregator.py` — `StoreOccupancyAggregator` rolls up multiple entrance
+     cameras to store-level metrics + store peak occupancy.
+   - `__init__.py` + `README.md`.
 
-Before starting Module 5, decide:
-- In-memory counter vs. event replay from storage (Module 11 may influence this).
-- Whether "today's visitors" resets at midnight local store time or UTC.
+2. **Tests** — `tests/test_occupancy.py`, **9 passed** (8 fast + 1 gated
+   `@pytest.mark.occupancy`). Hand-worked event sequence, negative floor,
+   midnight rollover, store rollup, counting-pipeline integration.
+
+3. **Counting demo** — `run-counting-demo.py` prints final occupancy snapshot
+   when crossing events are produced.
+
+### Decisions made
+
+- **In-memory counters** until Module 11 persistence; midnight rollover resets
+  daily metrics (assumes empty store at local midnight for MVP).
+- **Floor at zero (MVP)** — `current_occupancy` never negative when EXITS arrive
+  without prior ENTRYs (people already inside when a clip/stream starts).
+- **Sample clips vs live** — on offline sample videos, `current_occupancy` is an
+  *event-derived estimate*, not ground truth. `today_visitors` / `today_exits`
+  and peak are reliable relative to the clip. On live cameras, call
+  `occupancy.reset()` when the stream starts on an empty store so occupancy
+  tracks real people inside.
+- **Store + zone extensibility** — per-camera trackers + store aggregator;
+  `OccupancyScope.ZONE` reserved for Module 6 (not hardcoded single-camera).
+
+### Known limitations (MVP)
+
+1. No DB persistence — counters lost on process restart (Module 11).
+2. Non-UTC store timezones require `pip install tzdata` on Windows.
+3. Zone-level occupancy deferred to Module 6.
+
+### Not in scope (deferred)
+
+- Event bus / API exposure → Modules 10–12.
+- Persisted daily rollups / historical peaks → Module 11.
+
+### ✅ Test Checkpoint 5 — Verified
+
+- [x] Hand-worked ENTRY/EXIT sequence → occupancy, peak, today's visitors match
+      expected values.
+- [x] Orphan EXITS floor `current_occupancy` at 0 (never negative).
+- [x] `pytest tests/test_occupancy.py` → 9 passed (8 fast + 1 gated).
+
+---
+
+## Next Up: Module 6 — Zone Management & Zone Analytics
