@@ -60,6 +60,10 @@ def pytest_configure(config):
         "markers",
         "occupancy: occupancy integration tests (loads model weights)",
     )
+    config.addinivalue_line(
+        "markers",
+        "zones: detect+track+zone integration tests (loads model weights)",
+    )
 
 # ---- Fixtures -------------------------------------------------------------- #
 @pytest.fixture(scope="session")

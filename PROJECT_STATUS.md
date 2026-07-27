@@ -15,7 +15,7 @@
 | 3 | Multi-Object Tracking | ✅ Done |
 | 4 | Entry/Exit Counting Lines | ✅ Done |
 | 5 | Occupancy Analytics | ✅ Done |
-| 6 | Zone Management & Zone Analytics | ⬜ Not started |
+| 6 | Zone Management & Zone Analytics | ✅ Done |
 | 7 | Dwell-Time Analytics | ⬜ Not started |
 | 8 | Heatmap Generation | ⬜ Not started |
 | 9 | Queue Analytics | ⬜ Not started |
@@ -599,4 +599,73 @@ events, no computer vision (PRD §13). Preview of the Analytics Engine
 
 ---
 
-## Next Up: Module 6 — Zone Management & Zone Analytics
+## ✅ Module 6 — Zone Management & Zone Analytics — DONE
+
+Polygon-based zones with entry/exit/presence detection and analytics computed
+from those events (PRD §14–§15). Generalizes Module 4's line-crossing pattern
+into arbitrary regions — foundation for dwell-time (Module 7) and heatmaps
+(Module 8).
+
+### What was actually done
+
+1. **`analytics/zones/` package**:
+   - `types.py` — `Zone` (zone_id, zone_name, camera_id, polygon_coordinates,
+     zone_type, analytics_enabled), `ZoneConfig` (multi-zone per camera),
+     `ZoneEvent` + `ZoneEventType` (`ZONE_ENTER`/`ZONE_EXIT`/`ZONE_PRESENCE`).
+   - `geometry.py` — `point_in_polygon()` via `cv2.pointPolygonTest()`, foot-point
+     from bbox bottom-center.
+   - `detector.py` — `ZoneDetector.update(tracks)` evaluates **all** enabled
+     zones per camera per track per frame; mirrors `LineCounter` history-pair
+     scan + debounce.
+   - `analytics.py` — `ZoneAnalytics` + `MultiZoneAnalytics`: zone visitors,
+     current occupancy (via `OccupancyTracker` scope `ZONE`), total visits,
+     avg/max/min dwell (ENTER→EXIT duration), traffic by hour.
+   - `polygon_editor.py` — MVP OpenCV click-to-define polygon editor (merge
+     into `ZoneConfig` JSON). Full admin UI → Module 16.
+   - `__init__.py` + `README.md`.
+
+2. **Tests** — `tests/test_zones.py`, **21 passed** (20 fast + 1 gated
+   `@pytest.mark.zones`). Covers: JSON roundtrip, point-in-polygon, enter/exit/
+   presence, debounce, multi-zone per camera, disabled zones, analytics
+   (visitors, dwell, hourly traffic), full detect+track+zone pipeline.
+
+3. **Demo script** — `tests/scripts/run-zones-demo.py`. Runs detect + track +
+   zone detection + analytics; accepts `--zone-config` JSON from the editor.
+
+### Decisions made
+
+- **Foot-point (100% bbox height)** for zone tests — PRD §14 specifies foot-
+  point; line crossing (Module 4) uses 85% for CCTV slop but zones are area-
+  based so strict foot-point is appropriate.
+- **All zones per camera per frame** — one `ZoneDetector` takes a list of zones;
+  each track is checked against every enabled zone on that camera (overlapping
+  zones supported, e.g. Electronics + Checkout slice).
+- **`ZONE_PRESENCE` with `dwell_delta`** — emitted on inside→inside history
+  pairs for Module 7 to consume directly; completed visit dwell stats use
+  ENTER→EXIT wall time in `ZoneAnalytics`.
+- **Reuses `OccupancyTracker`** with `OccupancyScope.ZONE` for entries-minus-
+  exits occupancy — same pattern as Module 5, not a parallel counter.
+
+### Known limitations (MVP)
+
+1. Dwell stats only finalize on `ZONE_EXIT` — people still inside at clip end
+   are not counted in avg/max/min until they exit.
+2. No DB persistence — counters lost on restart (Module 11).
+3. Polygon editor saves one zone at a time (merges into config); multi-zone
+   batch editing → Module 16.
+
+### Not in scope (deferred)
+
+- Individual dwell event records / session export → **Module 7**
+- Heatmaps → **Module 8**
+- Event bus / API exposure → Modules 10–12
+
+### ✅ Test Checkpoint 6 — Verified
+
+- [x] Synthetic ZONE_ENTER/EXIT/PRESENCE + debounce + multi-zone tests green.
+- [x] Zone analytics: visitors, occupancy, dwell, hourly traffic match expected.
+- [x] `pytest tests/test_zones.py` → 21 passed (20 fast + 1 gated).
+
+---
+
+## Next Up: Module 7 — Dwell-Time Analytics
