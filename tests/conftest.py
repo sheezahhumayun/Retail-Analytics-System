@@ -64,6 +64,10 @@ def pytest_configure(config):
         "markers",
         "zones: detect+track+zone integration tests (loads model weights)",
     )
+    config.addinivalue_line(
+        "markers",
+        "dwell: dwell-time integration tests",
+    )
 
 # ---- Fixtures -------------------------------------------------------------- #
 @pytest.fixture(scope="session")

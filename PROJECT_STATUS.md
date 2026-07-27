@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-07-28 (demo timestamps → wall-clock seconds)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -16,7 +16,7 @@
 | 4 | Entry/Exit Counting Lines | ✅ Done |
 | 5 | Occupancy Analytics | ✅ Done |
 | 6 | Zone Management & Zone Analytics | ✅ Done |
-| 7 | Dwell-Time Analytics | ⬜ Not started |
+| 7 | Dwell-Time Analytics | ✅ Done |
 | 8 | Heatmap Generation | ⬜ Not started |
 | 9 | Queue Analytics | ⬜ Not started |
 | 10 | Event Architecture & Analytics Engine | ⬜ Not started |
@@ -616,21 +616,46 @@ into arbitrary regions — foundation for dwell-time (Module 7) and heatmaps
      from bbox bottom-center.
    - `detector.py` — `ZoneDetector.update(tracks)` evaluates **all** enabled
      zones per camera per track per frame; mirrors `LineCounter` history-pair
-     scan + debounce.
+     scan + debounce + **hysteresis buffer** (`hysteresis_frames=2` default —
+     consecutive inside/outside readings required before confirming ENTER/EXIT).
    - `analytics.py` — `ZoneAnalytics` + `MultiZoneAnalytics`: zone visitors,
      current occupancy (via `OccupancyTracker` scope `ZONE`), total visits,
      avg/max/min dwell (ENTER→EXIT duration), traffic by hour.
+   - `verify.py` — transition timeline extraction, event-type counts, flapping
+     detection (rapid ENTER↔EXIT within N frames).
    - `polygon_editor.py` — MVP OpenCV click-to-define polygon editor (merge
      into `ZoneConfig` JSON). Full admin UI → Module 16.
    - `__init__.py` + `README.md`.
 
-2. **Tests** — `tests/test_zones.py`, **21 passed** (20 fast + 1 gated
-   `@pytest.mark.zones`). Covers: JSON roundtrip, point-in-polygon, enter/exit/
-   presence, debounce, multi-zone per camera, disabled zones, analytics
-   (visitors, dwell, hourly traffic), full detect+track+zone pipeline.
+2. **Zone configs** — `tests/videos/town_zones.json` (store1 + store2 polygons
+   on `town.mp4`, drawn with `polygon_editor`).
 
-3. **Demo script** — `tests/scripts/run-zones-demo.py`. Runs detect + track +
+3. **Tests** — `tests/test_zones.py`, **24 passed** (23 fast + 1 gated
+   `@pytest.mark.zones`). Covers: JSON roundtrip, point-in-polygon, enter/exit/
+   presence, debounce, hysteresis (delayed enter + single-frame boundary
+   suppression), multi-zone per camera, disabled zones, analytics (visitors,
+   dwell, hourly traffic), flapping helper, full detect+track+zone pipeline.
+
+4. **Demo script** — `tests/scripts/run-zones-demo.py`. Runs detect + track +
    zone detection + analytics; accepts `--zone-config` JSON from the editor.
+   Flags for verification: `--transitions-only` (skip PRESENCE flood),
+   `--hysteresis-frames`, `--flap-window`, per-type event counts, per-track
+   ENTER/EXIT timeline, flapping warnings.
+
+### Verified against real footage (not just unit tests)
+
+Ran on `town.mp4` + `tests/videos/town_zones.json` (two overlapping store
+polygons). Pipeline produced ~1030 zone events dominated by `ZONE_PRESENCE`
+(people already inside zones when tracked); analytics summary confirmed
+ENTER/EXIT transitions fired correctly:
+
+| Zone | Visitors | Visits | Avg dwell | Current occ |
+|------|----------|--------|-----------|-------------|
+| store1 | 9 | 10 | 48.5s | 0 |
+| store2 | 12 | 13 | 38.4s | 3 |
+
+Use `--transitions-only` on the demo to inspect per-track ENTER/EXIT timelines
+instead of the first 20 PRESENCE events.
 
 ### Decisions made
 
@@ -645,27 +670,127 @@ into arbitrary regions — foundation for dwell-time (Module 7) and heatmaps
   ENTER→EXIT wall time in `ZoneAnalytics`.
 - **Reuses `OccupancyTracker`** with `OccupancyScope.ZONE` for entries-minus-
   exits occupancy — same pattern as Module 5, not a parallel counter.
+- **Hysteresis default = 2 frames** — matches the tracker's confirmation gate;
+  suppresses boundary flapping when a foot-point briefly straddles a polygon
+  edge. Tunable via `--hysteresis-frames` on the demo / `ZoneDetector(...,
+  hysteresis_frames=N)`.
 
 ### Known limitations (MVP)
 
 1. Dwell stats only finalize on `ZONE_EXIT` — people still inside at clip end
-   are not counted in avg/max/min until they exit.
-2. No DB persistence — counters lost on restart (Module 11).
-3. Polygon editor saves one zone at a time (merges into config); multi-zone
+   are not counted in avg/max/min until they exit (e.g. store2 `current_occupancy=3`
+   on `town.mp4` clip end).
+2. ~~Demo timestamps use frame index as epoch seconds~~ **Fixed 2026-07-28** —
+   `run-zones-demo.py` and `run-dwell-demo.py` now stamp
+   `timestamp = frame_idx / target_fps` (default 10 fps) so dwell times and
+   thresholds are in real seconds. Live streams should still pass wall-clock
+   timestamps from the video source.
+3. No DB persistence — counters lost on restart (Module 11).
+4. Polygon editor saves one zone at a time (merges into config); multi-zone
    batch editing → Module 16.
 
 ### Not in scope (deferred)
 
-- Individual dwell event records / session export → **Module 7**
 - Heatmaps → **Module 8**
 - Event bus / API exposure → Modules 10–12
 
 ### ✅ Test Checkpoint 6 — Verified
 
 - [x] Synthetic ZONE_ENTER/EXIT/PRESENCE + debounce + multi-zone tests green.
+- [x] Hysteresis delays ENTER and suppresses single-frame boundary blips.
 - [x] Zone analytics: visitors, occupancy, dwell, hourly traffic match expected.
-- [x] `pytest tests/test_zones.py` → 21 passed (20 fast + 1 gated).
+- [x] `pytest tests/test_zones.py` → 24 passed (23 fast + 1 gated).
+- [x] `town.mp4` + `town_zones.json` end-to-end — visits/visitors/dwell plausible;
+      `--transitions-only` confirms ENTER/EXIT timeline per track.
 
 ---
 
-## Next Up: Module 7 — Dwell-Time Analytics
+## ✅ Module 7 — Dwell-Time Analytics — DONE
+
+Individual dwell sessions and per-zone aggregates from Module 6 zone events
+(PRD §16). Direct consumer of `ZONE_ENTER` / `ZONE_EXIT` / `ZONE_PRESENCE` —
+mostly arithmetic once Module 6 is solid.
+
+### What was actually done
+
+1. **`analytics/dwell/` package**:
+   - `types.py` — `DwellEvent` (maps to PRD §31 DwellEvents entity),
+     `DwellThresholdEvent` (`DWELL_THRESHOLD`, PRD §27), `DwellAggregatesSnapshot`,
+     histogram buckets (`0-30s` / `30-60s` / `1-3min` / `3-10min` / `10min+`).
+   - `tracker.py` — `DwellTracker`: records sessions on `ZONE_ENTER`, closes on
+     `ZONE_EXIT` with `dwell_seconds = exit − enter`, updates `last_seen` on
+     `ZONE_PRESENCE`, `close_stale_sessions()` for track-loss approximation.
+   - `aggregates.py` — `DwellAggregator`: avg / median / max + distribution
+     from completed dwell events.
+   - `__init__.py` + `README.md`.
+
+2. **Tests** — `tests/test_dwell.py`, **13 passed** (12 fast + 1 gated
+   `@pytest.mark.dwell`). Covers: dwell event on exit, avg/median/max across
+   known durations, histogram buckets, track-loss timeout, threshold fires once
+   per visit (not every frame), zone-pipeline integration.
+
+3. **Demo script** — `tests/scripts/run-dwell-demo.py`. Full detect + track +
+   zone + dwell pipeline; `--dwell-threshold` for manual alert testing,
+   `--lost-track-timeout` and `--target-fps` tunable.
+
+4. **Demo timestamp fix (2026-07-28)** — initial demos used `timestamp =
+   frame_idx` (1 per processed frame), so a 30 s clip at 10 fps looked like
+   ~300 s and `--dwell-threshold 30` meant 30 frames (~3 s real time). Both
+   `run-dwell-demo.py` and `run-zones-demo.py` now use
+   `timestamp = frame_idx / target_fps` for wall-clock seconds.
+
+### Verified against `town.mp4` (manual run)
+
+First run used frame-index timestamps (misleading dwells up to 79 "seconds" on a
+30 s clip). After the fix, dwell values scale to real time (e.g. 79 frames →
+~7.9 s at 10 fps). End-to-end on `town.mp4` + `town_zones.json` with
+`--dwell-threshold 30` produced 14 dwell events and threshold alerts per visit
+— re-run after fix for threshold counts in real seconds.
+
+### Decisions made
+
+- **ENTER→EXIT wall time** for completed `DwellEvent.dwell_seconds` — same as
+  Module 6 zone analytics; `ZONE_PRESENCE` `dwell_delta` used only for live
+  threshold checks and Module 7 incremental state.
+- **Track-loss policy** — if no zone event for `lost_track_timeout_seconds`
+  (default **5 s**), close session at `last_seen_timestamp` with
+  `close_reason: track_lost`. Documented as approximation for tracking failures,
+  not a real exit. Slightly above ByteTrack `track_buffer` at 10 fps (~3 s).
+- **`DWELL_THRESHOLD` fires once per visit** — `threshold_fired` flag reset on
+  next `ZONE_ENTER`; checked on `ZONE_PRESENCE` when `dwell >= threshold`.
+- **Per-zone thresholds** via `dwell_thresholds={zone_id: seconds}` dict —
+  event built now for Module 15 (Alerting); no alert UI yet.
+- **Demo timestamps = wall-clock seconds** — `frame_idx / target_fps` (default
+  10). All `dwell_seconds` and `dwell_threshold_seconds` are in real seconds.
+
+### Known limitations (MVP)
+
+1. Open dwells at clip end need `close_stale_sessions()` or remain in
+   `active_sessions` until timeout — demo calls both per-frame and at EOF.
+2. No DB persistence — dwell events lost on restart (Module 11).
+3. Threshold only evaluated on `ZONE_PRESENCE` — requires person to generate
+   presence events while inside (normal once hysteresis confirms ENTER).
+
+### Not in scope (deferred)
+
+- Alert delivery UI → **Module 15**
+- DwellEvents DB persistence → **Module 11**
+- Dashboard distribution charts → **Module 13**
+
+### ✅ Test Checkpoint 7 — In progress
+
+Automated tests green (`pytest tests/test_dwell.py` → 13 passed).
+
+- [ ] Stand in a defined zone for a known duration (stopwatch); confirm computed
+      dwell within ~2 s of real time — **re-run `run-dwell-demo.py` after
+      timestamp fix** (prior run inflated dwells by ~10× on 10 fps clips).
+- [x] Confirm avg/median/max across several visits — unit tests with known
+      durations (30 / 120 / 180 s → median 120 s).
+- [x] `DWELL_THRESHOLD` fires once per visit, not every frame —
+      `test_threshold_fires_once_per_visit` green; manual threshold re-test on
+      `town.mp4` pending after timestamp fix (`--dwell-threshold 30` = 30 real
+      seconds now, not 30 frames).
+
+---
+
+## Next Up: Module 8 — Heatmap Generation

@@ -81,6 +81,12 @@ def main() -> int:
         default=3,
         help="Flag ENTER↔EXIT within this many frames as flapping (default: 3)",
     )
+    parser.add_argument(
+        "--target-fps",
+        type=float,
+        default=10.0,
+        help="Processing FPS (used for wall-clock timestamps)",
+    )
     args = parser.parse_args()
 
     from analytics.zones import (
@@ -125,13 +131,14 @@ def main() -> int:
     tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
 
     with create_detector(backend=args.backend) as detector_model:
-        src = create_video_source(str(video_path), target_fps=10)
+        target_fps = args.target_fps
+        src = create_video_source(str(video_path), target_fps=target_fps)
         src.open()
 
         ok, frame = src.read()
         if ok:
             detector_model.detect(frame, camera_id=camera_id)
-            src = create_video_source(str(video_path), target_fps=10)
+            src = create_video_source(str(video_path), target_fps=target_fps)
             src.open()
 
         events = []
@@ -140,8 +147,9 @@ def main() -> int:
             ok, frame = src.read()
             if not ok:
                 break
+            ts = frame_idx / target_fps
             dets = detector_model.detect(
-                frame, camera_id=camera_id, timestamp=float(frame_idx)
+                frame, camera_id=camera_id, timestamp=ts
             )
             frame_idx += 1
             for ev in detector.update(tracker.update(dets)):
@@ -168,8 +176,7 @@ def main() -> int:
     )
     for ev in to_print[:30]:
         d = ev.to_dict()
-        if "timestamp" in d and d["timestamp"].startswith("1970-"):
-            d["frame"] = int(ev.timestamp)
+        d["t_seconds"] = round(ev.timestamp, 2)
         print(d)
     if len(to_print) > 30:
         print(f"... and {len(to_print) - 30} more")
