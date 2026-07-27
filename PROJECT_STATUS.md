@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-25
+**Last updated:** 2026-07-27
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -13,7 +13,7 @@
 | 1 | Video Ingestion Layer | ✅ Done |
 | 2 | Person Detection | ✅ Done |
 | 3 | Multi-Object Tracking | ✅ Done |
-| 4 | Entry/Exit Counting Lines | ⬜ Not started |
+| 4 | Entry/Exit Counting Lines | ✅ Done |
 | 5 | Occupancy Analytics | ⬜ Not started |
 | 6 | Zone Management & Zone Analytics | ⬜ Not started |
 | 7 | Dwell-Time Analytics | ⬜ Not started |
@@ -424,7 +424,9 @@ detection blobs (PRD §11).
   occlusions behind shelving; at Module 1's 10fps throttle that's ~3s wall
   time.
 - **`min_confirmation_frames=2`** — tracks must appear in 2 consecutive
-  processed frames before being returned.
+  processed frames before being returned. Positions from `tracker_id=-1`
+  (pre-confirmation) frames are buffered and merged into history when the real
+  ID appears, so early crossings are not lost.
 - **`history_length=30`** — position buffer on each `TrackedObject` for
   line-crossing direction (Module 4) and dwell (Module 7).
 - **Re-ID after long occlusion: documented, not solved** — ByteTrack may
@@ -450,30 +452,108 @@ detection blobs (PRD §11).
 
 ### ✅ Test Checkpoint 3 — Verified
 
-- [x] `pytest tests/test_tracking.py` → 22 passed (fast suite).
+- [x] `pytest tests/test_tracking.py` → 18 passed (fast suite).
 - [x] `pytest tests/test_tracking.py -m tracking` → 5 passed (real inference).
 - [x] `pytest tests/test_detection.py tests/test_video_source.py` → Module 1/2
       regression clean (RTSP live test excluded — env-dependent).
 
 ---
 
-## Next Up: Module 4 — Entry/Exit Counting Lines
+## ✅ Module 4 — Entry/Exit Counting Lines — DONE
 
-Tracking now hands off confirmed `list[TrackedObject]` per frame with position
-history, so line-crossing can be developed against local footage:
+Virtual counting lines that emit structured **ENTRY** / **EXIT** events when
+tracked people cross them (PRD §12). First structured analytics event — seeds
+the PRD §27 schema for Module 10.
+
+### What was actually done
+
+1. **`analytics/counting/` package**:
+   - `types.py` — `CountingLine` (two endpoints + `inside_side` flag in frame
+     coords), `CrossingEvent` + `EventType` (`ENTRY`/`EXIT`) with
+     `to_dict()` matching PRD §27 shape; JSON save/load.
+   - `geometry.py` — tracking point (85% bbox height, tuned for low-res CCTV),
+     foot-point helper, segment intersection, inside/outside side tests,
+     `movement_crosses_line()` with endpoint margin + proximity tolerance.
+   - `counter.py` — `LineCounter.update(tracks)` → `list[CrossingEvent]`.
+     Scans every **new** consecutive pair in `position_history` each frame
+     (bootstrap on first sight; rolling-buffer safe at 30-frame maxlen).
+     Per-track debounce — first crossing accepts either direction (`ANY`), then
+     alternates ENTRY/EXIT.
+   - `line_editor.py` — MVP OpenCV click-to-define editor (2 endpoints + inside
+     side click). Downscales to 640px long side; green tint shows inside side.
+     Full admin UI → Module 16.
+   - `__init__.py` + `README.md`.
+
+2. **Line configs** — `tests/videos/entrance_line.json`,
+   `tests/videos/CMMentrance_line.json` (drawn with `line_editor`; `camera_id`
+   must match the video stem when using `--line-config`).
+
+3. **Tests** — `tests/test_counting.py`, **16 passed** (15 fast + 1 gated
+   `@pytest.mark.counting`). Covers: JSON roundtrip, geometry, ENTRY/EXIT
+   direction, debounce, camera filter, reset, history-pair scan, `track_id=0`,
+   full detect+track+count pipeline.
+
+4. **Demo script** — `tests/scripts/run-counting-demo.py`. Runs detect +
+   track + count; accepts `--line-config` JSON from the editor. `camera_id`
+   comes from the line JSON when `--line-config` is set.
+
+5. **Tracker integration** — `Tracker` pre-confirmation buffer (Module 3)
+   merged so crossings during the 2-frame confirmation window are retained in
+   `position_history`.
+
+### Decisions made
+
+- **Tracking point at 85% bbox height** — on low-res / compressed CCTV the
+  bbox bottom lags the doorway; strict foot-point (100%) under-counted. 0.85
+  balances foot accuracy with catching crossings when the upper body has passed
+  the line. `foot_point_from_bbox()` kept for tests / future tuning.
+- **Custom geometry** (not `supervision.LineZone`) — keeps the PRD §27 event
+  schema and debounce logic explicit; same pattern will extend to zones.
+- **Frame coordinates** — lines drawn on Module 1's downscaled frames (640px
+  long side).
+- **Debounce state machine** — per track: first crossing since track appeared
+  may be ENTRY or EXIT; thereafter alternates (no duplicate ENTRY until EXIT).
+
+### Known limitations (MVP)
+
+1. **Line placement matters** — counting fires on geometric line crossing, not
+   "person appeared near the door." The line must span where tracked footpaths
+   actually cross; use `line_editor` green tint to confirm inside side.
+2. **Not every visible person gets a track ID** — on `entrance.mp4` ByteTrack
+   assigns 4 IDs; a 5th person in frame may never receive a confirmed track.
+3. **Low-res CCTV** — intermittent detections and ID switches (Module 3 #4)
+   still affect who gets counted; threshold tuning deferred to Module 18.
+
+### Not in scope (deferred)
+
+- Occupancy rollup (`entries - exits`) → Module 5.
+- Event bus / DB persistence → Modules 10–11.
+- Multi-line admin UI → Module 16.
+
+### ✅ Test Checkpoint 4 — Verified
+
+- [x] `pytest tests/test_counting.py` → 16 passed (15 fast + 1 gated).
+- [x] Synthetic ENTRY/EXIT + debounce + `track_id=0` tests green.
+- [x] End-to-end detect+track+count on `entrance.mp4` + `entrance_line.json`
+      → **4 ENTRY** (tracks 0–3), 1 EXIT (track 2).
+
+---
+
+## Next Up: Module 5 — Occupancy Analytics
+
+Counting now emits structured ENTRY/EXIT events; occupancy is the first
+consumer:
 
 ```python
-from inference.detection import create_detector
-from inference.tracking import Tracker
+from analytics.counting import LineCounter, CrossingEvent, EventType
 
-tracker = Tracker(camera_id="entrance")
-with create_detector() as det:
-    detections = det.detect(frame, camera_id="entrance")
-    tracks = tracker.update(detections)  # list[TrackedObject]
+for event in counter.update(tracks):
+    if event.event_type == EventType.ENTRY:
+        occupancy += 1
+    elif event.event_type == EventType.EXIT:
+        occupancy -= 1
 ```
 
-Before starting Module 4, decide:
-- Line geometry representation (two endpoints + direction vector) and coordinate
-  space (downscaled frame from Module 1 vs native resolution).
-- Whether to use `supervision.LineZone` / `LineZoneAnnotator` helpers now that
-  supervision is already a dependency.
+Before starting Module 5, decide:
+- In-memory counter vs. event replay from storage (Module 11 may influence this).
+- Whether "today's visitors" resets at midnight local store time or UTC.

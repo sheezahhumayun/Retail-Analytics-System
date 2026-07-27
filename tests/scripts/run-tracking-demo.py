@@ -21,7 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 SAMPLE_DATA = REPO_ROOT / "sample-data"
 OUTPUT_DIR = REPO_ROOT / "tests" / "videos"
 
-SAMPLE_VIDEOS = ["CMMentrance.mp4", "CMMstore-floor.mp4", "CMMcheckout.mp4"]
+SAMPLE_VIDEOS = ["entrance3.mp4"]
 
 BOX_COLOR = (0, 180, 255)   # BGR — orange
 TEXT_COLOR = (255, 255, 255)

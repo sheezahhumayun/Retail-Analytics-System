@@ -169,6 +169,10 @@ class Tracker:
         self._histories: dict[int, deque[PositionRecord]] = {}
         self._last_seen_frame: dict[int, int] = {}
         self._frame_index = 0
+        # Buffer positions from tracker_id=-1 frames so crossings during the
+        # confirmation window are not lost (e.g. track 0 on entrance footage).
+        self._preconfirm_chains: list[deque[PositionRecord]] = []
+        self._preconfirm_bboxes: list[tuple[float, float, float, float]] = []
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -207,20 +211,14 @@ class Tracker:
 
         outputs: list[TrackedObject] = []
         active_ids: set[int] = set()
+        used_chains: set[int] = set()
 
         for i in range(len(tracked)):
             track_id = int(tracked.tracker_id[i])
-            if track_id < 0:
-                continue
-
-            active_ids.add(track_id)
-            self._last_seen_frame[track_id] = self._frame_index
-
             bbox = tuple(float(v) for v in tracked.xyxy[i])
             confidence = float(tracked.confidence[i])
             class_id = int(tracked.class_id[i])
 
-            # Recover class_name from the best-matching filtered detection.
             meta = max(filtered, key=lambda d: _bbox_iou(d.bbox, bbox))
             class_name = meta.class_name
             timestamp = meta.timestamp if meta.timestamp else frame_timestamp
@@ -232,9 +230,22 @@ class Tracker:
             )
             record = PositionRecord(center=center, timestamp=timestamp, bbox=bbox)
 
+            if track_id < 0:
+                self._append_preconfirm(bbox, record)
+                continue
+
+            active_ids.add(track_id)
+            self._last_seen_frame[track_id] = self._frame_index
+
             history = self._histories.setdefault(
                 track_id, deque(maxlen=self._history_length)
             )
+            if len(history) == 0:
+                chain_idx = self._match_preconfirm_chain(bbox, used_chains)
+                if chain_idx is not None:
+                    used_chains.add(chain_idx)
+                    for rec in self._preconfirm_chains[chain_idx]:
+                        history.append(rec)
             history.append(record)
 
             outputs.append(
@@ -250,6 +261,7 @@ class Tracker:
                 )
             )
 
+        self._prune_preconfirm_chains()
         self._prune_stale_histories(active_ids)
         return outputs
 
@@ -258,6 +270,8 @@ class Tracker:
         self._byte_tracker.reset()
         self._histories.clear()
         self._last_seen_frame.clear()
+        self._preconfirm_chains.clear()
+        self._preconfirm_bboxes.clear()
         self._frame_index = 0
 
     # ------------------------------------------------------------------ #
@@ -291,6 +305,57 @@ class Tracker:
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
+    _PRECONFIRM_IOU = 0.25
+    _PRECONFIRM_MAX_CHAINS = 32
+
+    def _append_preconfirm(
+        self,
+        bbox: tuple[float, float, float, float],
+        record: PositionRecord,
+    ) -> None:
+        best_idx = -1
+        best_iou = 0.0
+        for idx, last_bbox in enumerate(self._preconfirm_bboxes):
+            iou = _bbox_iou(bbox, last_bbox)
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = idx
+        if best_iou >= self._PRECONFIRM_IOU and best_idx >= 0:
+            self._preconfirm_chains[best_idx].append(record)
+            self._preconfirm_bboxes[best_idx] = bbox
+            return
+        if len(self._preconfirm_chains) >= self._PRECONFIRM_MAX_CHAINS:
+            self._preconfirm_chains.pop(0)
+            self._preconfirm_bboxes.pop(0)
+        self._preconfirm_chains.append(deque([record], maxlen=self._history_length))
+        self._preconfirm_bboxes.append(bbox)
+
+    def _match_preconfirm_chain(
+        self,
+        bbox: tuple[float, float, float, float],
+        used: set[int],
+    ) -> int | None:
+        best_idx = None
+        best_iou = 0.0
+        for idx, last_bbox in enumerate(self._preconfirm_bboxes):
+            if idx in used:
+                continue
+            iou = _bbox_iou(bbox, last_bbox)
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = idx
+        if best_idx is not None and best_iou >= self._PRECONFIRM_IOU:
+            return best_idx
+        return None
+
+    def _prune_preconfirm_chains(self) -> None:
+        max_chains = self._byte_tracker.minimum_consecutive_frames + 2
+        if len(self._preconfirm_chains) <= max_chains:
+            return
+        drop = len(self._preconfirm_chains) - max_chains
+        del self._preconfirm_chains[:drop]
+        del self._preconfirm_bboxes[:drop]
+
     def _prune_stale_histories(self, active_ids: set[int] | None = None) -> None:
         """Drop position buffers for tracks gone longer than ``track_buffer`` frames."""
         active_ids = active_ids or set()

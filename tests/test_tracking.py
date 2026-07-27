@@ -165,8 +165,8 @@ class TestTrackerSynthetic:
         for i in range(6):
             tracks = tracker.update([_moving_detection(i)])
         assert len(tracks) == 1
-        # Frame 0 is unconfirmed; frames 1–5 produce history entries.
-        assert len(tracks[0].position_history) == 5
+        # Frame 0 unconfirmed; frames 1–5 confirmed (may include one pre-confirm point).
+        assert len(tracks[0].position_history) >= 5
         assert tracks[0].position_history[-1].timestamp == 5.0
 
     def test_history_capped_at_maxlen(self):
@@ -204,6 +204,26 @@ class TestTrackerSynthetic:
 
     def test_default_confirmation_is_two_frames(self):
         assert DEFAULT_MIN_CONFIRMATION_FRAMES == 2
+
+    def test_preconfirm_history_merged_on_first_confirmed_frame(self):
+        """Positions from tracker_id=-1 frames are kept when the ID appears."""
+        from collections import deque
+
+        from inference.tracking import PositionRecord
+
+        tracker = Tracker(min_confirmation_frames=2)
+        bbox1 = (40.0, 100.0, 60.0, 150.0)
+        bbox2 = (41.0, 102.0, 61.0, 152.0)
+        rec1 = PositionRecord((50.0, 125.0), 1.0, bbox1)
+        rec2 = PositionRecord((50.0, 127.0), 2.0, bbox2)
+        tracker._append_preconfirm(bbox1, rec1)
+        idx = tracker._match_preconfirm_chain(bbox2, set())
+        assert idx == 0
+        history = tracker._histories.setdefault(0, deque(maxlen=30))
+        for rec in tracker._preconfirm_chains[idx]:
+            history.append(rec)
+        history.append(rec2)
+        assert len(history) == 2
 
 
 # --------------------------------------------------------------------------- #

@@ -52,6 +52,10 @@ def pytest_configure(config):
         "markers",
         "tracking: real-inference tracking tests (loads model weights, slower)",
     )
+    config.addinivalue_line(
+        "markers",
+        "counting: detect+track+count integration tests (loads model weights)",
+    )
 
 # ---- Fixtures -------------------------------------------------------------- #
 @pytest.fixture(scope="session")
