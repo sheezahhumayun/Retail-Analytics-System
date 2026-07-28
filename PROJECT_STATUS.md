@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-28 (Module 8 heatmap generation)
+**Last updated:** 2026-07-28 (Module 10 event bus; `shop.mp4` zone hysteresis note)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -19,7 +19,7 @@
 | 7 | Dwell-Time Analytics | ✅ Done |
 | 8 | Heatmap Generation | ✅ Done |
 | 9 | Queue Analytics | ✅ Done |
-| 10 | Event Architecture & Analytics Engine | ⬜ Not started |
+| 10 | Event Architecture & Analytics Engine | ✅ Complete |
 | 11 | Database & Event Storage | ⬜ Not started |
 | 12 | Backend REST API | ⬜ Not started |
 | 13 | Frontend Web Dashboard | ⬜ Not started |
@@ -662,6 +662,28 @@ ENTER/EXIT transitions fired correctly:
 Use `--transitions-only` on the demo to inspect per-track ENTER/EXIT timelines
 instead of the first 20 PRESENCE events.
 
+### Tuning note — `shop.mp4` / `floor_main` (manual verification)
+
+`run-zones-demo.py` on `shop.mp4` + `tests/videos/shop_zones.json` reported
+**4 ENTER↔EXIT flapping pairs within &lt;1s** (tracks 1 and 2 showed sub-second
+"visits"). Likely **polygon boundary jitter** — foot-points straddling the
+`floor_main` edge at the default `hysteresis_frames=2`, not real floor visits.
+
+**Mitigation:** re-run with higher hysteresis as the demo suggests:
+
+```powershell
+python tests/scripts/run-zones-demo.py sample-data/shop.mp4 --camera-id shop `
+  --zone-config tests/videos/shop_zones.json --transitions-only `
+  --hysteresis-frames 3
+# or --hysteresis-frames 4 if flapping persists
+```
+
+Also consider redrawing `floor_main` **inset** from the frame edge so tracks
+don't graze the polygon boundary. `run-zones-demo.py` exposes
+`--hysteresis-frames`; dwell/queue/events demos currently hardcode `2` in
+`ZoneDetector` — tune on zones-demo first, then mirror the value in those
+scripts if flapping affects downstream metrics.
+
 ### Decisions made
 
 - **Foot-point (100% bbox height)** for zone tests — PRD §14 specifies foot-
@@ -927,4 +949,44 @@ length and deriving wait-time estimates from historical dwell.
 
 ---
 
-## Next Up: Module 10 — Analytics Engine / Event Bus
+---
+
+## Module 10 — Event Architecture & Analytics Engine ✅
+
+**PRD:** §27 (event types), §28 (pipeline diagram — Analytics Engine seam)
+
+### What was built
+
+1. **`analytics/events/`** — canonical event schema and bus:
+   - `types.py` — `AnalyticsEvent` (Pydantic), `AnalyticsEventType` enum
+   - `bus.py` — in-process `EventBus` (`queue.Queue` + sync subscribers)
+   - `adapters.py` — convert module events → `AnalyticsEvent`
+   - `engine.py` — `AnalyticsEngine` (single metric consumer)
+   - `publisher.py` — `PersonDetectionSampler` (sampled `PERSON_DETECTED`)
+
+2. **Producers refactored to emit on the bus:**
+   - `LineCounter` — optional `event_bus` → `ENTRY` / `EXIT`
+   - `RTSPVideoSource` — optional `event_bus` + `camera_id` → `CAMERA_OFFLINE` on reconnect exhaustion
+   - Zone / dwell / queue thresholds published by `AnalyticsEngine.process_zone_event`
+
+3. **Analytics Engine** reuses Modules 5–9 aggregation logic internally but is the
+   only component demos/API should read metrics from.
+
+### ✅ Test Checkpoint 10
+
+- [x] Unit tests green (`pytest tests/test_events.py`)
+- [x] Engine occupancy/zone/dwell/queue numbers match direct module trackers
+- [x] `CAMERA_OFFLINE` fires when RTSP reconnect exhausts retries (unit test)
+- [ ] Full pipeline demo on file: `run-events-demo.py` on `shop.mp4` + line/zone configs
+- [ ] **Live camera full pipeline (pending — manual verification later):**
+      `run-events-demo.py rtsp://… --camera-id shop-cam --line-config tests/videos/shop_line.json --zone-config tests/videos/shop_zones.json --duration 0 --log-events`
+      — confirm all event types on bus and metrics match file-based runs
+- [ ] **Live RTSP disconnect (pending):** disconnect camera/NVR during the run
+      → confirm `CAMERA_OFFLINE` appears in event summary
+- [ ] **`shop.mp4` zone tuning:** if `run-zones-demo` reports ENTER↔EXIT
+      flapping on `floor_main`, try `--hysteresis-frames 3` or `4` before
+      trusting dwell/queue metrics (see Module 6 tuning note above)
+
+---
+
+## Next Up: Module 11 — Database / Persistence

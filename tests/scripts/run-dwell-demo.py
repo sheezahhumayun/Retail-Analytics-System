@@ -44,7 +44,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    from analytics.dwell import DwellTracker
+    from analytics.events import AnalyticsEngine, AnalyticsEngineConfig, EventBus
     from analytics.zones import ZoneConfig, ZoneDetector
     from inference.detection import create_detector
     from inference.tracking import Tracker
@@ -58,16 +58,19 @@ def main() -> int:
         thresholds = {z.zone_id: args.dwell_threshold for z in zones}
 
     duration = resolve_duration(args.source, args.duration)
-    detector = ZoneDetector(zones, hysteresis_frames=2)
-    dwell = DwellTracker(
-        zones,
-        dwell_thresholds=thresholds,
-        lost_track_timeout_seconds=args.lost_track_timeout,
+    bus = EventBus()
+    engine = AnalyticsEngine(
+        bus,
+        AnalyticsEngineConfig(
+            camera_ids=[camera_id],
+            zones=zones,
+            dwell_thresholds=thresholds,
+            lost_track_timeout_seconds=args.lost_track_timeout,
+        ),
     )
+    detector = ZoneDetector(zones, hysteresis_frames=2)
     tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
 
-    dwell_events = []
-    threshold_events = []
     last_ts = 0.0
 
     with create_detector(backend=args.backend) as det:
@@ -87,37 +90,43 @@ def main() -> int:
             last_ts = ts
             dets = det.detect(frame, camera_id=camera_id, timestamp=ts)
             for ev in detector.update(tracker.update(dets)):
-                result = dwell.process(ev)
-                if result.dwell_event:
-                    dwell_events.append(result.dwell_event)
-                if result.threshold_event:
-                    threshold_events.append(result.threshold_event)
-            dwell.close_stale_sessions(ts)
+                engine.process_zone_event(ev)
+            engine.close_stale_dwell_sessions(ts)
 
         print_processing_stats(src, target_fps=args.target_fps, last_ts=last_ts)
         src.release()
 
-    dwell.close_stale_sessions(last_ts + args.lost_track_timeout + 1.0)
+    engine.close_stale_dwell_sessions(last_ts + args.lost_track_timeout + 1.0)
 
-    print(f"\n{camera_id}: {len(dwell_events)} dwell event(s), "
+    from analytics.events import AnalyticsEventType
+
+    threshold_events = [
+        ev.to_log_dict()
+        for ev in bus.event_log
+        if ev.event_type == AnalyticsEventType.DWELL_THRESHOLD.value
+    ]
+    total_dwell = sum(
+        snap.total_dwell_events for snap in engine.dwell_snapshots().values()
+    )
+
+    print(f"\n{camera_id}: {total_dwell} dwell event(s), "
           f"{len(threshold_events)} threshold alert(s)")
     if thresholds:
         print(f"  dwell_threshold_seconds={args.dwell_threshold} (all zones)")
     print_processing_stats(src, target_fps=args.target_fps, last_ts=last_ts)
 
     print("\nSample dwell events (up to 10):")
-    for ev in dwell_events[:10]:
-        print(ev.to_dict())
-    if len(dwell_events) > 10:
-        print(f"  ... and {len(dwell_events) - 10} more")
+    for zid, snap in engine.dwell_snapshots().items():
+        if snap.total_dwell_events:
+            print(f"  {zid}: {snap.total_dwell_events} completed session(s)")
 
     if threshold_events:
-        print("\nDwell threshold alerts:")
+        print("\nDwell threshold alerts (from bus):")
         for ev in threshold_events:
-            print(ev.to_dict())
+            print(ev)
 
-    print("\nDwell aggregates:")
-    for zone_id, snap in dwell.all_snapshots().items():
+    print("\nDwell aggregates (via event bus):")
+    for zone_id, snap in engine.dwell_snapshots().items():
         print(f"  {zone_id}: {json.dumps(snap.to_dict(), indent=2)}")
 
     return 0

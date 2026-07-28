@@ -7,7 +7,7 @@
 | frontend | Next.js Dashboard |
 | backend | FastAPI REST API |
 | inference | Detection and Tracking Service |
-| analytics | Zone, Queue, Occupancy, Heatmaps |
+| analytics | Zone, Queue, Occupancy, Heatmaps, **Events / Analytics Engine** |
 | database | PostgreSQL Schema and Migrations |
 | docker | Dockerfiles and Compose |
 | tests | Test scripts and datasets |
@@ -68,6 +68,10 @@ python -m pytest tests/test_dwell.py -q
 python -m pytest tests/test_heatmaps.py -q
 python -m pytest tests/test_demo_source.py -q
 python -m pytest tests/test_queues.py -q
+
+# Module 10 — Event bus & Analytics Engine
+python -m pytest tests/test_events.py -q
+python tests/scripts/run-events-demo.py sample-data/town.mp4 --zone-config tests/videos/town_zones.json
 
 # Integration tests only (loads YOLO weights — slower)
 python -m pytest tests/ -m detection

@@ -27,6 +27,7 @@ import math
 import os
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from .base import (
     DEFAULT_LONG_SIDE,
@@ -39,6 +40,8 @@ from .base import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
+
+    from analytics.events.bus import EventBus
 
 
 # Default RTSP transport. TCP avoids the packet loss / tearing artefacts common
@@ -87,12 +90,16 @@ class RTSPVideoSource(VideoSource):
         # trying a fresh cycle. A CCTV NVR that was down may well come back, so
         # we keep retrying periodically rather than giving up permanently.
         retry_after_exhaustion: float = 60.0,
+        camera_id: str | None = None,
+        event_bus: EventBus | None = None,
         # Test seam: inject a factory returning a fake cv2.VideoCapture so the
         # reconnect state machine can be unit-tested with no network.
         _capture_factory=None,
     ) -> None:
         super().__init__(target_fps=target_fps, target_long_side=target_long_side)
         self._url = url
+        self._camera_id = camera_id or _default_camera_id(url)
+        self._event_bus = event_bus
         self._reconnect_threshold = int(reconnect_threshold)
         self._reconnect_attempts = int(reconnect_attempts)
         self._backoff_base = float(backoff_base)
@@ -108,6 +115,11 @@ class RTSPVideoSource(VideoSource):
         # Allow tests/sleep/monotonic to be overridden; production uses real time.
         self._sleep = time.sleep
         self._monotonic = time.monotonic
+        self._camera_offline_fired = False
+
+    @property
+    def camera_id(self) -> str:
+        return self._camera_id
 
     def is_live(self) -> bool:
         return True
@@ -184,13 +196,30 @@ class RTSPVideoSource(VideoSource):
             # Reopened successfully; first read will flip us to ONLINE.
             self._consecutive_failures = 0
             self._state = CameraState.PROCESSING
+            self._camera_offline_fired = False
             return True
 
         # All attempts failed. Record when this happened so the read loop can
         # kick off another cycle after ``retry_after_exhaustion`` seconds.
         self._last_reconnect_at = self._monotonic()
         self._state = CameraState.ERROR
+        self._emit_camera_offline()
         return False
+
+    def _emit_camera_offline(self) -> None:
+        if self._event_bus is None or self._camera_offline_fired:
+            return
+        from analytics.events.adapters import camera_offline_to_analytics
+
+        self._event_bus.publish(
+            camera_offline_to_analytics(
+                self._camera_id,
+                timestamp=time.time(),
+                reason="reconnect_exhausted",
+                url=self._url,
+            )
+        )
+        self._camera_offline_fired = True
 
     # ------------------------------------------------------------------ #
     # Read path
@@ -242,3 +271,8 @@ class RTSPVideoSource(VideoSource):
     def consecutive_failures(self) -> int:
         """Diagnostic: how many reads failed in a row before a reconnect."""
         return self._consecutive_failures
+
+
+def _default_camera_id(url: str) -> str:
+    host = urlparse(url).hostname or "rtsp"
+    return host.replace(".", "-")

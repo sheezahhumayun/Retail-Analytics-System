@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from inference.tracking.types import PositionRecord, TrackedObject
 
 from .geometry import is_inside, movement_crosses_line, tracking_point_from_bbox
 from .types import CountingLine, CrossingEvent, EventType
+
+if TYPE_CHECKING:
+    from analytics.events.bus import EventBus
 
 DEFAULT_LINE_MARGIN = 15.0  # px slop on counting segment at 640-scale frames
 
@@ -37,9 +41,11 @@ class LineCounter:
         line: CountingLine,
         *,
         line_margin: float = DEFAULT_LINE_MARGIN,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._line = line
         self._line_margin = float(line_margin)
+        self._event_bus = event_bus
         self._awaiting: dict[int, _Awaiting] = {}
         self._last_pair_end_idx: dict[int, int] = {}
         self._last_checked_ts: dict[int, float] = {}
@@ -140,13 +146,18 @@ class LineCounter:
         self._awaiting[track.track_id] = (
             _Awaiting.EXIT if event_type == EventType.ENTRY else _Awaiting.ENTRY
         )
-        return CrossingEvent(
+        crossing = CrossingEvent(
             camera_id=track.camera_id,
             track_id=track.track_id,
             event_type=event_type,
             timestamp=curr_rec.timestamp,
             line_name=self._line.name,
         )
+        if self._event_bus is not None:
+            from analytics.events.adapters import crossing_to_analytics
+
+            self._event_bus.publish(crossing_to_analytics(crossing))
+        return crossing
 
     def _may_emit(self, track_id: int, event_type: EventType) -> bool:
         awaiting = self._awaiting.get(track_id, _Awaiting.ANY)

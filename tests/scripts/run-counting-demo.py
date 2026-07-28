@@ -66,6 +66,7 @@ def main() -> int:
     args = parser.parse_args()
 
     from analytics.counting import CountingLine, LineCounter
+    from analytics.events import AnalyticsEngine, AnalyticsEngineConfig, EventBus
     from inference.detection import create_detector
     from inference.tracking import Tracker
 
@@ -89,7 +90,12 @@ def main() -> int:
         line = CountingLine.from_dict({**line.to_dict(), "camera_id": camera_id})
 
     duration = resolve_duration(args.source, args.duration)
-    counter = LineCounter(line)
+    bus = EventBus()
+    engine = AnalyticsEngine(
+        bus,
+        AnalyticsEngineConfig(camera_ids=[camera_id]),
+    )
+    counter = LineCounter(line, event_bus=bus)
     tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
 
     events = []
@@ -116,15 +122,9 @@ def main() -> int:
         print_processing_stats(src, target_fps=args.target_fps, last_ts=last_ts)
         src.release()
 
-    occupancy_snap = None
-    if events:
-        from analytics.occupancy import OccupancyTracker
-
-        occupancy = OccupancyTracker(camera_id)
-        for ev in events:
-            occupancy_snap = occupancy.process(ev)
-        if occupancy_snap is not None:
-            print("\nOccupancy:", occupancy_snap.to_dict())
+    occupancy_snap = engine.camera_occupancy(camera_id)
+    if occupancy_snap is not None and occupancy_snap.total_entries > 0:
+        print("\nOccupancy (via event bus):", occupancy_snap.to_dict())
 
     print(f"\n{camera_id}: {len(events)} crossing event(s)")
     for ev in events:

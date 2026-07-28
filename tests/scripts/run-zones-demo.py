@@ -81,10 +81,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    from analytics.events import AnalyticsEngine, AnalyticsEngineConfig, EventBus
     from analytics.zones import (
-        MultiZoneAnalytics,
         Zone,
-        ZoneConfig,
         ZoneDetector,
         ZoneEventType,
         detect_flapping,
@@ -115,8 +114,12 @@ def main() -> int:
         print(json.dumps({"camera_id": camera_id, "zones": [cfg]}, indent=2))
 
     duration = resolve_duration(args.source, args.duration)
+    bus = EventBus()
+    engine = AnalyticsEngine(
+        bus,
+        AnalyticsEngineConfig(camera_ids=[camera_id], zones=zones),
+    )
     detector = ZoneDetector(zones, hysteresis_frames=args.hysteresis_frames)
-    analytics = MultiZoneAnalytics(zones)
     tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
 
     events = []
@@ -142,7 +145,7 @@ def main() -> int:
             )
             for ev in detector.update(tracker.update(dets)):
                 events.append(ev)
-                analytics.process(ev)
+                engine.process_zone_event(ev)
 
         print_processing_stats(src, target_fps=args.target_fps, last_ts=last_ts)
         src.release()
@@ -191,8 +194,8 @@ def main() -> int:
     else:
         print("\nNo rapid ENTER↔EXIT flapping detected.")
 
-    print("\nZone analytics:")
-    for zone_id, snap in analytics.all_snapshots().items():
+    print("\nZone analytics (via event bus):")
+    for zone_id, snap in engine.zone_snapshots().items():
         print(f"  {zone_id}: {snap.to_dict()}")
 
     return 0

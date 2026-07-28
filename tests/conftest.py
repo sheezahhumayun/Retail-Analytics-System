@@ -76,6 +76,10 @@ def pytest_configure(config):
         "markers",
         "queues: queue analytics integration tests (loads model weights)",
     )
+    config.addinivalue_line(
+        "markers",
+        "events: event bus / analytics engine integration tests",
+    )
 
 # ---- Fixtures -------------------------------------------------------------- #
 @pytest.fixture(scope="session")

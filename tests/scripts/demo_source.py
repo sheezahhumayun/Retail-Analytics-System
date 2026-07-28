@@ -87,9 +87,9 @@ def resolve_duration(spec: str, duration: float | None) -> float | None:
     return None
 
 
-def open_source(spec: str, *, target_fps: float) -> VideoSource:
+def open_source(spec: str, *, target_fps: float, **kwargs) -> VideoSource:
     parsed = parse_source_spec(spec)
-    src = create_video_source(parsed, target_fps=target_fps)
+    src = create_video_source(parsed, target_fps=target_fps, **kwargs)
     src.open()
     return src
 
@@ -100,10 +100,13 @@ def warmup_source(
     target_fps: float,
     detector: Any | None = None,
     camera_id: str | None = None,
+    **kwargs,
 ) -> VideoSource:
     """Read one kept frame (optional detect warmup), then reopen for the main loop."""
-    parsed = parse_source_spec(spec)
-    probe = open_source(spec, target_fps=target_fps)
+    open_kwargs = dict(kwargs)
+    if is_live_source_spec(spec) and camera_id is not None:
+        open_kwargs["camera_id"] = camera_id
+    probe = open_source(spec, target_fps=target_fps, **open_kwargs)
     ok, first_frame = probe.read()
     if not ok:
         probe.release()
@@ -111,7 +114,7 @@ def warmup_source(
     if detector is not None and camera_id is not None:
         detector.detect(first_frame, camera_id=camera_id)
     probe.release()
-    return open_source(spec, target_fps=target_fps)
+    return open_source(spec, target_fps=target_fps, **open_kwargs)
 
 
 def iter_frames(

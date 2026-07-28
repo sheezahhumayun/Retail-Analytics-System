@@ -5,3 +5,4 @@ onnxruntime
 supervision
 trackers
 pytest
+pydantic>=2.0

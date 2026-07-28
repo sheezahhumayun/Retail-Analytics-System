@@ -44,7 +44,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    from analytics.queues import QueueTracker, is_queue_zone
+    from analytics.events import AnalyticsEngine, AnalyticsEngineConfig, AnalyticsEventType, EventBus
+    from analytics.queues import is_queue_zone
     from analytics.zones import ZoneConfig, ZoneDetector
     from inference.detection import create_detector
     from inference.tracking import Tracker
@@ -68,12 +69,17 @@ def main() -> int:
         duration_thresholds = {z.zone_id: args.duration_threshold for z in queue_zones}
 
     duration = resolve_duration(args.source, args.duration)
-    detector = ZoneDetector(zones, hysteresis_frames=2)
-    queues = QueueTracker(
-        queue_zones,
-        length_thresholds=length_thresholds,
-        duration_thresholds=duration_thresholds,
+    bus = EventBus()
+    engine = AnalyticsEngine(
+        bus,
+        AnalyticsEngineConfig(
+            camera_ids=[camera_id],
+            zones=queue_zones,
+            queue_length_thresholds=length_thresholds,
+            queue_duration_thresholds=duration_thresholds,
+        ),
     )
+    detector = ZoneDetector(zones, hysteresis_frames=2)
     tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
 
     threshold_events = []
@@ -96,11 +102,14 @@ def main() -> int:
             last_ts = ts
             dets = det.detect(frame, camera_id=camera_id, timestamp=ts)
             for ev in detector.update(tracker.update(dets)):
-                result = queues.process(ev)
-                threshold_events.extend(result.threshold_events)
+                engine.process_zone_event(ev)
 
         print_processing_stats(src, target_fps=args.target_fps, last_ts=last_ts)
         src.release()
+
+    threshold_events = [
+        e for e in bus.event_log if e.event_type == AnalyticsEventType.QUEUE_THRESHOLD.value
+    ]
 
     print(f"\n{camera_id}: {len(queue_zones)} queue zone(s) tracked")
     if length_thresholds:
@@ -116,14 +125,14 @@ def main() -> int:
         "the polygon are not counted (PRD §34)"
     )
 
-    print("\nQueue metrics:")
-    for zone_id, snap in queues.all_snapshots().items():
+    print("\nQueue metrics (via event bus):")
+    for zone_id, snap in engine.queue_snapshots().items():
         print(f"  {zone_id}: {json.dumps(snap.to_dict(), indent=2)}")
 
     if threshold_events:
         print(f"\nQUEUE_THRESHOLD alerts ({len(threshold_events)}):")
         for ev in threshold_events[:20]:
-            print(ev.to_dict())
+            print(ev.to_log_dict())
         if len(threshold_events) > 20:
             print(f"  ... and {len(threshold_events) - 20} more")
 
