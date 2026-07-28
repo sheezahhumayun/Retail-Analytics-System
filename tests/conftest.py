@@ -72,6 +72,10 @@ def pytest_configure(config):
         "markers",
         "heatmaps: heatmap integration tests (loads model weights)",
     )
+    config.addinivalue_line(
+        "markers",
+        "queues: queue analytics integration tests (loads model weights)",
+    )
 
 # ---- Fixtures -------------------------------------------------------------- #
 @pytest.fixture(scope="session")

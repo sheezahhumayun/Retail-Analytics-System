@@ -67,6 +67,7 @@ python -m pytest tests/test_zones.py -q
 python -m pytest tests/test_dwell.py -q
 python -m pytest tests/test_heatmaps.py -q
 python -m pytest tests/test_demo_source.py -q
+python -m pytest tests/test_queues.py -q
 
 # Integration tests only (loads YOLO weights — slower)
 python -m pytest tests/ -m detection
@@ -76,6 +77,7 @@ python -m pytest tests/ -m occupancy
 python -m pytest tests/ -m zones
 python -m pytest tests/ -m dwell
 python -m pytest tests/ -m heatmaps
+python -m pytest tests/ -m queues
 
 # Hardware-gated (opt-in; skipped by default in CI)
 python -m pytest tests/ -m webcam
@@ -127,7 +129,7 @@ python -m analytics.zones.polygon_editor sample-data/town.mp4 --camera-id town -
 python -m analytics.zones.polygon_editor sample-data/town.mp4 --camera-id town --zone-id shop_front --zone-name "Shop Front" --zone-type promotional --output tests/videos/town_zones.json
 ```
 
-`--zone-type` choices: `entrance`, `electronics`, `clothing`, `grocery`, `promotional`, `checkout`, `waiting`, `general`
+`--zone-type` choices: `entrance`, `electronics`, `clothing`, `grocery`, `promotional`, `checkout`, `waiting`, `queue`, `general`
 
 ### Manual checkpoint demos
 
@@ -224,6 +226,18 @@ python tests/scripts/run-heatmap-demo.py 0 --camera-id desk-cam --duration 60 --
 
 # File replay hour-bucket anchor (optional; live uses wall clock)
 python tests/scripts/run-heatmap-demo.py sample-data/store.mp4 --recording-start 2026-07-28T12:00:00+00:00
+```
+
+#### Module 9 — Queue analytics
+
+Requires queue zones in config (`zone_type`: `queue`, `checkout`, or `waiting`). Draw with `polygon_editor` first.
+
+```powershell
+python -m analytics.zones.polygon_editor sample-data/checkout.mp4 --camera-id checkout --zone-id lane_1 --zone-name "Lane 1" --zone-type queue --output tests/videos/checkout_zones.json
+
+python tests/scripts/run-queues-demo.py sample-data/checkout.mp4 --zone-config tests/videos/checkout_zones.json
+python tests/scripts/run-queues-demo.py sample-data/town.mp4 --zone-config tests/videos/town_zones.json --length-threshold 3 --duration-threshold 60
+python tests/scripts/run-queues-demo.py rtsp://10.0.0.5/stream --zone-config tests/videos/checkout_zones.json --camera-id checkout --duration 120 --preview
 ```
 
 ### Suggested end-to-end workflow

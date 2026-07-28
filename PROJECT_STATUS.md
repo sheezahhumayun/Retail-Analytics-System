@@ -18,7 +18,7 @@
 | 6 | Zone Management & Zone Analytics | ✅ Done |
 | 7 | Dwell-Time Analytics | ✅ Done |
 | 8 | Heatmap Generation | ✅ Done |
-| 9 | Queue Analytics | ⬜ Not started |
+| 9 | Queue Analytics | ✅ Done |
 | 10 | Event Architecture & Analytics Engine | ⬜ Not started |
 | 11 | Database & Event Storage | ⬜ Not started |
 | 12 | Backend REST API | ⬜ Not started |
@@ -864,4 +864,67 @@ First purely visual analytics output.
 
 ---
 
-## Next Up: Module 9 — Queue Analytics
+---
+
+## ✅ Module 9 — Queue Analytics — DONE
+
+Checkout/service queue metrics from Module 6 zone events (PRD §19). Queue zones
+reuse polygon geometry — the novelty is interpreting zone occupancy as queue
+length and deriving wait-time estimates from historical dwell.
+
+### What was actually done
+
+1. **`analytics/queues/` package**:
+   - `types.py` — `QueueMetricsSnapshot`, `QueueThresholdEvent` (`QUEUE_THRESHOLD`,
+     PRD §27), `is_queue_zone()`, `QUEUE_ZONE_TYPES`.
+   - `aggregates.py` — `QueueLengthAggregator` (avg/max from occupancy samples).
+   - `tracker.py` — `QueueTracker`: occupancy-based length, episode duration,
+     estimated wait from completed dwells, length/duration thresholds.
+   - `__init__.py` + `README.md` (includes PRD §34 camera placement note).
+
+2. **`ZoneType.QUEUE`** added to `analytics/zones/types.py`; `checkout` and
+   `waiting` types also qualify as queue zones.
+
+3. **Tests** — `tests/test_queues.py`, **11 passed** (10 fast + 1 gated
+   `@pytest.mark.queues`). Covers: length from enter/exit, avg/max samples,
+   estimated wait, episode duration, length/duration thresholds, integration.
+
+4. **Demo** — `tests/scripts/run-queues-demo.py` (file / RTSP / webcam).
+
+### Decisions made
+
+- **Queue zone = zone** — no parallel geometry layer; `zone_type` in
+  `{queue, checkout, waiting}` selects queue analytics.
+- **Current queue length** — `OccupancyTracker` entries−exits (Module 5/6).
+- **Estimated wait (MVP)** — average completed dwell in the queue zone;
+  documented as approximation; position-in-queue → Phase 2 (PRD §37).
+- **Queue duration** — continuous non-empty episode (length > 0).
+- **Thresholds** — mirror Module 7 dwell pattern; length resets when count
+  drops below threshold; duration resets when queue clears.
+- **Camera placement** — explicit in `analytics/queues/README.md`: queue must
+  be fully visible; out-of-frame waiters undercount by design (PRD §34).
+
+### Known limitations (MVP)
+
+1. Estimated wait is historical average dwell, not position-in-queue.
+2. No DB persistence — metrics lost on restart (Module 11).
+3. Multi-lane = multiple zones per camera; no automatic cross-lane dedup.
+4. No alert delivery UI (Module 15).
+
+### Not in scope (deferred)
+
+- Position-in-queue wait estimation → Phase 2 (PRD §37)
+- API `GET /api/analytics/queues` → Module 12
+- Dashboard queue widgets → Module 13
+
+### ✅ Test Checkpoint 9 — Ready for manual verification
+
+- [x] Unit tests green (`pytest tests/test_queues.py` → 11 passed).
+- [ ] Draw queue polygon on `checkout.mp4`; confirm length rises when people
+      stand in zone (`run-queues-demo.py`).
+- [ ] `--length-threshold` / `--duration-threshold` fire `QUEUE_THRESHOLD` once
+      per episode as expected.
+
+---
+
+## Next Up: Module 10 — Analytics Engine / Event Bus

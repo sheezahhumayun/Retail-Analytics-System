@@ -25,6 +25,7 @@ class ZoneType(str, Enum):
     PROMOTIONAL = "promotional"
     CHECKOUT = "checkout"
     WAITING = "waiting"
+    QUEUE = "queue"
     GENERAL = "general"
 
 
