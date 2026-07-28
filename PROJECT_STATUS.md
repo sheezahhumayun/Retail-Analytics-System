@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-28 (demo timestamps → wall-clock seconds)
+**Last updated:** 2026-07-28 (Module 8 heatmap generation)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -17,7 +17,7 @@
 | 5 | Occupancy Analytics | ✅ Done |
 | 6 | Zone Management & Zone Analytics | ✅ Done |
 | 7 | Dwell-Time Analytics | ✅ Done |
-| 8 | Heatmap Generation | ⬜ Not started |
+| 8 | Heatmap Generation | ✅ Done |
 | 9 | Queue Analytics | ⬜ Not started |
 | 10 | Event Architecture & Analytics Engine | ⬜ Not started |
 | 11 | Database & Event Storage | ⬜ Not started |
@@ -122,6 +122,11 @@ where the frame came from. This is the seam PRD §9 mandates.
      webcam, `rtsp(s)://`/`rtmp://` → RTSP, else → file). Downstream code never
      branches on source type.
    - `__init__.py` + `README.md` (public API + usage examples).
+   - **Authoritative timestamps (2026-07-28)** — `get_last_timestamp()` returns
+     media time for files (`source_frame_index / source_fps`) and wall clock for
+     live sources. `get_effective_fps()` reports measured throughput;
+     `get_media_duration()` on file sources. Downstream must not assume
+     `kept_count / target_fps`.
 
 2. **Tests** — `tests/test_video_source.py` + `tests/conftest.py`, **23 passed,
    1 skipped** (the live-RTSP test is gated behind an `RTSP_TEST_URL` env var
@@ -681,10 +686,9 @@ instead of the first 20 PRESENCE events.
    are not counted in avg/max/min until they exit (e.g. store2 `current_occupancy=3`
    on `town.mp4` clip end).
 2. ~~Demo timestamps use frame index as epoch seconds~~ **Fixed 2026-07-28** —
-   `run-zones-demo.py` and `run-dwell-demo.py` now stamp
-   `timestamp = frame_idx / target_fps` (default 10 fps) so dwell times and
-   thresholds are in real seconds. Live streams should still pass wall-clock
-   timestamps from the video source.
+   demos use `VideoSource.get_last_timestamp()` (source media time for files,
+   wall clock for live). `target_fps` only caps which frames are processed;
+   faster GPU throughput does not inflate dwell or zone timing.
 3. No DB persistence — counters lost on restart (Module 11).
 4. Polygon editor saves one zone at a time (merges into config); multi-zone
    batch editing → Module 16.
@@ -735,17 +739,15 @@ mostly arithmetic once Module 6 is solid.
 
 4. **Demo timestamp fix (2026-07-28)** — initial demos used `timestamp =
    frame_idx` (1 per processed frame), so a 30 s clip at 10 fps looked like
-   ~300 s and `--dwell-threshold 30` meant 30 frames (~3 s real time). Both
-   `run-dwell-demo.py` and `run-zones-demo.py` now use
-   `timestamp = frame_idx / target_fps` for wall-clock seconds.
+   ~300 s. All pipeline demos now call `src.get_last_timestamp()` after each
+   `read()` — media time from the file (`frame_index / source_fps`), not
+   `kept_count / target_fps`.
 
 ### Verified against `town.mp4` (manual run)
 
 First run used frame-index timestamps (misleading dwells up to 79 "seconds" on a
-30 s clip). After the fix, dwell values scale to real time (e.g. 79 frames →
-~7.9 s at 10 fps). End-to-end on `town.mp4` + `town_zones.json` with
-`--dwell-threshold 30` produced 14 dwell events and threshold alerts per visit
-— re-run after fix for threshold counts in real seconds.
+30 s clip). After the fix, dwell values match source media time regardless of
+processing throughput (e.g. 79 frames at 30 fps source ≈ 2.6 s media time).
 
 ### Decisions made
 
@@ -760,8 +762,9 @@ First run used frame-index timestamps (misleading dwells up to 79 "seconds" on a
   next `ZONE_ENTER`; checked on `ZONE_PRESENCE` when `dwell >= threshold`.
 - **Per-zone thresholds** via `dwell_thresholds={zone_id: seconds}` dict —
   event built now for Module 15 (Alerting); no alert UI yet.
-- **Demo timestamps = wall-clock seconds** — `frame_idx / target_fps` (default
-  10). All `dwell_seconds` and `dwell_threshold_seconds` are in real seconds.
+- **Demo timestamps = source media time** — `VideoSource.get_last_timestamp()`
+  after each kept frame. All `dwell_seconds` and `dwell_threshold_seconds` are
+  in real seconds; `target_fps` is a sampling cap only.
 
 ### Known limitations (MVP)
 
@@ -793,4 +796,72 @@ Automated tests green (`pytest tests/test_dwell.py` → 13 passed).
 
 ---
 
-## Next Up: Module 8 — Heatmap Generation
+## ✅ Module 8 — Heatmap Generation — DONE
+
+Visual heatmaps from foot-point density and trajectory paths, filterable by
+camera / date / time range, overlaid on a static reference frame (PRD §17).
+First purely visual analytics output.
+
+### What was actually done
+
+1. **`analytics/heatmaps/` package**:
+   - `types.py` — `HeatmapFrameSpec`, `HourBucketKey` (camera + local date + hour).
+   - `accumulator.py` — `HeatmapAccumulator`: foot-point density grid + trajectory
+     raster at 1/4 frame resolution (`grid_scale=4` default); frame coords map to
+     grid cells, upsampled on render for alignment.
+   - `renderer.py` — Gaussian blur → normalize 0–255 → `COLORMAP_JET` density +
+     `COLORMAP_HOT` trajectories → alpha-blend over reference BGR frame; rejects
+     reference/ spec size mismatch.
+   - `storage.py` — `HeatmapStore`: file-backed `.npz` hour buckets
+     `{root}/{camera}/{YYYY-MM-DD}/{HH}.npz`; `merge_range()` sums buckets for
+     time-window queries without reprocessing video.
+   - `engine.py` — `HeatmapEngine`: `set_reference_frame()`, `update(tracks, ts)`,
+     `flush()`, `render(start, end)`.
+   - `__init__.py` + `README.md`.
+
+2. **Tests** — `tests/test_heatmaps.py`, **11 passed** (10 fast + 1 gated
+   `@pytest.mark.heatmaps`). Covers: grid mapping, merge, save/load, time-range
+   filter produces different overlays, reference alignment, engine flush,
+   video pipeline overlay.
+
+3. **Demo script** — `tests/scripts/run-heatmap-demo.py`. File, RTSP, or webcam
+   (`0`); `--duration` for live runs; `--preview-every` for periodic overlay.
+
+### Decisions made
+
+- **Foot-point** (bbox bottom-center) for density — same as zones (Module 6);
+  centroid available on `TrackedObject` but feet are better for floor traffic.
+- **1/4 resolution grid** — cheaper accumulation; upsampled to full reference
+  size before blend so overlay aligns with no offset/scaling bug.
+- **Hour buckets on disk** — not per-frame (PRD §31); query
+  “Camera 3, Tuesday 2–4pm” = sum relevant `.npz` files.
+- **Reference frame** — static empty-store still per camera, must match processed
+  frame dimensions exactly; first demo frame used as placeholder until Module 16
+  admin capture workflow exists.
+- **UTC without tzdata** — `datetime.timezone.utc` fallback on Windows, same as
+  Module 5/7.
+
+### Known limitations (MVP)
+
+1. Reference frame = first video frame in demo (not a dedicated empty-store
+   capture workflow).
+2. File-backed buckets under `data/heatmaps/` — not DB (Module 11).
+3. Trajectory lines are rasterized into a grid (faint on render), not vector
+   paths — sufficient groundwork for Phase 2 customer flow.
+
+### Not in scope (deferred)
+
+- Customer flow analytics → Phase 2 (PRD §18)
+- Dashboard heatmap widget → **Module 13**
+- DB-backed bucket storage → **Module 11**
+
+### ✅ Test Checkpoint 8 — Ready for manual verification
+
+- [x] Overlay shape matches reference frame; size mismatch raises error (unit test).
+- [x] Lunch-hour vs full-day merge produces visibly different images (unit test).
+- [ ] Eyeball overlay alignment on real footage (`run-heatmap-demo.py`).
+- [ ] Confirm high-traffic areas match where people actually walked in sample video.
+
+---
+
+## Next Up: Module 9 — Queue Analytics

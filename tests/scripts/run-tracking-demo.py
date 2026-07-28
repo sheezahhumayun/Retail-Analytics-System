@@ -1,11 +1,12 @@
-"""Test Checkpoint 3 deliverable — annotated tracking videos.
+"""Test Checkpoint 3 — annotated tracking (file / RTSP / webcam).
 
-Runs detect + track over all 3 sample videos, draws bounding boxes + track IDs
-on each kept frame, and writes annotated mp4s to ``tests/videos/``.
+Usage::
 
-Usage:
     python tests/scripts/run-tracking-demo.py
     python tests/scripts/run-tracking-demo.py --backend onnx
+    python tests/scripts/run-tracking-demo.py sample-data/entrance3.mp4
+    python tests/scripts/run-tracking-demo.py rtsp://10.0.0.5/stream --camera-id entrance --duration 60 --preview
+    python tests/scripts/run-tracking-demo.py 0 --camera-id desk --duration 30 --preview
 """
 from __future__ import annotations
 
@@ -18,17 +19,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tests.scripts.demo_source import (
+    add_source_args,
+    iter_frames,
+    open_source,
+    resolve_camera_id,
+    resolve_duration,
+    warmup_source,
+)
+
 SAMPLE_DATA = REPO_ROOT / "sample-data"
 OUTPUT_DIR = REPO_ROOT / "tests" / "videos"
 
 SAMPLE_VIDEOS = ["entrance3.mp4"]
 
-BOX_COLOR = (0, 180, 255)   # BGR — orange
+BOX_COLOR = (0, 180, 255)
 TEXT_COLOR = (255, 255, 255)
 
 
 def annotate_frame(cv2, frame, tracks):
-    """Draw bbox + track ID on a copy of ``frame``."""
     out = frame.copy()
     for t in tracks:
         x1, y1, x2, y2 = (int(round(v)) for v in t.bbox)
@@ -52,30 +61,35 @@ def annotate_frame(cv2, frame, tracks):
     return out
 
 
-def run_one_video(video_path: Path, detector, backend: str) -> dict:
+def run_one_source(
+    source: str,
+    detector,
+    backend: str,
+    *,
+    camera_id: str | None = None,
+    target_fps: float = 10.0,
+    duration: float | None = None,
+    preview: bool = False,
+) -> dict:
     import cv2
 
     from inference.tracking import Tracker
-    from inference.video import create_video_source
 
-    camera_id = video_path.stem
-    tracker = Tracker(camera_id=camera_id)
+    cam = resolve_camera_id(source, camera_id)
+    tracker = Tracker(camera_id=cam)
 
-    src = create_video_source(str(video_path), target_fps=10)
-    src.open()
-
-    ok, first_frame = src.read()
+    probe = open_source(source, target_fps=target_fps)
+    ok, first_frame = probe.read()
     if not ok:
-        src.release()
-        raise RuntimeError(f"Could not read a frame from {video_path}")
-
+        probe.release()
+        raise RuntimeError(f"Could not read a frame from {source!r}")
     h, w = first_frame.shape[:2]
-    out_path = OUTPUT_DIR / f"tracking_{camera_id}_{backend}.mp4"
+    probe.release()
+
+    out_path = OUTPUT_DIR / f"tracking_{cam}_{backend}.mp4"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
-        str(out_path),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        10.0,
-        (w, h),
+        str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), target_fps, (w, h)
     )
 
     frame_count = 0
@@ -88,7 +102,7 @@ def run_one_video(video_path: Path, detector, backend: str) -> dict:
     def process_frame(frame, ts: float):
         nonlocal frame_count, track_frame_count, total_tracks
         t0 = time.perf_counter()
-        dets = detector.detect(frame, camera_id=camera_id, timestamp=ts)
+        dets = detector.detect(frame, camera_id=cam, timestamp=ts)
         infer_times.append(time.perf_counter() - t0)
 
         t1 = time.perf_counter()
@@ -101,15 +115,26 @@ def run_one_video(video_path: Path, detector, backend: str) -> dict:
             total_tracks += len(tracks)
             unique_ids.update(t.track_id for t in tracks)
 
-        writer.write(annotate_frame(cv2, frame, tracks))
+        annotated = annotate_frame(cv2, frame, tracks)
+        writer.write(annotated)
+        return annotated
 
-    process_frame(first_frame, time.time())
+    src = warmup_source(
+        source,
+        target_fps=target_fps,
+        detector=detector,
+        camera_id=cam,
+    )
 
-    while True:
-        ok, frame = src.read()
-        if not ok:
-            break
-        process_frame(frame, time.time())
+    for frame, ts in iter_frames(src, duration=duration, preview=False):
+        annotated = process_frame(frame, ts)
+        if preview:
+            cv2.imshow("tracking", annotated)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
+    if preview:
+        cv2.destroyWindow("tracking")
 
     src.release()
     writer.release()
@@ -118,7 +143,7 @@ def run_one_video(video_path: Path, detector, backend: str) -> dict:
     track_fps = frame_count / sum(track_times) if track_times else 0.0
 
     return {
-        "video": video_path.name,
+        "video": source,
         "backend": backend,
         "frames": frame_count,
         "frames_with_tracks": track_frame_count,
@@ -131,12 +156,25 @@ def run_one_video(video_path: Path, detector, backend: str) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Tracking demo over sample videos")
+    parser = argparse.ArgumentParser(description="Tracking demo")
     parser.add_argument(
-        "--backend",
-        choices=["ultralytics", "onnx"],
-        default="ultralytics",
-        help="Detection backend (tracking is backend-agnostic)",
+        "source",
+        nargs="?",
+        help="Optional: video file, rtsp:// URL, or webcam index. Omit to run bundled samples.",
+    )
+    parser.add_argument("--backend", choices=["ultralytics", "onnx"], default="ultralytics")
+    parser.add_argument("--camera-id", help="Camera id (default: derived from source)")
+    parser.add_argument("--target-fps", type=float, default=10.0)
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        help="Wall-clock seconds (live/webcam default 120; 0 = until Ctrl+C)",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Show annotated frames in an OpenCV window (press q to stop early)",
     )
     args = parser.parse_args()
 
@@ -145,7 +183,6 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     with create_detector(backend=args.backend) as detector:
-        # Warmup — same rationale as detection demo.
         import cv2
 
         cap = cv2.VideoCapture(str(SAMPLE_DATA / SAMPLE_VIDEOS[0]))
@@ -154,6 +191,27 @@ def main() -> int:
         if ok:
             detector.detect(warmup_frame, camera_id="warmup")
 
+        if args.source:
+            duration = resolve_duration(args.source, args.duration)
+            print(f"Processing {args.source}...")
+            stats = run_one_source(
+                args.source,
+                detector,
+                args.backend,
+                camera_id=args.camera_id,
+                target_fps=args.target_fps,
+                duration=duration,
+                preview=args.preview,
+            )
+            print(
+                f"  {stats['frames']} frames, "
+                f"{stats['unique_track_ids']} unique IDs, "
+                f"infer {stats['infer_fps']:.1f} fps, "
+                f"track {stats['track_fps']:.0f} fps"
+            )
+            print(f"  -> {stats['output']}")
+            return 0
+
         results = []
         for name in SAMPLE_VIDEOS:
             path = SAMPLE_DATA / name
@@ -161,7 +219,12 @@ def main() -> int:
                 print(f"SKIP {name} — not found")
                 continue
             print(f"Processing {name}...")
-            stats = run_one_video(path, detector, args.backend)
+            stats = run_one_source(
+                str(path),
+                detector,
+                args.backend,
+                target_fps=args.target_fps,
+            )
             results.append(stats)
             print(
                 f"  {stats['frames']} frames, "

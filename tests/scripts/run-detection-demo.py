@@ -14,8 +14,10 @@ Runtime's first-call kernel-autotune/session-warmup cost doesn't land inside
 whichever video happens to run first (it used to skew entrance.mp4 low).
 
 Usage:
-    python tests/scripts/run_detection_demo.py --backend ultralytics
-    python tests/scripts/run_detection_demo.py --backend onnx
+    python tests/scripts/run-detection-demo.py --backend ultralytics
+    python tests/scripts/run-detection-demo.py sample-data/entrance.mp4
+    python tests/scripts/run-detection-demo.py rtsp://10.0.0.5/stream --camera-id entrance --duration 60 --preview
+    python tests/scripts/run-detection-demo.py 0 --camera-id desk --duration 30 --preview
 """
 from __future__ import annotations
 
@@ -61,57 +63,81 @@ def annotate_frame(cv2, frame, detections):
     return out
 
 
-def run_one_video(video_path: Path, detector, backend: str) -> dict:
-    """Run detection over one video, write annotated mp4, return stats.
-
-    Assumes the detector has already been warmed up (see main()) so no
-    first-call kernel-autotune cost lands inside this video's timing.
-    """
+def run_one_source(
+    source: str,
+    detector,
+    backend: str,
+    *,
+    camera_id: str | None = None,
+    target_fps: float = 10.0,
+    duration: float | None = None,
+    preview: bool = False,
+) -> dict:
+    """Run detection over one source, write annotated mp4, return stats."""
     import cv2
 
-    from inference.video import create_video_source
-
-    src = create_video_source(str(video_path), target_fps=10)
-    src.open()
-
-    ok, first_frame = src.read()
-    if not ok:
-        src.release()
-        raise RuntimeError(f"Could not read a frame from {video_path}")
-
-    h, w = first_frame.shape[:2]
-    out_path = OUTPUT_DIR / f"{video_path.stem}_annotated.mp4"
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    writer = cv2.VideoWriter(
-        str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (w, h)
+    from tests.scripts.demo_source import (
+        iter_frames,
+        open_source,
+        resolve_camera_id,
+        warmup_source,
     )
 
-    frame = first_frame
+    cam = resolve_camera_id(source, camera_id)
+
+    probe = open_source(source, target_fps=target_fps)
+    ok, first_frame = probe.read()
+    if not ok:
+        probe.release()
+        raise RuntimeError(f"Could not read a frame from {source!r}")
+
+    h, w = first_frame.shape[:2]
+    probe.release()
+
+    out_path = OUTPUT_DIR / f"{cam}_annotated.mp4"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), target_fps, (w, h)
+    )
+
     frame_count = 0
     total_detections = 0
     busiest_frame_idx = 0
+    busiest_media_time_s = 0.0
     busiest_frame_count = -1
 
-    infer_time = 0.0                          # detect() calls only
-    pipeline_t_start = time.perf_counter()    # detect() + draw + encode
+    infer_time = 0.0
+    pipeline_t_start = time.perf_counter()
 
-    while True:
+    src = warmup_source(
+        source,
+        target_fps=target_fps,
+        detector=detector,
+        camera_id=cam,
+    )
+
+    for frame, media_ts in iter_frames(src, duration=duration, preview=False):
         t0 = time.perf_counter()
-        detections = detector.detect(frame, camera_id=video_path.stem)
+        detections = detector.detect(frame, camera_id=cam, timestamp=media_ts)
         infer_time += time.perf_counter() - t0
 
         total_detections += len(detections)
         if len(detections) > busiest_frame_count:
             busiest_frame_count = len(detections)
             busiest_frame_idx = frame_count
+            busiest_media_time_s = media_ts
 
         annotated = annotate_frame(cv2, frame, detections)
         writer.write(annotated)
-
         frame_count += 1
-        ok, frame = src.read()
-        if not ok:
-            break
+
+        if preview:
+            cv2.imshow("detection", annotated)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
+    if preview:
+        cv2.destroyWindow("detection")
 
     pipeline_elapsed = time.perf_counter() - pipeline_t_start
     writer.release()
@@ -121,7 +147,7 @@ def run_one_video(video_path: Path, detector, backend: str) -> dict:
     pipeline_fps = frame_count / pipeline_elapsed if pipeline_elapsed > 0 else 0.0
 
     return {
-        "video": video_path.name,
+        "video": Path(source).name if not source.startswith("rtsp") else source,
         "backend": backend,
         "frames": frame_count,
         "infer_time_s": infer_time,
@@ -131,9 +157,14 @@ def run_one_video(video_path: Path, detector, backend: str) -> dict:
         "total_detections": total_detections,
         "avg_detections_per_frame": total_detections / frame_count if frame_count else 0,
         "busiest_frame_idx": busiest_frame_idx,
+        "busiest_media_time_s": busiest_media_time_s,
         "busiest_frame_count": busiest_frame_count,
         "output_path": out_path,
     }
+
+
+def run_one_video(video_path: Path, detector, backend: str) -> dict:
+    return run_one_source(str(video_path), detector, backend)
 
 
 def warm_up(detector) -> None:
@@ -154,16 +185,42 @@ def warm_up(detector) -> None:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "source",
+        nargs="?",
+        help="Optional: video file, rtsp:// URL, or webcam index. Omit to run bundled samples.",
+    )
+    parser.add_argument(
         "--backend",
         choices=["ultralytics", "onnx"],
         default="ultralytics",
         help="Detection backend to benchmark (default: ultralytics)",
     )
+    parser.add_argument("--camera-id", help="Camera id (default: derived from source)")
+    parser.add_argument("--target-fps", type=float, default=10.0)
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        help="Wall-clock seconds (live/webcam default 120; 0 = until Ctrl+C)",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Show annotated frames in an OpenCV window (press q to stop early)",
+    )
     args = parser.parse_args()
 
     from inference.detection import create_detector
+    from tests.scripts.demo_source import resolve_duration
 
-    if not SAMPLE_DATA.is_dir():
+    if args.source:
+        if not args.source.isdigit() and not args.source.lower().startswith(
+            ("rtsp://", "rtsps://", "rtmp://")
+        ):
+            if not Path(args.source).exists():
+                print(f"ERROR: source not found: {args.source}")
+                sys.exit(1)
+    elif not SAMPLE_DATA.is_dir():
         print(f"ERROR: sample data directory not found at {SAMPLE_DATA}")
         sys.exit(1)
 
@@ -175,24 +232,45 @@ def main():
 
     results = []
     try:
-        for name in SAMPLE_VIDEOS:
-            video_path = SAMPLE_DATA / name
-            if not video_path.exists():
-                print(f"  skipping {name} (not found)")
-                continue
-            print(f"Processing {name}...")
-            stats = run_one_video(video_path, detector, args.backend)
+        if args.source:
+            duration = resolve_duration(args.source, args.duration)
+            print(f"Processing {args.source}...")
+            stats = run_one_source(
+                args.source,
+                detector,
+                args.backend,
+                camera_id=args.camera_id,
+                target_fps=args.target_fps,
+                duration=duration,
+                preview=args.preview,
+            )
             results.append(stats)
             print(
                 f"  {stats['frames']} frames | "
                 f"infer: {stats['infer_fps']:.1f} FPS "
                 f"({stats['infer_time_s']:.1f}s) | "
-                f"full pipeline (detect+draw+encode): "
-                f"{stats['pipeline_fps']:.1f} FPS "
-                f"({stats['pipeline_elapsed_s']:.1f}s) | "
-                f"{stats['total_detections']} total detections "
-                f"(avg {stats['avg_detections_per_frame']:.1f}/frame)"
+                f"full pipeline: {stats['pipeline_fps']:.1f} FPS | "
+                f"{stats['total_detections']} total detections"
             )
+        else:
+            for name in SAMPLE_VIDEOS:
+                video_path = SAMPLE_DATA / name
+                if not video_path.exists():
+                    print(f"  skipping {name} (not found)")
+                    continue
+                print(f"Processing {name}...")
+                stats = run_one_video(video_path, detector, args.backend)
+                results.append(stats)
+                print(
+                    f"  {stats['frames']} frames | "
+                    f"infer: {stats['infer_fps']:.1f} FPS "
+                    f"({stats['infer_time_s']:.1f}s) | "
+                    f"full pipeline (detect+draw+encode): "
+                    f"{stats['pipeline_fps']:.1f} FPS "
+                    f"({stats['pipeline_elapsed_s']:.1f}s) | "
+                    f"{stats['total_detections']} total detections "
+                    f"(avg {stats['avg_detections_per_frame']:.1f}/frame)"
+                )
     finally:
         detector.release()
 
@@ -219,11 +297,11 @@ def main():
     print(f"Baseline log: {BASELINE_LOG}")
     print("\nAnnotated videos to review:")
     for r in results:
-        busiest_time_s = r["busiest_frame_idx"] / 10.0  # target_fps=10
+        busiest_time_s = r["busiest_media_time_s"]
         print(
             f"  {r['output_path']}\n"
-            f"    -> check ~frame {r['busiest_frame_idx']} "
-            f"(~{busiest_time_s:.1f}s in, busiest at {r['busiest_frame_count']} people) "
+            f"    -> check kept frame {r['busiest_frame_idx']} "
+            f"(media t={busiest_time_s:.1f}s, busiest at {r['busiest_frame_count']} people) "
             f"for box tracking quality"
         )
     print(

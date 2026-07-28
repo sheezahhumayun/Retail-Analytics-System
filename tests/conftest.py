@@ -68,6 +68,10 @@ def pytest_configure(config):
         "markers",
         "dwell: dwell-time integration tests",
     )
+    config.addinivalue_line(
+        "markers",
+        "heatmaps: heatmap integration tests (loads model weights)",
+    )
 
 # ---- Fixtures -------------------------------------------------------------- #
 @pytest.fixture(scope="session")

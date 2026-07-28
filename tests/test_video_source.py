@@ -111,6 +111,46 @@ def test_throttle_keeps_every_third_frame_at_30fps_target_10(sample_videos):
         src.release()
 
 
+def test_timestamps_follow_source_media_time(sample_videos):
+    """Kept-frame timestamps use source frame index / source fps, not target fps."""
+    src = FileVideoSource(sample_videos[0], target_fps=10.0)
+    src.open()
+    try:
+        source_fps = src.get_fps()
+        timestamps: list[float] = []
+        for _ in range(5):
+            ok, _ = src.read()
+            assert ok
+            timestamps.append(src.get_last_timestamp())
+        # Media time advances by interval/source_fps between kept frames.
+        interval = compute_frame_interval(source_fps, 10.0)
+        expected_delta = interval / source_fps
+        deltas = [b - a for a, b in zip(timestamps, timestamps[1:])]
+        for d in deltas:
+            assert abs(d - expected_delta) < 0.05, (d, expected_delta)
+        assert src.get_kept_frame_count() == 5
+    finally:
+        src.release()
+
+
+def test_media_duration_from_file_metadata(sample_videos):
+    src = FileVideoSource(sample_videos[0])
+    src.open()
+    try:
+        dur = src.get_media_duration()
+        assert dur is not None and dur > 0
+        # Last timestamp after full read should not exceed duration by much.
+        last_ts = 0.0
+        while True:
+            ok, _ = src.read()
+            if not ok:
+                break
+            last_ts = src.get_last_timestamp()
+        assert last_ts <= dur + 0.5
+    finally:
+        src.release()
+
+
 def test_throttle_interval_helper_guards_bad_fps():
     # Bad source fps -> falls back to 30, so 30/10 == 3.
     assert compute_frame_interval(0.0, 10.0) == 3

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import abc
 import math
+import time
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -107,8 +108,10 @@ class VideoSource(abc.ABC):
       *not* raise on transient drops — real CCTV/NVR streams drop intermittently
       and that is normal operation, not an exceptional condition (PRD §8 "Error"
       state is surfaced via :meth:`get_state`, not exceptions).
-    * Throttling and downscaling are applied inside ``read()``; callers always
-      see the post-process frame at the target rate.
+    * Each successful kept frame updates :meth:`get_last_timestamp` — **media
+      time** (seconds from file start) for recordings, **wall-clock** for live
+      sources. Downstream analytics must use this instead of assuming
+      ``frame_index / target_fps``.
     """
 
     def __init__(
@@ -122,6 +125,9 @@ class VideoSource(abc.ABC):
         # Counts *every* underlying frame grab, kept or skipped. Used by the
         # throttle loop and exposed for diagnostics/tests.
         self._frame_index: int = 0
+        self._kept_frame_count: int = 0
+        self._last_timestamp: float = 0.0
+        self._wall_start: float | None = None
         self._source_fps: float = DEFAULT_SOURCE_FPS_FALLBACK
         self._source_resolution: tuple[int, int] = (0, 0)  # native (w, h)
         self._opened: bool = False
@@ -158,6 +164,10 @@ class VideoSource(abc.ABC):
         if self._state is CameraState.DISABLED:
             raise VideoSourceError("Cannot open a disabled video source")
         self._state = CameraState.PROCESSING
+        self._frame_index = 0
+        self._kept_frame_count = 0
+        self._last_timestamp = 0.0
+        self._wall_start = None
         try:
             self._open_capture()
         except VideoSourceError:
@@ -202,10 +212,52 @@ class VideoSource(abc.ABC):
             if keep:
                 # Mark ONLINE once we've actually produced a frame.
                 self._state = CameraState.ONLINE
+                if self._wall_start is None:
+                    self._wall_start = time.perf_counter()
+                self._kept_frame_count += 1
+                self._last_timestamp = self._compute_timestamp()
                 if frame is not None and self._target_long_side > 0:
                     frame = resize_long_side(frame, self._target_long_side)
                 return True, frame
             # else: this was a skipped frame; loop and grab the next.
+
+    def _compute_timestamp(self) -> float:
+        """Seconds for the current kept frame — media time (files) or wall clock (live)."""
+        if self.is_live():
+            return time.time()
+        fps = self._source_fps
+        if not math.isfinite(fps) or fps <= 0:
+            fps = DEFAULT_SOURCE_FPS_FALLBACK
+        return self._frame_index / fps
+
+    def get_last_timestamp(self) -> float:
+        """Timestamp of the most recent kept frame (see :meth:`_compute_timestamp`)."""
+        return self._last_timestamp
+
+    def get_kept_frame_count(self) -> int:
+        """Number of frames returned by :meth:`read` since :meth:`open`."""
+        return self._kept_frame_count
+
+    def get_source_frame_index(self) -> int:
+        """Underlying source frame counter (includes skipped/throttled frames)."""
+        return self._frame_index
+
+    def get_target_fps(self) -> float:
+        """Configured processing rate cap — not necessarily achieved wall-clock."""
+        return self._target_fps
+
+    def get_effective_fps(self) -> float:
+        """Measured kept-frame rate since the first kept frame (wall-clock)."""
+        if self._wall_start is None or self._kept_frame_count < 1:
+            return 0.0
+        elapsed = time.perf_counter() - self._wall_start
+        if elapsed <= 0:
+            return 0.0
+        return self._kept_frame_count / elapsed
+
+    def get_media_duration(self) -> float | None:
+        """Total media length in seconds (file sources only); ``None`` if unknown."""
+        return None
 
     def get_fps(self) -> float:
         """Native source FPS (post-open). Falls back to 30.0 if unreported."""

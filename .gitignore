@@ -27,6 +27,9 @@ inference/models/
 tests/videos/*
 !tests/videos/.gitkeep
 
+# Heatmap hour-bucket accumulators (Module 8)
+data/heatmaps/
+
 # OS
 .DS_Store
 Thumbs.db

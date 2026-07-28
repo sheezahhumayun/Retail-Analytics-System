@@ -1,16 +1,10 @@
-"""Test Checkpoint 6 — detect + track + zone analytics over a sample video.
-
-Loads a zone config JSON (draw polygons with ``polygon_editor`` first) or uses
-a built-in default zone for quick smoke runs.
+"""Test Checkpoint 6 — detect + track + zone analytics (file / RTSP / webcam).
 
 Usage (PowerShell)::
 
     python tests/scripts/run-zones-demo.py sample-data/store-floor.mp4
-    python tests/scripts/run-zones-demo.py sample-data/town.mp4 --zone-config tests/videos/town_zones.json
-
-Verify ENTER/EXIT transitions (not drowned in PRESENCE noise)::
-
     python tests/scripts/run-zones-demo.py sample-data/town.mp4 --zone-config tests/videos/town_zones.json --transitions-only
+    python tests/scripts/run-zones-demo.py rtsp://10.0.0.5/stream --camera-id entrance --zone-config tests/videos/entrance_zones.json --duration 120
 """
 from __future__ import annotations
 
@@ -22,6 +16,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from tests.scripts.demo_source import (
+    add_source_args,
+    iter_frames,
+    print_processing_stats,
+    resolve_camera_id,
+    resolve_duration,
+    warmup_source,
+)
 
 DEFAULT_ZONE_CONFIG = REPO_ROOT / "tests" / "videos" / "store_floor_zones.json"
 
@@ -53,15 +56,10 @@ def _load_zone_config(path: Path):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Zone detection + analytics demo")
-    parser.add_argument("video", help="Video path")
+    add_source_args(parser)
     parser.add_argument(
         "--zone-config",
         help="ZoneConfig JSON (from polygon_editor); uses default if omitted",
-    )
-    parser.add_argument(
-        "--camera-id",
-        help="Camera id stamped on detections/tracks/events (default: from config "
-        "or video filename stem)",
     )
     parser.add_argument("--backend", choices=["ultralytics", "onnx"], default="ultralytics")
     parser.add_argument(
@@ -77,15 +75,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--flap-window",
-        type=int,
-        default=3,
-        help="Flag ENTER↔EXIT within this many frames as flapping (default: 3)",
-    )
-    parser.add_argument(
-        "--target-fps",
         type=float,
-        default=10.0,
-        help="Processing FPS (used for wall-clock timestamps)",
+        default=3.0,
+        help="Flag ENTER↔EXIT within this many seconds as flapping (default: 3)",
     )
     args = parser.parse_args()
 
@@ -102,60 +94,57 @@ def main() -> int:
     )
     from inference.detection import create_detector
     from inference.tracking import Tracker
-    from inference.video import create_video_source
-
-    video_path = Path(args.video)
-    stem_camera_id = video_path.stem or "cam"
 
     if args.zone_config:
         config = _load_zone_config(Path(args.zone_config))
-        camera_id = args.camera_id or config.camera_id
+        camera_id = resolve_camera_id(args.source, args.camera_id or config.camera_id)
         zones = list(config.enabled_zones)
     elif DEFAULT_ZONE_CONFIG.is_file():
         config = ZoneConfig.load_json(DEFAULT_ZONE_CONFIG)
-        camera_id = args.camera_id or stem_camera_id
+        camera_id = resolve_camera_id(args.source, args.camera_id)
         zones = [
             Zone.from_dict({**z.to_dict(), "camera_id": camera_id})
             for z in config.enabled_zones
         ]
         print(f"Using bundled zone config: {DEFAULT_ZONE_CONFIG}")
     else:
-        camera_id = args.camera_id or stem_camera_id
+        camera_id = resolve_camera_id(args.source, args.camera_id)
         cfg = {**DEFAULT_ZONE, "camera_id": camera_id}
         zones = [Zone.from_dict(cfg)]
         print("Using default zone config (draw your own with polygon_editor):")
         print(json.dumps({"camera_id": camera_id, "zones": [cfg]}, indent=2))
 
+    duration = resolve_duration(args.source, args.duration)
     detector = ZoneDetector(zones, hysteresis_frames=args.hysteresis_frames)
     analytics = MultiZoneAnalytics(zones)
     tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
 
+    events = []
+    last_ts = 0.0
+
     with create_detector(backend=args.backend) as detector_model:
-        target_fps = args.target_fps
-        src = create_video_source(str(video_path), target_fps=target_fps)
-        src.open()
+        src = warmup_source(
+            args.source,
+            target_fps=args.target_fps,
+            detector=detector_model,
+            camera_id=camera_id,
+        )
 
-        ok, frame = src.read()
-        if ok:
-            detector_model.detect(frame, camera_id=camera_id)
-            src = create_video_source(str(video_path), target_fps=target_fps)
-            src.open()
-
-        events = []
-        frame_idx = 0
-        while True:
-            ok, frame = src.read()
-            if not ok:
-                break
-            ts = frame_idx / target_fps
+        for frame, ts in iter_frames(
+            src,
+            duration=duration,
+            preview=args.preview,
+            preview_window="zones",
+        ):
+            last_ts = ts
             dets = detector_model.detect(
                 frame, camera_id=camera_id, timestamp=ts
             )
-            frame_idx += 1
             for ev in detector.update(tracker.update(dets)):
                 events.append(ev)
                 analytics.process(ev)
 
+        print_processing_stats(src, target_fps=args.target_fps, last_ts=last_ts)
         src.release()
 
     counts = event_counts(events)
@@ -168,6 +157,7 @@ def main() -> int:
         f"PRESENCE={counts.get('ZONE_PRESENCE', 0)}"
     )
     print(f"  hysteresis_frames={args.hysteresis_frames}")
+    print_processing_stats(src, target_fps=args.target_fps, last_ts=last_ts)
 
     to_print = (
         [ev for ev in events if ev.event_type != ZoneEventType.ZONE_PRESENCE]
@@ -184,16 +174,16 @@ def main() -> int:
     print("\n--- Transition timeline (ENTER/EXIT) ---")
     print(format_transition_timeline(transitions) or "(none)")
 
-    flaps = detect_flapping(transitions, max_gap_frames=args.flap_window)
+    flaps = detect_flapping(transitions, max_gap_seconds=args.flap_window)
     if flaps:
         print(f"\n⚠ Possible boundary flapping ({len(flaps)} pair(s) within "
-              f"{args.flap_window} frames):")
+              f"{args.flap_window}s):")
         for w in flaps[:10]:
             print(
                 f"  track {w.track_id} @ {w.zone_id}: "
-                f"{w.first.event_type.value} frame {w.first.frame} → "
-                f"{w.second.event_type.value} frame {w.second.frame} "
-                f"(gap={w.gap_frames})"
+                f"{w.first.event_type.value} t={w.first.time_seconds:.1f}s → "
+                f"{w.second.event_type.value} t={w.second.time_seconds:.1f}s "
+                f"(gap={w.gap_seconds:.1f}s)"
             )
         if len(flaps) > 10:
             print(f"  ... and {len(flaps) - 10} more")

@@ -395,12 +395,12 @@ class TestVerifyHelpers:
         from analytics.zones import TransitionRecord
 
         transitions = [
-            TransitionRecord(10, 10.0, "z1", "Z1", 1, ZoneEventType.ZONE_ENTER),
-            TransitionRecord(11, 11.0, "z1", "Z1", 1, ZoneEventType.ZONE_EXIT),
+            TransitionRecord(10.0, 10.0, "z1", "Z1", 1, ZoneEventType.ZONE_ENTER),
+            TransitionRecord(11.0, 11.0, "z1", "Z1", 1, ZoneEventType.ZONE_EXIT),
         ]
-        flaps = detect_flapping(transitions, max_gap_frames=3)
+        flaps = detect_flapping(transitions, max_gap_seconds=3.0)
         assert len(flaps) == 1
-        assert flaps[0].gap_frames == 1
+        assert flaps[0].gap_seconds == pytest.approx(1.0)
 
 
 @pytest.mark.zones

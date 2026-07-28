@@ -16,6 +16,12 @@ from inference.video import create_video_source, CameraState
 class VideoSource:
     def open(self) -> None
     def read(self) -> tuple[bool, np.ndarray | None]
+    def get_last_timestamp(self) -> float         # media time (files) or wall clock (live)
+    def get_kept_frame_count(self) -> int
+    def get_source_frame_index(self) -> int       # includes throttled/skipped frames
+    def get_target_fps(self) -> float             # configured cap — not necessarily achieved
+    def get_effective_fps(self) -> float          # measured wall-clock kept-frame rate
+    def get_media_duration(self) -> float | None  # file sources only
     def get_fps(self) -> float                    # native source fps
     def get_source_resolution(self) -> tuple[int, int]  # native (w, h)
     def get_resolution(self) -> tuple[int, int]   # post-downscale (what you see)
@@ -35,6 +41,8 @@ DB/UI camera management arrives in Module 16 and reads `get_state()`.
 # File — develop against local footage
 with create_video_source("sample-data/entrance.mp4") as src:
     ok, frame = src.read()   # already throttled + downscaled to 640px long side
+    if ok:
+        ts = src.get_last_timestamp()  # seconds from file start — use for all analytics
 
 # Webcam — local demo
 with create_video_source(0) as src:                 # device index
@@ -58,6 +66,12 @@ with create_video_source("rtsp://user:pass@10.0.0.5:554/stream") as src:
    reads; real CCTV/NVR streams drop intermittently and that is normal, not an
    edge case (PRD §8 "Error"/"Offline"). After a full reconnect cycle is
    exhausted, the source retries on a cooldown so a recovering NVR is picked up.
+4. **Authoritative timestamps** — after each kept `read()`, call
+   `get_last_timestamp()` for analytics. File sources use **media time**
+   (`source_frame_index / source_fps`), not `kept_count / target_fps`. Live
+   sources use wall-clock `time.time()`. `target_fps` only controls which
+   frames are processed; faster GPU throughput must not stretch dwell times or
+   hour buckets.
 
 ## Defaults
 

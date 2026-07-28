@@ -53,6 +53,7 @@ class FileVideoSource(VideoSource):
         self._path = Path(path)
         self._loop = bool(loop)
         self._cap = None  # cv2.VideoCapture, imported lazily in _open_capture
+        self._frame_count: int = 0
 
     def is_live(self) -> bool:
         return False
@@ -88,6 +89,8 @@ class FileVideoSource(VideoSource):
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self._source_resolution = (w, h)
+        fc = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self._frame_count = fc if fc > 0 else 0
 
     def _raw_read(self) -> tuple[bool, "np.ndarray | None"]:
         import cv2
@@ -113,6 +116,11 @@ class FileVideoSource(VideoSource):
             cap.release()
             self._cap = None
         super().release()
+
+    def get_media_duration(self) -> float | None:
+        if self._frame_count > 0 and self._source_fps > 0:
+            return self._frame_count / self._source_fps
+        return None
 
     @property
     def path(self) -> Path:
