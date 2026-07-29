@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-28 (Module 10 event bus; `shop.mp4` zone hysteresis note)
+**Last updated:** 2026-07-29 (Module 11 verified — Postgres on 5433, 8/8 DB tests green)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -20,7 +20,7 @@
 | 8 | Heatmap Generation | ✅ Done |
 | 9 | Queue Analytics | ✅ Done |
 | 10 | Event Architecture & Analytics Engine | ✅ Complete |
-| 11 | Database & Event Storage | ⬜ Not started |
+| 11 | Database & Event Storage | ✅ Complete |
 | 12 | Backend REST API | ⬜ Not started |
 | 13 | Frontend Web Dashboard | ⬜ Not started |
 | 14 | Reports (CSV/PDF export) | ⬜ Not started |
@@ -989,4 +989,82 @@ length and deriving wait-time estimates from historical dwell.
 
 ---
 
-## Next Up: Module 11 — Database / Persistence
+---
+
+## ✅ Module 11 — Database & Event Storage — DONE
+
+**PRD:** §31 (entities), §22 (historical analytics), §35 (retention / no raw detections)
+
+### What was built
+
+1. **`database/` package** — SQLModel schema, Alembic migrations, session helpers:
+   - `models.py` — all PRD §31 entities (`organizations` … `alerts`)
+   - `writer.py` — `AnalyticsDbWriter` subscribes to the event bus, persists raw
+     analytics events, and rolls up `visitor_metrics`, `occupancy_metrics`,
+     `zone_metrics`, `dwell_events`, `queue_metrics`, `alerts`
+   - `cleanup.py` — scheduled pruning of raw `events` rows (default 90 days)
+   - `seed.py` — demo org/store/cameras/zones + yesterday's hourly visitor pattern
+   - `alembic/versions/001_initial_schema.py` — trackable initial migration
+   - Time-range indexes: `(camera_id, timestamp)`, `(zone_id, timestamp)`,
+     `(store_id, metric_date, hour)`
+
+2. **Analytics Engine integration** — optional `db_writer` on
+   `AnalyticsEngineConfig`; dwell completions and queue samples persist even when
+   not on the bus.
+
+3. **Docker** — `docker/docker-compose.yml` with `postgres:16` on **host port 5433**
+   (avoids conflict with local PostgreSQL on 5432).
+
+4. **Demo** — `run-events-demo.py --persist-db` writes to Postgres and prints row
+   counts + "visitors by hour yesterday" query preview (Module 13 chart).
+
+5. **Tests** — `tests/test_database.py` (**8 tests**, `@pytest.mark.database`).
+
+6. **Dev ergonomics** (post-initial implementation):
+   - `.env.example` — `DATABASE_URL`, `RAW_EVENT_RETENTION_DAYS`, optional `STORE_TIMEZONE`
+   - `database/config.py` loads `.env` via `python-dotenv`
+   - Root `README.md` — Module 11 quick-start (Docker, migrate, seed, `--persist-db`)
+   - `database/writer.py` — Windows-safe timezone via `_normalize_timezone` (UTC without `tzdata`)
+   - `AnalyticsDbWriter._reload_occupancy_from_db()` — restores counters from latest `occupancy_metrics` on startup
+   - Tests use isolated ids / deltas for shared dev DB re-runs
+
+### Decisions made
+
+- **Store aggregates, not raw detections** — `PERSON_DETECTED` skipped by default.
+- **String ids** for cameras/zones match pipeline configs (`entrance`, `town`, `store1`).
+- **Raw event retention** — 90 days via `RAW_EVENT_RETENTION_DAYS`; hourly/daily
+  metric tables kept indefinitely.
+- **Occupancy time-series** — append row per ENTRY/EXIT (camera + store scope).
+- **Writer reloads occupancy** from latest `occupancy_metrics` rows on startup so
+  post-restart persistence stays consistent with historical state.
+- **Docker host port 5433** — avoids conflict with a local PostgreSQL install (e.g.
+  `postgresql-x64-18` on Windows binding 5432).
+
+### Dev environment notes
+
+- If Alembic fails with `password authentication failed for user "retail"`, another
+  Postgres is likely bound to port 5432 — use Docker on **5433** and `copy .env.example .env`.
+- Recreate container after port change: `docker compose -f docker/docker-compose.yml down && docker compose -f docker/docker-compose.yml up -d`
+- Pipeline + DB writes use `inference/.venv`; Module 12 backend will use `backend/.venv`.
+
+### ✅ Test Checkpoint 11 — Verified
+
+Requires local Postgres (`docker compose -f docker/docker-compose.yml up -d` on port **5433**).
+Copy `.env.example` → `.env` for `DATABASE_URL`.
+
+```powershell
+alembic -c database/alembic.ini upgrade head
+python -m database.seed
+python tests/scripts/run-events-demo.py sample-data/town.mp4 --camera-id town `
+  --zone-config tests/videos/town_zones.json --persist-db
+pytest tests/test_database.py -v   # 8 passed
+```
+
+- [x] Full pipeline → rows in `events`, `dwell_events`, `zone_metrics`, `occupancy_metrics`
+- [x] Kill/restart pipeline — historical data survives, new events append
+- [x] Manual SQL / `visitors_by_hour_yesterday` returns sensible numbers
+- [x] `pytest tests/test_database.py` — 8/8 passed (including occupancy reload on restart)
+
+---
+
+## Next Up: Module 12 — Backend REST API

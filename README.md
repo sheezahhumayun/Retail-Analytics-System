@@ -73,6 +73,9 @@ python -m pytest tests/test_queues.py -q
 python -m pytest tests/test_events.py -q
 python tests/scripts/run-events-demo.py sample-data/town.mp4 --zone-config tests/videos/town_zones.json
 
+# Module 11 — Database & persistence (requires Postgres via Docker)
+python -m pytest tests/test_database.py -q
+
 # Integration tests only (loads YOLO weights — slower)
 python -m pytest tests/ -m detection
 python -m pytest tests/ -m tracking
@@ -243,6 +246,30 @@ python tests/scripts/run-queues-demo.py sample-data/checkout.mp4 --zone-config t
 python tests/scripts/run-queues-demo.py sample-data/town.mp4 --zone-config tests/videos/town_zones.json --length-threshold 3 --duration-threshold 60
 python tests/scripts/run-queues-demo.py rtsp://10.0.0.5/stream --zone-config tests/videos/checkout_zones.json --camera-id checkout --duration 120 --preview
 ```
+
+#### Module 11 — Database & event storage
+
+PostgreSQL stores aggregated metrics and analytics events. Docker maps **host port 5433** (avoids conflict with a local PostgreSQL on 5432).
+
+```powershell
+# One-time setup
+copy .env.example .env
+docker compose -f docker/docker-compose.yml up -d
+pip install -r database/requirements.txt
+alembic -c database/alembic.ini upgrade head
+python -m database.seed
+
+# Run pipeline with persistence
+python tests/scripts/run-events-demo.py sample-data/town.mp4 `
+  --camera-id town --zone-config tests/videos/town_zones.json --persist-db
+
+# Verify
+pytest tests/test_database.py -v
+docker exec -it retail-analytics-postgres psql -U retail -d retail_analytics `
+  -c "SELECT hour, entries FROM visitor_metrics WHERE store_id='store_main' ORDER BY hour LIMIT 5;"
+```
+
+See `database/README.md` for schema, retention policy, and dashboard query examples.
 
 ### Suggested end-to-end workflow
 

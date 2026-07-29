@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import timezone as dt_timezone
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from analytics.counting.types import CrossingEvent, EventType
@@ -26,6 +27,9 @@ from .adapters import (
 from .bus import EventBus
 from .types import AnalyticsEvent, AnalyticsEventType
 
+if TYPE_CHECKING:
+    from database.writer import AnalyticsDbWriter
+
 
 @dataclass
 class AnalyticsEngineConfig:
@@ -40,6 +44,7 @@ class AnalyticsEngineConfig:
     queue_duration_thresholds: dict[str, float | None] | None = None
     lost_track_timeout_seconds: float = 5.0
     floor_at_zero: bool = True
+    db_writer: AnalyticsDbWriter | None = None
 
 
 class AnalyticsEngine:
@@ -93,6 +98,7 @@ class AnalyticsEngine:
             length_thresholds=config.queue_length_thresholds,
             duration_thresholds=config.queue_duration_thresholds,
         )
+        self._db_writer = config.db_writer
 
         bus.subscribe(self._on_event)
 
@@ -145,17 +151,27 @@ class AnalyticsEngine:
             self._bus.publish(
                 dwell_threshold_to_analytics(dwell_result.threshold_event)
             )
+        if dwell_result.dwell_event is not None and self._db_writer is not None:
+            self._db_writer.on_dwell_event(dwell_result.dwell_event)
 
         queue_result = self._queues.process(event)
         for threshold in queue_result.threshold_events:
             self._bus.publish(queue_threshold_to_analytics(threshold))
+        if self._db_writer is not None:
+            snap = self._queues.snapshot(event.zone_id)
+            if snap is not None:
+                self._db_writer.on_queue_sample(
+                    zone_id=event.zone_id,
+                    timestamp=event.timestamp,
+                    queue_length=snap.current_queue_length,
+                    estimated_wait=snap.estimated_wait_seconds,
+                )
 
     def close_stale_dwell_sessions(self, current_timestamp: float) -> None:
         """Close dwell sessions whose tracks were lost (call once per frame)."""
         for dwell_event in self._dwell.close_stale_sessions(current_timestamp):
-            agg = self._dwell.snapshot(dwell_event.zone_id)
-            if agg is not None:
-                pass  # aggregates updated inside DwellTracker
+            if self._db_writer is not None:
+                self._db_writer.on_dwell_event(dwell_event)
 
     def publish_crossing(self, event: CrossingEvent) -> None:
         """Publish a crossing event and let the engine aggregate occupancy."""

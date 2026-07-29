@@ -58,6 +58,16 @@ def main() -> int:
         action="store_true",
         help="Print every bus event (verbose)",
     )
+    parser.add_argument(
+        "--persist-db",
+        action="store_true",
+        help="Persist bus events and aggregates to PostgreSQL (Module 11)",
+    )
+    parser.add_argument(
+        "--store-id",
+        default="store_main",
+        help="Store id for visitor rollups when --persist-db (default: store_main)",
+    )
     args = parser.parse_args()
 
     from analytics.counting import CountingLine, LineCounter
@@ -108,14 +118,32 @@ def main() -> int:
             }
 
     bus = EventBus()
+
+    db_writer = None
+    if args.persist_db:
+        from database import AnalyticsDbWriter, DbWriterConfig, seed_reference_data
+
+        seed_reference_data()
+        db_writer = AnalyticsDbWriter(
+            DbWriterConfig(
+                store_id=args.store_id,
+                camera_store_map={camera_id: args.store_id},
+                zones=zones,
+            )
+        )
+        db_writer.subscribe(bus)
+        print(f"Database persistence enabled (store_id={args.store_id})")
+
     engine = AnalyticsEngine(
         bus,
         AnalyticsEngineConfig(
             camera_ids=[camera_id],
             zones=zones,
+            store_id=args.store_id if args.persist_db else None,
             dwell_thresholds=dwell_thresholds,
             queue_length_thresholds=queue_length_thresholds,
             queue_duration_thresholds=queue_duration_thresholds,
+            db_writer=db_writer,
         ),
     )
 
@@ -190,6 +218,29 @@ def main() -> int:
         print("\nQueue snapshots:")
         for zid, snap in engine.queue_snapshots().items():
             print(f"  {zid}:", json.dumps(snap.to_dict()))
+
+    if args.persist_db and db_writer is not None:
+        from database import session_scope, visitors_by_hour_yesterday
+        from database.writer import event_count
+        from sqlalchemy import func
+        from sqlmodel import select
+        from database.models import DwellEventRow, Event, OccupancyMetric, ZoneMetric
+
+        with session_scope() as session:
+            print("\nDatabase row counts:")
+            for label, model in [
+                ("events", Event),
+                ("dwell_events", DwellEventRow),
+                ("zone_metrics", ZoneMetric),
+                ("occupancy_metrics", OccupancyMetric),
+            ]:
+                count = session.exec(select(func.count()).select_from(model)).one()
+                print(f"  {label}: {count}")
+            print(f"  total bus events persisted: {event_count(session)}")
+            yesterday = visitors_by_hour_yesterday(session, args.store_id)
+            print(f"\nVisitors by hour yesterday ({args.store_id}):")
+            for row in yesterday:
+                print(f"  hour {row['hour']:02d}: {row['entries']} entries")
 
     if args.log_events:
         print("\nEvent log:")

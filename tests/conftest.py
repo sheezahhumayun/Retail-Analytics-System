@@ -80,6 +80,10 @@ def pytest_configure(config):
         "markers",
         "events: event bus / analytics engine integration tests",
     )
+    config.addinivalue_line(
+        "markers",
+        "database: PostgreSQL integration tests (requires local Postgres)",
+    )
 
 # ---- Fixtures -------------------------------------------------------------- #
 @pytest.fixture(scope="session")
