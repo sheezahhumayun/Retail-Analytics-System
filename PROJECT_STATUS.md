@@ -1028,6 +1028,85 @@ length and deriving wait-time estimates from historical dwell.
    - `AnalyticsDbWriter._reload_occupancy_from_db()` — restores counters from latest `occupancy_metrics` on startup
    - Tests use isolated ids / deltas for shared dev DB re-runs
 
+### Database schema (14 tables)
+
+PostgreSQL database: `retail_analytics`. All tables defined in `database/models.py`,
+created via Alembic migration `001_initial_schema`.
+
+#### Entity relationships
+
+```mermaid
+erDiagram
+    organizations ||--o{ stores : has
+    organizations ||--o{ users : has
+    stores ||--o{ cameras : has
+    stores ||--o{ visitor_metrics : aggregates
+    stores ||--o{ occupancy_metrics : aggregates
+    cameras ||--o{ zones : has
+    cameras ||--o{ counting_lines : has
+    cameras ||--o{ tracks : observes
+    cameras ||--o{ events : emits
+    cameras ||--o{ occupancy_metrics : aggregates
+    cameras ||--o{ alerts : triggers
+    zones ||--o{ events : scopes
+    zones ||--o{ zone_metrics : aggregates
+    zones ||--o{ dwell_events : sessions
+    zones ||--o{ queue_metrics : samples
+    zones ||--o{ alerts : triggers
+```
+
+#### Reference / configuration tables
+
+| Table | Primary key | Stores | Written by |
+|-------|-------------|--------|------------|
+| `organizations` | `id` | Tenant name (multi-store retail group) | `database.seed` (Module 16 admin later) |
+| `stores` | `id` | Store name, address; belongs to one org | Seed / admin |
+| `users` | `id` | Name, email, role (`admin`, `viewer`, …); belongs to one org | Seed / Module 16 |
+| `cameras` | `id` | Camera name, location, RTSP URL, type, resolution, fps, online status; belongs to one store | Seed / Module 16 |
+| `zones` | `id` | Polygon coordinates (JSON), zone type, analytics on/off; belongs to one camera | Seed / `polygon_editor` JSON |
+| `counting_lines` | `id` | Line endpoints (`point_a`, `point_b`), crossing direction; belongs to one camera | Seed / `line_editor` JSON |
+
+**FK chain:** `organizations` → `stores` → `cameras` → `zones` / `counting_lines` / `tracks` / `events`
+
+#### Analytics event & session tables
+
+| Table | Primary key | Stores | Written by |
+|-------|-------------|--------|------------|
+| `tracks` | `id` (auto) | Anonymous track id per camera, `first_seen`, `last_seen` (unique per `camera_id` + `track_id`) | `AnalyticsDbWriter` on bus events with `track_id` |
+| `events` | `id` (auto) | Raw analytics bus events: `event_type`, `timestamp`, optional `zone_id` / `track_id`, JSON `metadata` | `AnalyticsDbWriter` on every bus event except `PERSON_DETECTED` |
+| `dwell_events` | `id` (auto) | Completed zone visit: `enter_ts`, `exit_ts`, `dwell_seconds`, anonymous `track_id` | `AnalyticsDbWriter.on_dwell_event` (zone EXIT / track-lost) |
+| `alerts` | `id` (auto) | Threshold / camera-offline alerts: `alert_type`, `severity`, `status`, JSON `metadata` | `AnalyticsDbWriter` on `DWELL_THRESHOLD`, `QUEUE_THRESHOLD`, `CAMERA_OFFLINE` |
+
+**Retention:** `events` rows pruned after 90 days (`RAW_EVENT_RETENTION_DAYS`). All other tables kept.
+
+#### Aggregated metric tables (dashboard-facing)
+
+| Table | Grain | Stores | Written by |
+|-------|-------|--------|------------|
+| `visitor_metrics` | store × date × hour | Hourly `entries` / `exits` (foot traffic through counting lines) | ENTRY / EXIT bus events |
+| `occupancy_metrics` | camera or store × timestamp | Point-in-time `current_occupancy` snapshot (append-only time series) | ENTRY / EXIT bus events |
+| `zone_metrics` | zone × date × hour | Hourly `visitors`, rolling `avg_dwell` / `max_dwell` / `min_dwell`, `dwell_count` | ZONE_ENTER + completed dwells |
+| `queue_metrics` | zone × timestamp | `queue_length`, `estimated_wait` samples | Queue zone events via engine |
+
+**Unique constraints:** one row per `(store_id, date, hour)` in `visitor_metrics`; one row per `(zone_id, date, hour)` in `zone_metrics`.
+
+#### What is *not* stored
+
+- Raw frame-level detections (`PERSON_DETECTED` skipped by default — PRD §35)
+- Video files (file paths only in `cameras.rtsp_url` for dev samples)
+- Customer identity / biometrics
+
+#### Seed data (dev)
+
+`python -m database.seed` inserts:
+
+- `org_demo` → `store_main` → cameras `entrance`, `town`, `shop`
+- Zones from `tests/videos/town_zones.json` and `shop_zones.json`
+- Counting line from `tests/videos/entrance_line.json`
+- 24 hours of synthetic `visitor_metrics` for yesterday (dashboard chart smoke test)
+
+Pipeline runs with `--persist-db` append live `events`, `dwell_events`, `zone_metrics`, `occupancy_metrics`, etc. on top of seed data.
+
 ### Decisions made
 
 - **Store aggregates, not raw detections** — `PERSON_DETECTED` skipped by default.
