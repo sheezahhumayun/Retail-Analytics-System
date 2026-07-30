@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ORG_ID = "org_demo"
 STORE_ID = "store_main"
 USER_ID = "user_admin"
+USER_REGULAR_ID = "user_demo"
 
 
 def _load_json(path: Path) -> dict:
@@ -59,6 +60,15 @@ def _seed_core(session: Session) -> None:
             name="Admin User",
             email="admin@demo-retail.local",
             role="admin",
+        )
+    )
+    session.merge(
+        User(
+            id=USER_REGULAR_ID,
+            org_id=ORG_ID,
+            name="Regular User",
+            email="user@demo-retail.local",
+            role="user",
         )
     )
 

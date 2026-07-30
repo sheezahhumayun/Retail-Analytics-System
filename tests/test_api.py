@@ -38,6 +38,17 @@ def auth_headers(api_client: TestClient) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.fixture(scope="module")
+def user_auth_headers(api_client: TestClient) -> dict[str, str]:
+    resp = api_client.post(
+        "/api/auth/login",
+        json={"email": "user@demo-retail.local", "password": "demo"},
+    )
+    assert resp.status_code == 200, resp.text
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 class TestAuth:
     def test_login_success(self, api_client: TestClient):
         resp = api_client.post(
@@ -117,6 +128,22 @@ class TestCameras:
             },
         )
         assert resp.status_code == 422
+
+    def test_create_camera_forbidden_for_regular_user(
+        self, api_client: TestClient, user_auth_headers: dict
+    ):
+        resp = api_client.post(
+            "/api/cameras",
+            headers=user_auth_headers,
+            json={
+                "id": "cam_user_forbidden",
+                "store_id": STORE_ID,
+                "name": "Should Fail",
+                "rtsp_url": "sample-data/town.mp4",
+            },
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "forbidden"
 
 
 class TestAnalytics:

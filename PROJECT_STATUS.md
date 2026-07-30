@@ -1199,7 +1199,7 @@ All `/api/*` routes except `/api/auth/login` require a valid JWT.
 | Method | Path | Auth / role | Query / body | Data source |
 |--------|------|-------------|--------------|-------------|
 | `GET` | `/api/cameras` | JWT | `store_id?` (filter) | `cameras` table |
-| `POST` | `/api/cameras` | JWT, **manager+** | Body: `id`, `store_id`, `name`, `location?`, `rtsp_url?`, `camera_type`, `resolution?`, `fps?` | `cameras` table |
+| `POST` | `/api/cameras` | JWT, **admin** | Body: `id`, `store_id`, `name`, `location?`, `rtsp_url?`, `camera_type`, `resolution?`, `fps?` | `cameras` table |
 | `GET` | `/api/cameras/{id}/status` | JWT | Path: `camera_id` | `cameras.status` + latest `events` / `occupancy_metrics` |
 
 #### Analytics (read-only — aggregate tables, not live recomputation)
@@ -1231,6 +1231,8 @@ All `/api/*` routes except `/api/auth/login` require a valid JWT.
 - **JWT session auth for MVP** — password checked against `API_DEFAULT_PASSWORD` env var; user role loaded from `users` table for RBAC.
 - **Role gates** — POST stores = admin; POST cameras = manager or admin; all reads = any authenticated user.
 - **Lightweight backend venv** — no `supervision` / OpenCV; heatmap endpoint reads NPZ directly; `database.writer` lazy-imported.
+
+**Update (2026-07-30) — two-tier RBAC:** Collapsed `viewer` / `manager` / `admin` to **`admin`** and **`user`** only. Alembic `002_normalize_user_roles` maps existing `viewer`/`manager` rows to `user`. **Role gates — all mutating endpoints (POST/PUT/PATCH/DELETE) = admin only; all reads = any authenticated user.** (`POST /api/cameras` is now admin-only; was manager+.)
 - **OpenAPI-first** — every endpoint has summary, description, and typed response models for `/docs` handoff to frontend (Module 13) and Visibility Vision (PRD §44).
 
 ### Dev environment notes

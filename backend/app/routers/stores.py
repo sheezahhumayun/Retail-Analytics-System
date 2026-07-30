@@ -9,7 +9,7 @@ from sqlmodel import select
 
 from database.models import Organization, Store
 
-from ..auth import TokenPayload, get_current_user, require_role
+from ..auth import TokenPayload, get_current_user, require_admin
 from ..deps import DbSession
 from ..exceptions import ApiError
 from ..schemas.stores import StoreCreate, StoreResponse
@@ -40,7 +40,7 @@ def list_stores(
 def create_store(
     body: StoreCreate,
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(require_role("admin"))],
+    _user: Annotated[TokenPayload, Depends(require_admin)],
 ) -> Store:
     if session.get(Store, body.id) is not None:
         raise ApiError(409, "store_exists", f"Store '{body.id}' already exists")

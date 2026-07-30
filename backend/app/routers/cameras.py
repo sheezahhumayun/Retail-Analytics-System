@@ -9,7 +9,7 @@ from sqlmodel import select
 
 from database.models import Camera, Event, OccupancyMetric, Store
 
-from ..auth import TokenPayload, get_current_user, require_role
+from ..auth import TokenPayload, get_current_user, require_admin
 from ..deps import DbSession
 from ..exceptions import ApiError
 from ..schemas.cameras import CameraCreate, CameraResponse, CameraStatusResponse
@@ -41,12 +41,12 @@ def list_cameras(
     response_model=CameraResponse,
     status_code=201,
     summary="Create camera",
-    description="Register a new camera for a store. Requires manager or admin role.",
+    description="Register a new camera for a store. Requires admin role.",
 )
 def create_camera(
     body: CameraCreate,
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(require_role("manager"))],
+    _user: Annotated[TokenPayload, Depends(require_admin)],
 ) -> Camera:
     if session.get(Camera, body.id) is not None:
         raise ApiError(409, "camera_exists", f"Camera '{body.id}' already exists")
