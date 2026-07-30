@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-30 (Module 12.5 — extended REST API for frontend seam)
+**Last updated:** 2026-07-30 (Module 13 — frontend pasted; mock-only, not yet wired to backend)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -23,8 +23,8 @@
 | 11 | Database & Event Storage | ✅ Complete |
 | 12 | Backend REST API | ✅ Complete |
 | 12.5 | Extended REST API (frontend seam) | ✅ Complete |
-| 13 | Frontend Web Dashboard | ⬜ Not started |
-| 14 | Reports (CSV/PDF export) | ⬜ Not started |
+| 13 | Frontend Web Dashboard | ✅ Built (mock data only — **not wired** to backend) |
+| 14 | Reports (CSV/PDF export) | ⬜ Not started (backend export in 12.5; frontend still mock) |
 | 15 | Alerting | ⬜ Not started |
 | 16 | System Administration | ⬜ Not started |
 | 17 | Dockerization & Deployment | ⬜ Not started |
@@ -1323,4 +1323,253 @@ backend\.venv\Scripts\python -m pytest tests/test_api_extended.py -v
 
 ---
 
-## Next Up: Module 13 — Frontend Web Dashboard
+## ✅ Module 13 — Frontend Web Dashboard — BUILT (mock-only)
+
+**⚠️ Integration status:** The dashboard UI is complete and runs against in-memory / `localStorage` mocks via `frontend/lib/api/*.ts`. **No route is wired to the real FastAPI backend yet.** Swapping mock function bodies for `fetch()` calls is the next integration step — do not treat any feature as “live” until that swap lands.
+
+**Source of truth for frontend detail:** `frontend/FRONTEND_PROJECT_STATUS.md` (consolidated 2026-07-25). This section reconciles that doc against the **actual pasted codebase** as of 2026-07-30.
+
+### What was actually done
+
+1. **Full Next.js App Router dashboard** pasted into `frontend/` — 16 page routes, 51 component files under `components/`, shared `lib/types.ts` + `lib/constants.ts`, 10 `lib/api/*.ts` mock modules, 11 `lib/*-data.ts` internal generators (plus `lib/scope-data.ts` for org hierarchy).
+
+2. **Stack (verified in `package.json`):** Next.js 16.2.6 · React 19 · TypeScript 5.7 · Tailwind CSS 4 · Recharts 3 · Lucide icons · Geist fonts · `@/` path alias.
+
+3. **Runtime architecture** (preserved from frontend design):
+   - `app/layout.tsx` → `Providers` (`AuthProvider` → `AuthGuard` → `ScopeProvider`)
+   - Pages wrap content in `DashboardShell` (top nav, scope bar, theme toggle)
+   - **Data flow rule:** `app/` + `components/` → `lib/api/*` only; mock generators in `lib/*-data.ts` are internal to the API layer
+   - **State:** React Context for auth + scope; page-local state elsewhere; no Redux/Zustand
+   - **Route protection:** client-side `AuthGuard` (not Next.js middleware); `/admin/*` gated by `role === "System Administrator"` in `app/admin/layout.tsx`
+
+4. **Features implemented (all mock-backed):**
+   - Overview (6 KPI cards + 3 charts)
+   - Live Cameras grid (overlays, modal expand — `frameUrl` seam for real streams)
+   - 5 analytics pages via shared `AnalyticsPageLayout` (traffic, occupancy, zones, dwell time, queues)
+   - Visual analytics: heatmap (SVG), zone performance standalone, customer flow placeholder
+   - Reports (form → simulated delay → `ReportPreview`; CSV/PDF buttons are `alert()` stubs)
+   - Alerts (filterable list, acknowledge/resolve)
+   - Login (`localStorage` session, password hardcoded to `"demo"`)
+   - Admin: users CRUD, cameras CRUD, zones & lines canvas editor
+
+5. **Scope selector wired** on 10 pages (overview, 5 analytics, live cameras, 3 visual analytics). Reports, alerts, and admin pages use their own pickers/filters.
+
+### Route map
+
+| Route | Access | Notes |
+|-------|--------|-------|
+| `/login` | Public | Email + password (`demo`) |
+| `/` | JWT (mock session) | Overview dashboard |
+| `/live-cameras` | Authenticated | Scope-filtered camera grid |
+| `/analytics/traffic` | Authenticated | `AnalyticsPageLayout` |
+| `/analytics/occupancy` | Authenticated | `AnalyticsPageLayout` |
+| `/analytics/zones` | Authenticated | `AnalyticsPageLayout` |
+| `/analytics/dwell-time` | Authenticated | `AnalyticsPageLayout` |
+| `/analytics/queues` | Authenticated | `AnalyticsPageLayout` |
+| `/visual-analytics/heatmap` | Authenticated | Per-page camera dropdown within scope |
+| `/visual-analytics/zone-performance` | Authenticated | Zone metrics table + chart |
+| `/visual-analytics/customer-flow` | Authenticated | Placeholder trajectories — no API |
+| `/reports` | Authenticated | Own store/camera form pickers |
+| `/alerts` | Authenticated | Own camera/zone filters |
+| `/admin/cameras` | System Administrator | Camera CRUD + test modal |
+| `/admin/users` | System Administrator | User CRUD + password reset |
+| `/admin/zones-lines` | System Administrator | Canvas editor; Save logs to console |
+
+### Discrepancies: `FRONTEND_PROJECT_STATUS.md` vs actual code
+
+| Claim in frontend status doc | Actual codebase |
+|------------------------------|-----------------|
+| “60+ components” | **51** files under `frontend/components/` |
+| “10 `lib/*-data.ts` generators” | **11** `*-data.ts` files (+ `lib/scope-data.ts` for hierarchy, not counted in doc) |
+| Module 0 scaffold: “Import alias: No” | Pasted frontend uses **`@/`** import alias throughout |
+| `TestCameraModal` bypasses `testCamera()` API | **Confirmed** — inline timeout logic in `components/admin/test-camera-modal.tsx` |
+| Zones/lines Save logs to console | **Confirmed** — `app/admin/zones-lines/page.tsx` loads shapes via API module on mount but Save does not call `createZone` / `createCountingLine` |
+| Export = “toast only” | **Partially true** — `ReportForm` CSV/PDF buttons call `alert()`, not toasts; JSON preview uses `getReport()` mock |
+| Seed org/store/camera IDs | Frontend uses `org-northwind`, `store-downtown`, `cam-entrance`, etc. — **does not match** backend seed (`org_demo`, `store_main`, `entrance`, …) |
+| Four user roles | Frontend: Store Manager / Operations Manager / Retail Analyst / System Administrator — backend RBAC is **`admin` / `user` only** |
+| `npx tsc --noEmit` → 0 errors | Not re-verified in monorepo paste; run locally before swap |
+
+### `lib/api/*.ts` → backend endpoint map (all **not yet wired**)
+
+Base URL when wired: `http://127.0.0.1:8000`. All calls will need `Authorization: Bearer <JWT>` except login.
+
+#### `lib/api/auth.ts`
+
+| Function | Target endpoint | Notes |
+|----------|-----------------|-------|
+| `login(email, password)` | `POST /api/auth/login` | Mock checks hardcoded `"demo"`; real API returns `{ access_token, token_type, expires_in, user }` |
+| `loginByRole(role, password)` | *(no direct endpoint)* | Map to login after resolving email from user list |
+| `logout()` | *(client-only)* | Clear JWT from storage |
+| `getCurrentUser()` | `GET /api/auth/me` | Mock reads `localStorage`; real `MeResponse` adds `org_id`, `store_id`, `store_ids[]` |
+
+#### `lib/api/stores.ts`
+
+| Function | Target endpoint | Notes |
+|----------|-----------------|-------|
+| `getOrganization()` | `GET /api/organizations` + compose | Backend returns flat `stores[]` (id, name, address) — **no nested cameras/zones**; must fan out to cameras + zone_shapes |
+| `getStores()` | `GET /api/stores` | Backend includes `org_id`; frontend `Store` type expects nested `cameras[]` |
+| `getOrganizations()` | `GET /api/organizations` | Deprecated in frontend; returns one-element array |
+
+#### `lib/api/analytics.ts`
+
+| Function | Target endpoint | Notes |
+|----------|-----------------|-------|
+| `getTraffic({ store_id, from, to })` | `GET /api/analytics/traffic` | Map `TrafficResponse.buckets[]` → `DataRow[]` (`label`, `current`, `prior`) |
+| `getOccupancy({ camera_id?, store_id? })` | `GET /api/analytics/occupancy` | Map `OccupancyResponse.trend[]` → `DataRow[]`; mock ignores `from`/`to` |
+| `getZones({ zone_id, from, to })` | `GET /api/analytics/zones` | Map `ZoneAnalyticsResponse.buckets[]`; mock also attaches `ZoneRow` performance — **not in API** |
+| `getDwell({ zone_id, from, to })` | `GET /api/analytics/dwell` | Map `DwellResponse.sessions[]` → chart/table rows |
+| `getHeatmap({ camera_id, date, from_time, to_time })` | `GET /api/analytics/heatmap` | Map `density[][]` grid → `HeatBlob[]` / canvas rendering |
+| `getQueues({ zone_id, from, to })` | `GET /api/analytics/queues` | Map `QueueAnalyticsResponse.samples[]` |
+| `getOverviewKpis({ store_id? })` | **Composed** | No single endpoint — aggregate traffic + occupancy + queue endpoints |
+| `getVisitorsByHour({ store_id? })` | `GET /api/analytics/traffic` | Derive hourly visitors from `entries` buckets |
+| `getEntriesExits({ store_id? })` | `GET /api/analytics/traffic` | Map `entries` / `exits` per bucket |
+| `getOccupancyTrend({ store_id? })` | `GET /api/analytics/occupancy` | Map `trend[].current_occupancy` |
+| `fetchTrafficData/Stats(range)` | `GET /api/analytics/traffic` | `DateRangeKey` → `{ from, to }` via `date-range.ts`; stats computed client-side from buckets |
+| `fetchOccupancyData/Stats(range)` | `GET /api/analytics/occupancy` | Same date-range mapping |
+| `fetchZonesData/Stats(range)` | `GET /api/analytics/zones` | Requires `zone_id` from scope |
+| `fetchDwellTimeData/Stats(range)` | `GET /api/analytics/dwell` | Requires `zone_id` |
+| `fetchQueuesData/Stats(range)` | `GET /api/analytics/queues` | Requires `zone_id` |
+| `fetchIntervalLabel(range)` | *(client-only)* | No backend call |
+| `getHeatmapCameras()` | `GET /api/cameras?store_id=` | Map to `{ id, label }` |
+| `getZonePerformance({ store_id?, zone_id? })` | **No direct endpoint** | Must aggregate multiple `GET /api/analytics/zones` calls or add backend rollup |
+
+#### `lib/api/events.ts`
+
+| Function | Target endpoint | Notes |
+|----------|-----------------|-------|
+| `getEvents({ camera_id?, event_type?, from?, to? })` | `GET /api/events` | Map `EventListResponse.events[]`; wrap `metadata_` → `metadata`; **no UI consumer yet** |
+
+#### `lib/api/alerts.ts`
+
+| Function | Target endpoint | Notes |
+|----------|-----------------|-------|
+| `getAlerts({ status?, severity? })` | `GET /api/alerts` | Map `AlertListResponse.alerts[]`; see shape gaps below |
+| `updateAlert(id, patch)` | `PATCH /api/alerts/{id}` | Backend only allows `status: acknowledged \| resolved` |
+
+#### `lib/api/reports.ts`
+
+| Function | Target endpoint | Notes |
+|----------|-----------------|-------|
+| `getReport(type, { format, from, to, store_id })` | `GET /api/reports/{type}` when `format=json` | Map `ReportPayload` → `ReportData`; type slug `dwell-time` → `dwell` |
+| *(not in API module yet)* | `GET /api/reports/{type}/export?format=csv\|pdf` | Wire `ReportForm` export buttons to blob download |
+
+#### `lib/api/cameras.ts`
+
+| Function | Target endpoint | Notes |
+|----------|-----------------|-------|
+| `getCameras()` | `GET /api/cameras` | Map `CameraResponse[]` → `AdminCamera` |
+| `getLiveCameras()` | `GET /api/cameras` + `GET /api/cameras/{id}/status` | Compose status/occupancy; overlays/bboxes **have no backend source** |
+| `getCameraStatus(id)` | `GET /api/cameras/{id}/status` | |
+| `createCamera(data)` | `POST /api/cameras` | Field mapping required (see gaps) |
+| `updateCamera(id, data)` | `PUT /api/cameras/{id}` | |
+| `deleteCamera(id)` | `DELETE /api/cameras/{id}` | Soft-delete → `status=disabled` |
+| `testCamera(id)` | `POST /api/cameras/{id}/test` | Modal does not call this yet |
+
+#### `lib/api/zones.ts`
+
+| Function | Target endpoint | Notes |
+|----------|-----------------|-------|
+| `getAllShapes()` | `GET /api/zones` (per camera) | Fan out by camera; merge zone + line shapes |
+| `getCamerasList()` | `GET /api/cameras` | |
+| `getZoneShapes(camera_id)` | `GET /api/zones?camera_id=` | Map `polygon_points` ↔ `Point[]`; type enum mapping |
+| `createZone(data)` | `POST /api/zones` | |
+| `updateZone(id, data)` | `PUT /api/zones/{id}` | |
+| `deleteZone(id)` | `DELETE /api/zones/{id}` | |
+
+#### `lib/api/lines.ts`
+
+| Function | Target endpoint | Notes |
+|----------|-----------------|-------|
+| `getCountingLines(camera_id)` | `GET /api/lines?camera_id=` | Map `point_a`/`point_b` + `direction` ↔ `insideSide` |
+| `createCountingLine(data)` | `POST /api/lines` | |
+| `updateCountingLine(id, data)` | `PUT /api/lines/{id}` | |
+| `deleteCountingLine(id)` | `DELETE /api/lines/{id}` | |
+
+#### `lib/api/users.ts`
+
+| Function | Target endpoint | Notes |
+|----------|-----------------|-------|
+| `getUsers()` | `GET /api/users` | Admin only |
+| `createUser(data)` | `POST /api/users` | Requires `org_id`; frontend sends `assignedStore` string |
+| `updateUser(id, data)` | `PUT /api/users/{id}` | |
+| `deleteUser(id)` | `DELETE /api/users/{id}` | |
+| `resetPassword(id, newPassword)` | `POST /api/users/{id}/reset-password` | Body: `{ new_password }` |
+
+### Known integration gaps (mapper logic needed during swap)
+
+These are shape / semantics mismatches between mock return types and Module 12 + 12.5 API responses:
+
+1. **Auth & roles** — Frontend `UserRole` has 4 display roles; backend JWT carries `admin` \| `user`. Admin layout checks `"System Administrator"` — map `admin` → that role (or change gate). Login stores session object; real flow stores JWT + calls `/api/auth/me`.
+
+2. **Organization / scope tree** — Frontend `Organization.stores[].cameras[].zones[]` is a nested mock tree. Backend `GET /api/organizations` returns stores only; cameras via `GET /api/cameras?store_id=`; zone options via `GET /api/zones?camera_id=` (geometry `zone_shapes`, not analytics `zones` table). Scope `zone_id` for analytics may need analytics zone IDs from seed (`store1`, `store2`), not shape IDs.
+
+3. **ID namespace** — Frontend seed IDs (`org-northwind`, `cam-entrance`) ≠ backend seed (`org_demo`, `store_main`, `entrance`). Scope selector and forms will show empty/wrong data until IDs align or mappers translate.
+
+4. **Analytics page data model** — UI expects `DataRow { label, current, prior? }` with `DateRangeKey` presets + comparison mode. Backend returns raw buckets (`metric_date`, `hour`, `entries`, …) with explicit `from`/`to` query params — mappers must compute prior-period series client-side or drop comparison until supported.
+
+5. **Occupancy params** — `getOccupancy()` mock ignores date range; backend `OccupancyResponse` uses `scope` + `scope_id` + `trend[]` with `current_occupancy` ints, not percentages.
+
+6. **Heatmap** — Mock returns `HeatBlob[]` + `FloorZone[]` (SVG-friendly percentages). Backend returns `density[][]` float grid + `trajectory[][]` + `spec` — rendering layer must convert grid → blobs or redraw canvas from grid.
+
+7. **Zone performance page** — Mock `ZoneRow` includes `trend` / `trendPct` / `occupancy` %. Backend zone analytics buckets have `visitors`, `avg_dwell`, `dwell_count` — no trend % or occupancy % fields.
+
+8. **Alerts** — Frontend `Alert.id: string`, `camera`/`zone` display names, `timestamp: Date`, `type: AlertType`. Backend `AlertResponse.id: number`, `camera_id`/`zone_id`, `alert_type: string`, ISO `timestamp`. Nav badge uses hardcoded `OPEN_ALERT_COUNT = 3` — should query `GET /api/alerts?status=open`.
+
+9. **Reports** — Frontend `ReportType` includes `"dwell-time"`; backend path uses `dwell`. Mock `ReportData` has formatted KPI strings + `change` %; backend `ReportPayload.kpis[]` has `{ key, label, value: number }`. Export buttons not connected to `GET /api/reports/{type}/export`.
+
+10. **Admin cameras** — Frontend `AdminCamera` has `store` (name), `analyticsModules[]`, `enabled`, `resolution: "1080p"\|"2k"\|"4k"`, `rtspUrl` camelCase. Backend `CameraResponse` has `store_id`, `rtsp_url`, `resolution: "WxH"`, `status` string — no modules list, no separate `enabled` flag.
+
+11. **Zone shapes** — Frontend zone `type: "checkout"`; backend `ZoneShapeType` uses `"checkout_queue"`. Line `insideSide: "left"\|"right"` ↔ backend `direction: "left_is_inside"\|"right_is_inside"`. Polygon coords: frontend `Point {x,y}` 0–100 % vs backend `polygon_points: [[x,y],…]` (verify coordinate space in seed).
+
+12. **Users admin** — Frontend `assignedStore` (display name) + `status: Active\|Disabled`; backend `store_id` + no disabled flag on `UserResponse`. Create user requires `org_id` + `id` slug pattern.
+
+13. **Live cameras** — `Camera` type includes `boundingBoxes`, `zones`, `countingLines`, `occupancy`, `entriesToday` — no composite backend endpoint; would require cameras + status + optional future inference overlay stream.
+
+14. **Errors** — Backend returns `{ error: { code, message, details } }` on 4xx; frontend mocks throw plain `Error` strings.
+
+15. **Pagination** — Backend event/alert lists return `count` + array; no cursor pagination. Frontend mocks return full in-memory lists.
+
+### Frontend needs with no backend endpoint (even after 12.5)
+
+| Need | Gap |
+|------|-----|
+| Live video stream URL (MJPEG/HLS/WebRTC) | No streaming endpoint; `frameUrl` stays `null` |
+| Real-time CV overlays (bounding boxes, track IDs) | No inference overlay API |
+| Customer flow trajectories | Placeholder only — no path analytics endpoint |
+| Zone performance rollup (all zones for a store) | Must fan out `GET /api/analytics/zones` per zone or add aggregate endpoint |
+| Overview KPI single call | Must compose multiple analytics endpoints |
+| List analytics zones (inference `zones` table) | Only `zone_shapes` geometry at `GET /api/zones`; analytics `zone_id` values come from seed/DB, not a list endpoint |
+| Nav open-alert count | Use `GET /api/alerts` filtered client-side (no `/count` shortcut) |
+| `analyticsModules` / camera `enabled` toggle | Not in camera schema — UI fields have no backend counterpart |
+
+### Architecture decisions worth preserving
+
+- **`lib/api/` as the sole swap surface** — components never import `lib/*-data.ts` directly (verified: only `lib/api/*` and `ScopeContext` import generators).
+- **`AnalyticsPageLayout` + `AnalyticsPageConfig`** — five analytics routes are thin wrappers around scoped config hooks.
+- **`ScopeContext` + `use-scoped-analytics-config.ts`** — global org/store/camera/zone drives re-fetch; page-level dropdowns narrow within scope (heatmap, customer flow).
+- **`AuthGuard` client gate** — keeps `localStorage` session pattern; swap to JWT without restructuring pages.
+- **Shared types in `lib/types.ts`** — disambiguated names (`AdminCamera` vs live `Camera`, `ScopeZone` vs editor `ZoneShape`).
+- **Design tokens in `lib/constants.ts`** — severity/status/occupancy colors centralized.
+
+### Dev notes
+
+```powershell
+cd frontend
+npm install
+npm run dev          # http://localhost:3000
+npx tsc --noEmit     # typecheck before integration swap
+```
+
+Login with any seed user email + password `demo`. Admin routes require **System Administrator** role in the mock user store.
+
+### ✅ Test Checkpoint 13 — Verified (UI / mock layer)
+
+- [x] 16 routes present under `frontend/app/` matching route map above
+- [x] 10 `lib/api/*.ts` modules with `MOCK IMPLEMENTATION` headers
+- [x] `app/` and `components/` do not import `lib/*-data.ts` directly
+- [x] Scope selector wired on 10 dashboard pages per frontend status doc
+- [ ] **Not verified:** live integration against `http://127.0.0.1:8000` (intentionally deferred)
+
+---
+
+## Next Up: Module 13.5 — Mock → Real API Integration

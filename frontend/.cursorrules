@@ -1,0 +1,12 @@
+- This project uses Next.js App Router, TypeScript, Tailwind CSS, and Recharts.
+- All data fetching goes through lib/api/ — never fetch() directly in a component.
+- Use the shared types in lib/types.ts (AnalyticsEvent, Camera, Zone, Alert, etc.)
+  for all props — don't redefine inline interfaces per component.
+- Severity/status colors come from lib/constants.ts — don't hardcode Tailwind color
+  classes for status badges anywhere else.
+- Keep components in components/, pages in app/, one page per route folder.
+- All mock data generation is deterministic (no Math.random() in data that feeds
+  charts/tables) except explicitly simulated delays (Reports generation, Test
+  Camera modal) — preserve this pattern in any new mock code.
+- Never introduce a global state library (Redux/Zustand) — use React Context only
+  for genuinely cross-page concerns (auth, scope selection). Page-local state stays local.

@@ -1,65 +1,111 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import { useEffect, useState } from 'react';
+import { DashboardShell } from '@/components/dashboard/dashboard-shell';
+import { KPICard } from '@/components/overview/kpi-card';
+import { VisitorsByHourChart } from '@/components/overview/visitors-by-hour-chart';
+import { EntriesExitsChart } from '@/components/overview/entries-exits-chart';
+import { OccupancyTrendChart } from '@/components/overview/occupancy-trend-chart';
+import { getOverviewKpis } from '@/lib/api/analytics';
+import { useScope } from '@/lib/scope/ScopeContext';
+import type { OverviewKpiData } from '@/lib/api/analytics';
+
+export default function OverviewPage() {
+  const { storeId } = useScope();
+  const [kpis, setKpis] = useState<OverviewKpiData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      const kpiData = await getOverviewKpis({
+        store_id: storeId ?? undefined,
+      });
+      if (!cancelled) {
+        setKpis(kpiData);
+        setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [storeId]);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+    <DashboardShell>
+      <div className="mx-auto w-full max-w-7xl space-y-8">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+            Overview
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+          <p className="mt-1 text-sm text-muted-foreground">
+            High-level performance across the selected scope.
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <KPICard
+            label={kpis?.visitorsToday.label ?? 'Visitors Today'}
+            value={kpis ? kpis.visitorsToday.value.toLocaleString() : ''}
+            trend={kpis?.visitorsToday.trend}
+            icon="users"
+            isLoading={loading}
+          />
+          <KPICard
+            label={kpis?.occupancy.label ?? 'Current Occupancy'}
+            value={kpis?.occupancy.value ?? ''}
+            unit={kpis?.occupancy.unit}
+            trend={kpis?.occupancy.trend}
+            icon="activity"
+            isLoading={loading}
+          />
+          <KPICard
+            label={kpis?.peakOccupancy.label ?? 'Peak Occupancy'}
+            value={kpis?.peakOccupancy.value ?? ''}
+            unit={kpis?.peakOccupancy.unit}
+            subtext={kpis?.peakOccupancy.subtext}
+            icon="zap"
+            isLoading={loading}
+          />
+          <KPICard
+            label={kpis?.dwellTime.label ?? 'Average Dwell Time'}
+            value={kpis?.dwellTime.value ?? ''}
+            unit={kpis?.dwellTime.unit}
+            trend={kpis?.dwellTime.trend}
+            icon="clock"
+            isLoading={loading}
+          />
+          <KPICard
+            label={kpis?.queueLength.label ?? 'Current Queue Length'}
+            value={kpis?.queueLength.value ?? ''}
+            trend={kpis?.queueLength.trend}
+            icon="list"
+            isLoading={loading}
+          />
+          <KPICard
+            label={kpis?.activeCameras.label ?? 'Active Cameras'}
+            value={
+              kpis
+                ? `${kpis.activeCameras.value} / ${kpis.activeCameras.total} online`
+                : ''
+            }
+            icon="camera"
+            isLoading={loading}
+          />
         </div>
-      </main>
-    </div>
+
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <div className="lg:col-span-2">
+            <VisitorsByHourChart />
+          </div>
+          <EntriesExitsChart />
+          <OccupancyTrendChart />
+        </div>
+      </div>
+    </DashboardShell>
   );
 }
