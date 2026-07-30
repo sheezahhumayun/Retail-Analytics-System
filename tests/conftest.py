@@ -84,6 +84,10 @@ def pytest_configure(config):
         "markers",
         "database: PostgreSQL integration tests (requires local Postgres)",
     )
+    config.addinivalue_line(
+        "markers",
+        "api: FastAPI REST API tests (requires local Postgres)",
+    )
 
 # ---- Fixtures -------------------------------------------------------------- #
 @pytest.fixture(scope="session")

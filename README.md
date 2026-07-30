@@ -76,6 +76,9 @@ python tests/scripts/run-events-demo.py sample-data/town.mp4 --zone-config tests
 # Module 11 — Database & persistence (requires Postgres via Docker)
 python -m pytest tests/test_database.py -q
 
+# Module 12 — Backend REST API (requires Postgres; use backend venv)
+python -m pytest tests/test_api.py -q
+
 # Integration tests only (loads YOLO weights — slower)
 python -m pytest tests/ -m detection
 python -m pytest tests/ -m tracking
@@ -270,6 +273,25 @@ docker exec -it retail-analytics-postgres psql -U retail -d retail_analytics `
 ```
 
 See `database/README.md` for schema, retention policy, and dashboard query examples.
+
+#### Module 12 — Backend REST API
+
+```powershell
+# One-time setup
+copy .env.example .env
+docker compose -f docker/docker-compose.yml up -d
+python -m venv backend\.venv
+backend\.venv\Scripts\pip install -r backend\requirements.txt -r database\requirements.txt
+alembic -c database/alembic.ini upgrade head
+python -m database.seed
+
+# Start API (Swagger at http://127.0.0.1:8000/docs)
+backend\.venv\Scripts\uvicorn backend.app.main:app --reload --port 8000
+
+# Login: admin@demo-retail.local / demo (API_DEFAULT_PASSWORD)
+# Tests
+backend\.venv\Scripts\python -m pytest tests/test_api.py -v
+```
 
 ### Suggested end-to-end workflow
 

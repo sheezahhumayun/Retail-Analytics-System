@@ -20,7 +20,12 @@ from .models import (
 )
 from .seed import seed_reference_data
 from .session import create_all, get_engine, get_session, reset_engine, session_scope
-from .writer import AnalyticsDbWriter, DbWriterConfig, visitors_by_hour_yesterday
+
+_LAZY_EXPORTS = {
+    "AnalyticsDbWriter",
+    "DbWriterConfig",
+    "visitors_by_hour_yesterday",
+}
 
 __all__ = [
     "Alert",
@@ -51,3 +56,15 @@ __all__ = [
     "session_scope",
     "visitors_by_hour_yesterday",
 ]
+
+
+def __getattr__(name: str):
+    if name in _LAZY_EXPORTS:
+        from .writer import AnalyticsDbWriter, DbWriterConfig, visitors_by_hour_yesterday
+
+        return {
+            "AnalyticsDbWriter": AnalyticsDbWriter,
+            "DbWriterConfig": DbWriterConfig,
+            "visitors_by_hour_yesterday": visitors_by_hour_yesterday,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

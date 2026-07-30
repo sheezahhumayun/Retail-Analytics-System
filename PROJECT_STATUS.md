@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-29 (Module 11 verified — Postgres on 5433, 8/8 DB tests green)
+**Last updated:** 2026-07-29 (Module 12 verified — FastAPI REST API, 21/21 API tests green)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -21,7 +21,7 @@
 | 9 | Queue Analytics | ✅ Done |
 | 10 | Event Architecture & Analytics Engine | ✅ Complete |
 | 11 | Database & Event Storage | ✅ Complete |
-| 12 | Backend REST API | ⬜ Not started |
+| 12 | Backend REST API | ✅ Complete |
 | 13 | Frontend Web Dashboard | ⬜ Not started |
 | 14 | Reports (CSV/PDF export) | ⬜ Not started |
 | 15 | Alerting | ⬜ Not started |
@@ -936,7 +936,7 @@ length and deriving wait-time estimates from historical dwell.
 ### Not in scope (deferred)
 
 - Position-in-queue wait estimation → Phase 2 (PRD §37)
-- API `GET /api/analytics/queues` → Module 12
+- API `GET /api/analytics/queues` → Module 12 ✅
 - Dashboard queue widgets → Module 13
 
 ### ✅ Test Checkpoint 9 — Ready for manual verification
@@ -1124,7 +1124,7 @@ Pipeline runs with `--persist-db` append live `events`, `dwell_events`, `zone_me
 - If Alembic fails with `password authentication failed for user "retail"`, another
   Postgres is likely bound to port 5432 — use Docker on **5433** and `copy .env.example .env`.
 - Recreate container after port change: `docker compose -f docker/docker-compose.yml down && docker compose -f docker/docker-compose.yml up -d`
-- Pipeline + DB writes use `inference/.venv`; Module 12 backend will use `backend/.venv`.
+- Pipeline + DB writes use `inference/.venv`; Module 12 backend uses `backend/.venv`.
 
 ### ✅ Test Checkpoint 11 — Verified
 
@@ -1146,4 +1146,126 @@ pytest tests/test_database.py -v   # 8 passed
 
 ---
 
-## Next Up: Module 12 — Backend REST API
+## ✅ Module 12 — Backend REST API — DONE
+
+**PRD:** §32 (documented APIs), §6 (roles — Store Manager vs System Administrator), §44 (Visibility Vision integration seam)
+
+### What was built
+
+1. **`backend/` package** — FastAPI service on Module 11 PostgreSQL via SQLModel:
+   - `app/main.py` — app factory, CORS, OpenAPI at `/docs`, health at `/health`
+   - `app/config.py` — settings from `.env` (`JWT_SECRET_KEY`, `API_DEFAULT_PASSWORD`, `HEATMAP_DATA_DIR`, …)
+   - `app/auth.py` — JWT login, role hierarchy (`viewer` < `manager` < `admin`)
+   - `app/exceptions.py` — consistent `{ error: { code, message, details } }` 4xx responses
+   - `app/deps.py` — DB session, ISO date/datetime parsing, `from`/`to` range validation
+   - `app/routers/` — stores, cameras, analytics, events, alerts, auth
+   - `app/schemas/` — Pydantic request/response models with field descriptions for Swagger
+   - `app/services/heatmap.py` — lightweight NPZ reader for Module 8 hour-bucket files (no OpenCV dep)
+
+2. **Auth (MVP)** — `POST /api/auth/login` returns JWT; all other `/api/*` routes require
+   `Authorization: Bearer <token>`. Demo credentials: `admin@demo-retail.local` / `demo`
+   (`API_DEFAULT_PASSWORD` in `.env`).
+
+3. **Tests** — `tests/test_api.py` (**21 tests**, `@pytest.mark.api` + `@pytest.mark.database`).
+
+4. **Dev ergonomics:**
+   - `backend/requirements.txt` — FastAPI, uvicorn, httpx, sqlmodel, numpy (no inference stack)
+   - `.env.example` — `JWT_SECRET_KEY`, `API_DEFAULT_PASSWORD`
+   - Root `README.md` — Module 12 quick-start (venv, uvicorn, pytest)
+   - `database/__init__.py` — lazy import of `AnalyticsDbWriter` so backend venv stays lightweight
+
+### API endpoints (PRD §32)
+
+Base URL: `http://127.0.0.1:8000`. Interactive docs: **`/docs`** (Swagger UI), **`/redoc`**, **`/openapi.json`**.
+
+All `/api/*` routes except `/api/auth/login` require a valid JWT.
+
+#### Health & authentication
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/health` | — | Liveness check (`{ "status": "ok" }`) |
+| `POST` | `/api/auth/login` | — | Obtain JWT access token (email + password) |
+
+#### Stores (CRUD)
+
+| Method | Path | Auth / role | Query / body | Data source |
+|--------|------|-------------|--------------|-------------|
+| `GET` | `/api/stores` | JWT | — | `stores` table |
+| `POST` | `/api/stores` | JWT, **admin** | Body: `id`, `org_id`, `name`, `address?` | `stores` table |
+
+#### Cameras (CRUD + status)
+
+| Method | Path | Auth / role | Query / body | Data source |
+|--------|------|-------------|--------------|-------------|
+| `GET` | `/api/cameras` | JWT | `store_id?` (filter) | `cameras` table |
+| `POST` | `/api/cameras` | JWT, **manager+** | Body: `id`, `store_id`, `name`, `location?`, `rtsp_url?`, `camera_type`, `resolution?`, `fps?` | `cameras` table |
+| `GET` | `/api/cameras/{id}/status` | JWT | Path: `camera_id` | `cameras.status` + latest `events` / `occupancy_metrics` |
+
+#### Analytics (read-only — aggregate tables, not live recomputation)
+
+| Method | Path | Auth | Query params | Data source |
+|--------|------|------|--------------|-------------|
+| `GET` | `/api/analytics/traffic` | JWT | `store_id`, `from`, `to` | `visitor_metrics` (hourly entries/exits) |
+| `GET` | `/api/analytics/occupancy` | JWT | `camera_id` **or** `store_id` (exactly one), `limit?` | `occupancy_metrics` (current + trend) |
+| `GET` | `/api/analytics/zones` | JWT | `zone_id`, `from`, `to` | `zone_metrics` (hourly visitors + dwell rollups) |
+| `GET` | `/api/analytics/dwell` | JWT | `zone_id`, `from`, `to` | `dwell_events` (completed sessions) |
+| `GET` | `/api/analytics/heatmap` | JWT | `camera_id`, `date`, `from_time?`, `to_time?` | Module 8 NPZ hour buckets in `data/heatmaps/` |
+| `GET` | `/api/analytics/queues` | JWT | `zone_id`, `from`, `to` | `queue_metrics` (length + estimated wait) |
+
+#### Events & alerts
+
+| Method | Path | Auth | Query params | Data source |
+|--------|------|------|--------------|-------------|
+| `GET` | `/api/events` | JWT | `from`, `to`, `camera_id?`, `event_type?`, `limit?` | `events` table |
+| `GET` | `/api/alerts` | JWT | `status?`, `severity?`, `limit?` | `alerts` table |
+
+**Query conventions:**
+- `from` / `to` — ISO date (`YYYY-MM-DD`) or datetime (`YYYY-MM-DDTHH:MM:SS+00:00`); date-only expands to start/end of day (UTC).
+- `from_time` / `to_time` (heatmap) — `HH:MM` or `HH:MM:SS`.
+- Malformed input → **400** (`invalid_date_range`, `invalid_datetime`, …); missing entities → **404**; validation failures → **422** with structured error body (no stack traces).
+
+### Decisions made
+
+- **Read aggregates, don't recompute** — analytics endpoints query Module 11 rollup tables (and Module 8 heatmap files), not raw event replay.
+- **JWT session auth for MVP** — password checked against `API_DEFAULT_PASSWORD` env var; user role loaded from `users` table for RBAC.
+- **Role gates** — POST stores = admin; POST cameras = manager or admin; all reads = any authenticated user.
+- **Lightweight backend venv** — no `supervision` / OpenCV; heatmap endpoint reads NPZ directly; `database.writer` lazy-imported.
+- **OpenAPI-first** — every endpoint has summary, description, and typed response models for `/docs` handoff to frontend (Module 13) and Visibility Vision (PRD §44).
+
+### Dev environment notes
+
+```powershell
+# Setup (once)
+copy .env.example .env
+docker compose -f docker/docker-compose.yml up -d
+python -m venv backend\.venv
+backend\.venv\Scripts\pip install -r backend\requirements.txt -r database\requirements.txt
+alembic -c database/alembic.ini upgrade head
+python -m database.seed
+
+# Optional: live pipeline data
+python tests/scripts/run-events-demo.py sample-data/town.mp4 `
+  --camera-id town --zone-config tests/videos/town_zones.json --persist-db
+
+# Run API
+backend\.venv\Scripts\uvicorn backend.app.main:app --reload --port 8000
+# → Swagger: http://127.0.0.1:8000/docs
+```
+
+### ✅ Test Checkpoint 12 — Verified
+
+Requires local Postgres + seeded data (`docker compose … up -d`, `python -m database.seed`).
+
+```powershell
+backend\.venv\Scripts\python -m pytest tests/test_api.py -v   # 21 passed
+```
+
+- [x] Every PRD §32 endpoint responds with real data from Module 11 DB (not mocks) when queried against seed / `--persist-db` dataset
+- [x] Swagger UI at `/docs` lists all endpoints with request/response schemas
+- [x] Malformed requests (bad date ranges, non-existent camera IDs, invalid RTSP URLs) return clear 4xx errors, not stack traces
+- [x] `pytest tests/test_api.py` — 21/21 passed
+
+---
+
+## Next Up: Module 13 — Frontend Web Dashboard
