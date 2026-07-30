@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-29 (Module 12 verified — FastAPI REST API, 21/21 API tests green)
+**Last updated:** 2026-07-30 (Module 12.5 — extended REST API for frontend seam)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -22,6 +22,7 @@
 | 10 | Event Architecture & Analytics Engine | ✅ Complete |
 | 11 | Database & Event Storage | ✅ Complete |
 | 12 | Backend REST API | ✅ Complete |
+| 12.5 | Extended REST API (frontend seam) | ✅ Complete |
 | 13 | Frontend Web Dashboard | ⬜ Not started |
 | 14 | Reports (CSV/PDF export) | ⬜ Not started |
 | 15 | Alerting | ⬜ Not started |
@@ -30,6 +31,59 @@
 | 18 | Testing, Evaluation & Accuracy Validation | ⬜ Not started |
 | 19 | Scalability & Path to Multi-Camera/Multi-Store | ⬜ Not started |
 | 20 | Final Demo Script | ⬜ Not started |
+
+---
+
+## REST API — All Endpoints (Modules 12 + 12.5)
+
+Base URL: `http://127.0.0.1:8000` · Swagger: **`/docs`** · OpenAPI: **`/openapi.json`**
+
+**Auth legend:** `—` = no JWT · `JWT` = any logged-in user · `admin` = admin role only
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/health` | — | Liveness check |
+| `POST` | `/api/auth/login` | — | Obtain JWT (`email` + `password`) |
+| `GET` | `/api/auth/me` | JWT | Current user profile + org store list |
+| `GET` | `/api/organizations` | JWT | Organization(s) with nested stores |
+| `GET` | `/api/stores` | JWT | List stores |
+| `POST` | `/api/stores` | admin | Create store |
+| `GET` | `/api/cameras` | JWT | List cameras (`?store_id=` optional) |
+| `POST` | `/api/cameras` | admin | Create camera |
+| `GET` | `/api/cameras/{id}/status` | JWT | Camera health + occupancy snapshot |
+| `PUT` | `/api/cameras/{id}` | admin | Update camera |
+| `DELETE` | `/api/cameras/{id}` | admin | Soft delete (`status=disabled`) |
+| `POST` | `/api/cameras/{id}/test` | admin | Test stream connectivity |
+| `GET` | `/api/zones` | JWT | List zone **geometry** (`?camera_id=`) — `zone_shapes` table |
+| `POST` | `/api/zones` | admin | Create zone shape |
+| `PUT` | `/api/zones/{id}` | admin | Update zone shape |
+| `DELETE` | `/api/zones/{id}` | admin | Delete zone shape |
+| `GET` | `/api/lines` | JWT | List counting lines (`?camera_id=`) |
+| `POST` | `/api/lines` | admin | Create counting line |
+| `PUT` | `/api/lines/{id}` | admin | Update counting line |
+| `DELETE` | `/api/lines/{id}` | admin | Delete counting line |
+| `GET` | `/api/analytics/traffic` | JWT | Hourly entries/exits (`store_id`, `from`, `to`) |
+| `GET` | `/api/analytics/occupancy` | JWT | Occupancy trend (`camera_id` **or** `store_id`) |
+| `GET` | `/api/analytics/zones` | JWT | Zone **metrics** (`zone_id`, `from`, `to`) — `zone_metrics` table |
+| `GET` | `/api/analytics/dwell` | JWT | Dwell sessions (`zone_id`, `from`, `to`) |
+| `GET` | `/api/analytics/heatmap` | JWT | Heatmap grid (`camera_id`, `date`, `from_time?`, `to_time?`) |
+| `GET` | `/api/analytics/queues` | JWT | Queue samples (`zone_id`, `from`, `to`) |
+| `GET` | `/api/events` | JWT | Raw events (`from`, `to`, `camera_id?`, `event_type?`) |
+| `GET` | `/api/alerts` | JWT | List alerts (`status?`, `severity?`) |
+| `PATCH` | `/api/alerts/{id}` | JWT | Acknowledge/resolve alert (`status`) |
+| `GET` | `/api/reports/{type}` | JWT | JSON report (`type`: traffic\|occupancy\|zones\|dwell\|queues) |
+| `GET` | `/api/reports/{type}/export` | JWT | CSV/PDF export (`format=csv\|pdf`) |
+| `GET` | `/api/users` | admin | List users |
+| `POST` | `/api/users` | admin | Create user |
+| `PUT` | `/api/users/{id}` | admin | Update user |
+| `DELETE` | `/api/users/{id}` | admin | Delete user |
+| `POST` | `/api/users/{id}/reset-password` | admin | Reset user password |
+
+**36 endpoints total** (1 public health, 1 public login, 34 JWT-protected).
+
+**RBAC (two tiers):** `admin` and `user`. All `POST`/`PUT`/`PATCH`/`DELETE` except `PATCH /api/alerts/{id}` require **admin**. All `GET` routes + alert status updates are open to any authenticated user.
+
+**Naming note:** `GET /api/zones` = polygon config (`zone_shapes`). `GET /api/analytics/zones` = hourly analytics (`zone_metrics`). Different resources.
 
 ---
 
@@ -1174,51 +1228,9 @@ pytest tests/test_database.py -v   # 8 passed
    - Root `README.md` — Module 12 quick-start (venv, uvicorn, pytest)
    - `database/__init__.py` — lazy import of `AnalyticsDbWriter` so backend venv stays lightweight
 
-### API endpoints (PRD §32)
+### API endpoints
 
-Base URL: `http://127.0.0.1:8000`. Interactive docs: **`/docs`** (Swagger UI), **`/redoc`**, **`/openapi.json`**.
-
-All `/api/*` routes except `/api/auth/login` require a valid JWT.
-
-#### Health & authentication
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/health` | — | Liveness check (`{ "status": "ok" }`) |
-| `POST` | `/api/auth/login` | — | Obtain JWT access token (email + password) |
-
-#### Stores (CRUD)
-
-| Method | Path | Auth / role | Query / body | Data source |
-|--------|------|-------------|--------------|-------------|
-| `GET` | `/api/stores` | JWT | — | `stores` table |
-| `POST` | `/api/stores` | JWT, **admin** | Body: `id`, `org_id`, `name`, `address?` | `stores` table |
-
-#### Cameras (CRUD + status)
-
-| Method | Path | Auth / role | Query / body | Data source |
-|--------|------|-------------|--------------|-------------|
-| `GET` | `/api/cameras` | JWT | `store_id?` (filter) | `cameras` table |
-| `POST` | `/api/cameras` | JWT, **admin** | Body: `id`, `store_id`, `name`, `location?`, `rtsp_url?`, `camera_type`, `resolution?`, `fps?` | `cameras` table |
-| `GET` | `/api/cameras/{id}/status` | JWT | Path: `camera_id` | `cameras.status` + latest `events` / `occupancy_metrics` |
-
-#### Analytics (read-only — aggregate tables, not live recomputation)
-
-| Method | Path | Auth | Query params | Data source |
-|--------|------|------|--------------|-------------|
-| `GET` | `/api/analytics/traffic` | JWT | `store_id`, `from`, `to` | `visitor_metrics` (hourly entries/exits) |
-| `GET` | `/api/analytics/occupancy` | JWT | `camera_id` **or** `store_id` (exactly one), `limit?` | `occupancy_metrics` (current + trend) |
-| `GET` | `/api/analytics/zones` | JWT | `zone_id`, `from`, `to` | `zone_metrics` (hourly visitors + dwell rollups) |
-| `GET` | `/api/analytics/dwell` | JWT | `zone_id`, `from`, `to` | `dwell_events` (completed sessions) |
-| `GET` | `/api/analytics/heatmap` | JWT | `camera_id`, `date`, `from_time?`, `to_time?` | Module 8 NPZ hour buckets in `data/heatmaps/` |
-| `GET` | `/api/analytics/queues` | JWT | `zone_id`, `from`, `to` | `queue_metrics` (length + estimated wait) |
-
-#### Events & alerts
-
-| Method | Path | Auth | Query params | Data source |
-|--------|------|------|--------------|-------------|
-| `GET` | `/api/events` | JWT | `from`, `to`, `camera_id?`, `event_type?`, `limit?` | `events` table |
-| `GET` | `/api/alerts` | JWT | `status?`, `severity?`, `limit?` | `alerts` table |
+See **[REST API — All Endpoints (Modules 12 + 12.5)](#rest-api--all-endpoints-modules-12--125)** for the full catalog (36 routes). Module 12 delivered PRD §32 core routes.
 
 **Query conventions:**
 - `from` / `to` — ISO date (`YYYY-MM-DD`) or datetime (`YYYY-MM-DDTHH:MM:SS+00:00`); date-only expands to start/end of day (UTC).
@@ -1229,7 +1241,7 @@ All `/api/*` routes except `/api/auth/login` require a valid JWT.
 
 - **Read aggregates, don't recompute** — analytics endpoints query Module 11 rollup tables (and Module 8 heatmap files), not raw event replay.
 - **JWT session auth for MVP** — password checked against `API_DEFAULT_PASSWORD` env var; user role loaded from `users` table for RBAC.
-- **Role gates** — POST stores = admin; POST cameras = manager or admin; all reads = any authenticated user.
+- **Role gates** — all mutating endpoints = admin; all reads (+ `PATCH /api/alerts/{id}`) = any authenticated user.
 - **Lightweight backend venv** — no `supervision` / OpenCV; heatmap endpoint reads NPZ directly; `database.writer` lazy-imported.
 
 **Update (2026-07-30) — two-tier RBAC:** Collapsed `viewer` / `manager` / `admin` to **`admin`** and **`user`** only. Alembic `002_normalize_user_roles` maps existing `viewer`/`manager` rows to `user`. **Role gates — all mutating endpoints (POST/PUT/PATCH/DELETE) = admin only; all reads = any authenticated user.** (`POST /api/cameras` is now admin-only; was manager+.)
@@ -1260,13 +1272,52 @@ backend\.venv\Scripts\uvicorn backend.app.main:app --reload --port 8000
 Requires local Postgres + seeded data (`docker compose … up -d`, `python -m database.seed`).
 
 ```powershell
-backend\.venv\Scripts\python -m pytest tests/test_api.py -v   # 21 passed
+backend\.venv\Scripts\python -m pytest tests/test_api.py -v   # 22 passed
 ```
 
 - [x] Every PRD §32 endpoint responds with real data from Module 11 DB (not mocks) when queried against seed / `--persist-db` dataset
 - [x] Swagger UI at `/docs` lists all endpoints with request/response schemas
 - [x] Malformed requests (bad date ranges, non-existent camera IDs, invalid RTSP URLs) return clear 4xx errors, not stack traces
-- [x] `pytest tests/test_api.py` — 21/21 passed
+- [x] `pytest tests/test_api.py` — 22/22 passed
+
+---
+
+## ✅ Module 12.5 — Extended REST API — DONE
+
+**Context:** Endpoints identified as missing after frontend mock-API integration. All additions live in **new** routers/schemas/services — existing Module 12 files under `app/routers/{stores,cameras,analytics,events,alerts,auth}.py` were not modified.
+
+### What was built
+
+1. **Alembic `003_module_12_5`** — `zone_shapes` table; `counting_lines.name` + `created_at`; `users.store_id` + `users.password_hash`.
+
+2. **New routers** (`backend/app/routers/`):
+   - `auth_me.py` — `GET /api/auth/me`
+   - `organizations.py` — `GET /api/organizations`
+   - `zones_config.py` — zone geometry CRUD (`zone_shapes` table)
+   - `lines.py` — counting line CRUD (`counting_lines` table)
+   - `cameras_extended.py` — `PUT/DELETE /api/cameras/{id}`, `POST /api/cameras/{id}/test`
+   - `alerts_extended.py` — `PATCH /api/alerts/{id}`
+   - `reports.py` — `GET /api/reports/{type}`, `GET /api/reports/{type}/export`
+   - `users.py` — user admin CRUD + password reset
+
+3. **Services** — `services/reports.py` (aggregate rollups + CSV/PDF export), `services/camera_test.py` (lightweight stream probe), `services/passwords.py`.
+
+4. **Seed** — `zone_shapes` populated from `town_zones.json` / `shop_zones.json`; counting line seed includes `name` + `created_at`.
+
+5. **Tests** — `tests/test_api_extended.py` (**24 tests**, `@pytest.mark.api_extended`).
+
+### New endpoints
+
+See **[REST API — All Endpoints (Modules 12 + 12.5)](#rest-api--all-endpoints-modules-12--125)** — Module 12.5 added rows marked with geometry/config, reports, users, and camera admin extensions.
+
+### Dev notes
+
+```powershell
+alembic -c database/alembic.ini upgrade head
+python -m database.seed
+backend\.venv\Scripts\pip install -r backend\requirements.txt
+backend\.venv\Scripts\python -m pytest tests/test_api_extended.py -v
+```
 
 ---
 

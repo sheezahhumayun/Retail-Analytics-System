@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, Index, UniqueConstraint
+from sqlalchemy import Column, Index, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -31,9 +31,11 @@ class User(SQLModel, table=True):
 
     id: str = Field(primary_key=True, max_length=64)
     org_id: str = Field(foreign_key="organizations.id", nullable=False, index=True)
+    store_id: str | None = Field(default=None, foreign_key="stores.id", index=True)
     name: str = Field(max_length=255, nullable=False)
     email: str = Field(max_length=255, nullable=False, unique=True)
-    role: str = Field(max_length=64, nullable=False, default="viewer")
+    role: str = Field(max_length=64, nullable=False, default="user")
+    password_hash: str | None = Field(default=None, max_length=255)
 
 
 class Camera(SQLModel, table=True):
@@ -48,6 +50,26 @@ class Camera(SQLModel, table=True):
     resolution: str | None = Field(default=None, max_length=32)
     fps: float | None = Field(default=None)
     status: str = Field(default="offline", max_length=32)
+
+
+class ZoneShape(SQLModel, table=True):
+    """Frontend-facing zone geometry (Module 12.5) — distinct from analytics ``zones``."""
+
+    __tablename__ = "zone_shapes"
+
+    id: str = Field(primary_key=True, max_length=64)
+    camera_id: str = Field(foreign_key="cameras.id", nullable=False, index=True)
+    name: str = Field(max_length=255, nullable=False)
+    shape_type: str = Field(
+        default="general",
+        sa_column=Column("type", String(64), nullable=False),
+    )
+    polygon_points: list[Any] = Field(sa_column=Column(JSONB, nullable=False))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
 
 
 class Zone(SQLModel, table=True):
@@ -66,9 +88,15 @@ class CountingLine(SQLModel, table=True):
 
     id: str = Field(primary_key=True, max_length=64)
     camera_id: str = Field(foreign_key="cameras.id", nullable=False, index=True)
+    name: str = Field(default="main", max_length=255, nullable=False)
     point_a: dict[str, float] = Field(sa_column=Column(JSONB, nullable=False))
     point_b: dict[str, float] = Field(sa_column=Column(JSONB, nullable=False))
-    direction: str = Field(max_length=64, nullable=False, default="bidirectional")
+    direction: str = Field(max_length=64, nullable=False, default="left_is_inside")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
 
 
 class Track(SQLModel, table=True):

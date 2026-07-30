@@ -17,6 +17,7 @@ from .models import (
     VisitorMetric,
     Zone,
     ZoneMetric,
+    ZoneShape,
 )
 from .session import session_scope
 
@@ -39,6 +40,7 @@ def seed_reference_data(*, force: bool = False) -> None:
             return
         _seed_core(session)
         _seed_cameras_and_zones(session)
+        _seed_zone_shapes(session)
         _seed_historical_metrics(session)
         session.commit()
 
@@ -119,9 +121,11 @@ def _seed_cameras_and_zones(session: Session) -> None:
             CountingLine(
                 id="line_entrance_main",
                 camera_id=line.get("camera_id", "entrance"),
+                name="main_entrance",
                 point_a={"x": line["x1"], "y": line["y1"]},
                 point_b={"x": line["x2"], "y": line["y2"]},
-                direction=line.get("inside_side", "bidirectional"),
+                direction="left_is_inside",
+                created_at=datetime.now(timezone.utc),
             )
         )
 
@@ -152,6 +156,35 @@ def _seed_cameras_and_zones(session: Session) -> None:
                     polygon_coords=z["polygon_coordinates"],
                     zone_type=z.get("zone_type", "general"),
                     analytics_enabled=z.get("analytics_enabled", True),
+                )
+            )
+
+
+def _map_zone_shape_type(zone_type: str) -> str:
+    if zone_type in ("queue", "checkout", "waiting"):
+        return "checkout_queue"
+    if zone_type == "entrance":
+        return "entrance"
+    return "general"
+
+
+def _seed_zone_shapes(session: Session) -> None:
+    for path, default_camera in (
+        (REPO_ROOT / "tests" / "videos" / "town_zones.json", "town"),
+        (REPO_ROOT / "tests" / "videos" / "shop_zones.json", "shop"),
+    ):
+        if not path.is_file():
+            continue
+        config = _load_json(path)
+        for z in config.get("zones", []):
+            session.merge(
+                ZoneShape(
+                    id=z["zone_id"],
+                    camera_id=z.get("camera_id", config.get("camera_id", default_camera)),
+                    name=z.get("zone_name", z["zone_id"]),
+                    shape_type=_map_zone_shape_type(z.get("zone_type", "general")),
+                    polygon_points=z["polygon_coordinates"],
+                    created_at=datetime.now(timezone.utc),
                 )
             )
 

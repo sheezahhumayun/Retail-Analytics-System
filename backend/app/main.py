@@ -7,7 +7,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .exceptions import register_exception_handlers
-from .routers import alerts, analytics, auth, cameras, events, stores
+from .routers import (
+    alerts,
+    alerts_extended,
+    analytics,
+    auth,
+    auth_me,
+    cameras,
+    cameras_extended,
+    events,
+    lines,
+    organizations,
+    reports,
+    stores,
+    users,
+    zones_config,
+)
 
 settings = get_settings()
 
@@ -37,11 +52,19 @@ register_exception_handlers(app)
 
 api = settings.api_prefix
 app.include_router(auth.router, prefix=api)
+app.include_router(auth_me.router, prefix=api)
+app.include_router(organizations.router, prefix=api)
 app.include_router(stores.router, prefix=api)
 app.include_router(cameras.router, prefix=api)
+app.include_router(cameras_extended.router, prefix=api)
+app.include_router(zones_config.router, prefix=api)
+app.include_router(lines.router, prefix=api)
 app.include_router(analytics.router, prefix=api)
 app.include_router(events.router, prefix=api)
 app.include_router(alerts.router, prefix=api)
+app.include_router(alerts_extended.router, prefix=api)
+app.include_router(reports.router, prefix=api)
+app.include_router(users.router, prefix=api)
 
 
 @app.get("/health", tags=["Health"], summary="Health check")
