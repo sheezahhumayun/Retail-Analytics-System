@@ -1,0 +1,328 @@
+"""CSV and PDF export rendering for analytics reports (Module 12.5)."""
+
+from __future__ import annotations
+
+import csv
+import io
+from typing import Any
+
+from ..schemas.extended.reports import ReportPayload
+
+REPORT_TITLES: dict[str, str] = {
+    "traffic": "Traffic Report",
+    "occupancy": "Occupancy Report",
+    "zones": "Zone Performance Report",
+    "dwell": "Dwell Time Report",
+    "queues": "Queue Analytics Report",
+}
+
+INTEGER_COLUMNS = frozenset(
+    {
+        "hour",
+        "entries",
+        "exits",
+        "visitors",
+        "occupancy",
+        "queue_length",
+        "dwell_count",
+        "zone_count",
+    }
+)
+
+FLOAT_COLUMNS = frozenset(
+    {
+        "avg_dwell",
+        "estimated_wait",
+        "dwell_seconds",
+        "avg_occupancy",
+        "avg_queue_length",
+        "max_queue_length",
+        "net_traffic",
+        "total_entries",
+        "total_exits",
+        "current_occupancy",
+        "peak_occupancy",
+        "session_count",
+        "avg_dwell_seconds",
+        "total_visitors",
+    }
+)
+
+# Brand palette (store-neutral defaults)
+COLOR_HEADER_BG = "#1e293b"
+COLOR_ACCENT = "#2563eb"
+COLOR_ROW_ALT = "#f1f5f9"
+COLOR_BORDER = "#cbd5e1"
+
+
+def _format_value(key: str, value: Any) -> str:
+    if value is None:
+        return ""
+    if key in INTEGER_COLUMNS or isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, float):
+        if key in INTEGER_COLUMNS or value.is_integer():
+            return str(int(value))
+        return f"{value:.2f}"
+    if isinstance(value, int):
+        return str(value)
+    return str(value)
+
+
+def _humanize_column(name: str) -> str:
+    return name.replace("_", " ").title()
+
+
+def report_to_csv(payload: ReportPayload) -> str:
+    """Emit metadata as ``#`` comments, KPI block as ``metric,value``, then a clean data table."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+
+    header = payload.header
+    writer.writerow([f"# report_type={header.report_type}"])
+    writer.writerow([f"# store_id={header.store_id}"])
+    writer.writerow([f"# from={header.from_}"])
+    writer.writerow([f"# to={header.to}"])
+    writer.writerow([f"# generated_at={header.generated_at}"])
+    writer.writerow([])
+
+    writer.writerow(["# KPI summary"])
+    writer.writerow(["metric", "value"])
+    for kpi in payload.kpis:
+        writer.writerow([kpi.key, _format_value(kpi.key, kpi.value)])
+    writer.writerow([])
+
+    if payload.table:
+        columns = list(payload.table[0].columns.keys())
+        writer.writerow(columns)
+        for row in payload.table:
+            writer.writerow(
+                [_format_value(col, row.columns.get(col)) for col in columns]
+            )
+
+    return buffer.getvalue()
+
+
+def _build_chart_png(payload: ReportPayload) -> io.BytesIO | None:
+    if not payload.series:
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(7.5, 2.8), dpi=120)
+    fig.patch.set_facecolor("white")
+
+    has_data = False
+    for series in payload.series[:2]:
+        points = series.points[:120]
+        if not points:
+            continue
+        xs = list(range(len(points)))
+        ys = [p.get("value", 0) for p in points]
+        if not ys:
+            continue
+        has_data = True
+        label = series.name.replace("_", " ").title()
+        ax.plot(xs, ys, linewidth=2, marker="o", markersize=3, label=label)
+
+    if not has_data:
+        plt.close(fig)
+        return None
+
+    ax.set_title("Trend", fontsize=10, color=COLOR_HEADER_BG, pad=8)
+    ax.grid(True, linestyle="--", alpha=0.35)
+    ax.legend(loc="upper right", fontsize=8, frameon=False)
+    ax.tick_params(labelsize=7)
+    first_points = payload.series[0].points[:120]
+    if len(first_points) <= 24:
+        labels = []
+        for p in first_points:
+            if "hour" in p:
+                labels.append(f"{p.get('date', '')} {p['hour']:02d}:00")
+            elif "timestamp" in p:
+                labels.append(str(p["timestamp"])[:16])
+            else:
+                labels.append(str(len(labels)))
+        step = max(1, len(labels) // 8)
+        ax.set_xticks(range(0, len(labels), step))
+        ax.set_xticklabels(
+            [labels[i] for i in range(0, len(labels), step)],
+            rotation=35,
+            ha="right",
+            fontsize=6,
+        )
+
+    fig.tight_layout()
+    out = io.BytesIO()
+    fig.savefig(out, format="png", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    out.seek(0)
+    return out
+
+
+def _pdf_footer(canvas, doc) -> None:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+
+    canvas.saveState()
+    canvas.setStrokeColor(colors.HexColor(COLOR_BORDER))
+    canvas.line(inch, 0.65 * inch, letter[0] - inch, 0.65 * inch)
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor("#64748b"))
+    canvas.drawString(inch, 0.42 * inch, "Generated by Retail Analytics Platform")
+    canvas.drawRightString(letter[0] - inch, 0.42 * inch, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def _pdf_header(canvas, doc, title: str, subtitle: str) -> None:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+
+    canvas.saveState()
+    canvas.setFillColor(colors.HexColor(COLOR_HEADER_BG))
+    canvas.rect(0, letter[1] - 72, letter[0], 72, fill=1, stroke=0)
+    canvas.setFillColor(colors.white)
+    canvas.setFont("Helvetica-Bold", 16)
+    canvas.drawString(48, letter[1] - 36, title)
+    canvas.setFont("Helvetica", 10)
+    canvas.drawString(48, letter[1] - 54, subtitle)
+    canvas.restoreState()
+
+
+def report_to_pdf(payload: ReportPayload) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        Image,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    buffer = io.BytesIO()
+    report_type = payload.header.report_type
+    title = REPORT_TITLES.get(report_type, "Analytics Report")
+    subtitle = (
+        f"Store: {payload.header.store_id}  |  "
+        f"{payload.header.from_} to {payload.header.to}  |  "
+        f"Generated: {payload.header.generated_at}"
+    )
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        leftMargin=0.65 * inch,
+        rightMargin=0.65 * inch,
+        topMargin=1.05 * inch,
+        bottomMargin=0.85 * inch,
+    )
+
+    def on_page(canvas, doc_obj):
+        _pdf_header(canvas, doc_obj, title, subtitle)
+        _pdf_footer(canvas, doc_obj)
+
+    styles = getSampleStyleSheet()
+    section_style = ParagraphStyle(
+        "Section",
+        parent=styles["Heading2"],
+        fontSize=11,
+        textColor=colors.HexColor(COLOR_HEADER_BG),
+        spaceAfter=8,
+        spaceBefore=4,
+    )
+    story: list[Any] = [Spacer(1, 0.35 * inch)]
+
+    # KPI summary cards (bordered table)
+    if payload.kpis:
+        story.append(Paragraph("Key Metrics", section_style))
+        kpi_rows = [[Paragraph("<b>Metric</b>", styles["Normal"]), Paragraph("<b>Value</b>", styles["Normal"])]]
+        for kpi in payload.kpis:
+            value = _format_value(kpi.key, kpi.value)
+            kpi_rows.append(
+                [
+                    Paragraph(kpi.label, styles["Normal"]),
+                    Paragraph(f'<font color="{COLOR_ACCENT}"><b>{value}</b></font>', styles["Normal"]),
+                ]
+            )
+        kpi_table = Table(kpi_rows, colWidths=[3.8 * inch, 2.2 * inch], hAlign="LEFT")
+        kpi_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(COLOR_HEADER_BG)),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 9),
+                    ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(COLOR_BORDER)),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor(COLOR_BORDER)),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                ]
+            )
+        )
+        story.append(kpi_table)
+        story.append(Spacer(1, 0.2 * inch))
+
+    chart_buf = _build_chart_png(payload)
+    if chart_buf is not None:
+        story.append(Paragraph("Trend", section_style))
+        story.append(Image(chart_buf, width=6.8 * inch, height=2.5 * inch))
+        story.append(Spacer(1, 0.15 * inch))
+
+    if payload.table:
+        story.append(Paragraph("Detail", section_style))
+        columns = list(payload.table[0].columns.keys())
+        header_row = [_humanize_column(c) for c in columns]
+        data_rows = [
+            [_format_value(col, row.columns.get(col)) for col in columns]
+            for row in payload.table
+        ]
+        table_data = [header_row, *data_rows]
+        col_count = len(columns)
+        page_width = letter[0] - doc.leftMargin - doc.rightMargin
+        col_width = page_width / col_count
+        data_table = Table(
+            table_data,
+            colWidths=[col_width] * col_count,
+            repeatRows=1,
+            hAlign="LEFT",
+        )
+        numeric_col_indexes = [
+            i for i, col in enumerate(columns) if col in INTEGER_COLUMNS | FLOAT_COLUMNS
+        ]
+        table_style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(COLOR_HEADER_BG)),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(COLOR_BORDER)),
+            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor(COLOR_BORDER)),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]
+        for row_idx in range(1, len(table_data)):
+            if row_idx % 2 == 0:
+                table_style.append(
+                    ("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor(COLOR_ROW_ALT))
+                )
+        for col_idx in numeric_col_indexes:
+            table_style.append(("ALIGN", (col_idx, 1), (col_idx, -1), "RIGHT"))
+        data_table.setStyle(TableStyle(table_style))
+        story.append(data_table)
+
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+    return buffer.getvalue()

@@ -286,6 +286,26 @@ class TestReports:
         )
         assert resp.status_code == 200
         assert "text/csv" in resp.headers["content-type"]
+        assert len(resp.content) > 100
+        text = resp.text
+        assert text.startswith("# report_type=")
+        assert "metric,value" in text
+        assert "date,hour,entries,exits" in text
+
+    def test_export_csv_zones(self, api_client: TestClient, user_headers: dict, yesterday: str):
+        resp = api_client.get(
+            "/api/reports/zones/export",
+            headers=user_headers,
+            params={
+                "store_id": STORE_ID,
+                "from": yesterday,
+                "to": yesterday,
+                "format": "csv",
+            },
+        )
+        assert resp.status_code == 200
+        assert "text/csv" in resp.headers["content-type"]
+        assert len(resp.content) > 80
 
     def test_export_pdf(self, api_client: TestClient, user_headers: dict, yesterday: str):
         resp = api_client.get(
@@ -300,6 +320,24 @@ class TestReports:
         )
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "application/pdf"
+        assert len(resp.content) > 3000
+        assert resp.content.startswith(b"%PDF")
+
+    def test_export_pdf_traffic(self, api_client: TestClient, user_headers: dict, yesterday: str):
+        resp = api_client.get(
+            "/api/reports/traffic/export",
+            headers=user_headers,
+            params={
+                "store_id": STORE_ID,
+                "from": yesterday,
+                "to": yesterday,
+                "format": "pdf",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/pdf"
+        assert len(resp.content) > 3000
+        assert resp.content.startswith(b"%PDF")
 
     def test_invalid_type(self, api_client: TestClient, user_headers: dict, yesterday: str):
         resp = api_client.get(

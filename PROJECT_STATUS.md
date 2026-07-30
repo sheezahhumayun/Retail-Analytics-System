@@ -1300,11 +1300,13 @@ backend\.venv\Scripts\python -m pytest tests/test_api.py -v   # 22 passed
    - `reports.py` — `GET /api/reports/{type}`, `GET /api/reports/{type}/export`
    - `users.py` — user admin CRUD + password reset
 
-3. **Services** — `services/reports.py` (aggregate rollups + CSV/PDF export), `services/camera_test.py` (lightweight stream probe), `services/passwords.py`.
+3. **Services** — `services/reports.py` (aggregate rollups), `services/report_export.py` (CSV/PDF rendering), `services/camera_test.py` (lightweight stream probe), `services/passwords.py`.
 
 4. **Seed** — `zone_shapes` populated from `town_zones.json` / `shop_zones.json`; counting line seed includes `name` + `created_at`.
 
-5. **Tests** — `tests/test_api_extended.py` (**24 tests**, `@pytest.mark.api_extended`).
+5. **Tests** — `tests/test_api_extended.py` (**26 tests**, `@pytest.mark.api_extended`).
+
+**Export format (2026-07-30):** CSV exports use `#`-comment metadata headers, a separated `metric,value` KPI block, and a rectangular data table via Python's `csv` module. PDF exports use ReportLab (header bar, KPI summary table, optional matplotlib trend chart, striped paginated detail table, footer with page numbers). Dependencies: `reportlab`, `matplotlib` (replaced `fpdf2`).
 
 ### New endpoints
 
