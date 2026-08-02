@@ -5,7 +5,7 @@ type AppRoutes = "/" | "/admin/cameras" | "/admin/users" | "/admin/zones-lines" 
 type PageRoutes = never
 type LayoutRoutes = "/" | "/admin"
 type RedirectRoutes = never
-type RewriteRoutes = never
+type RewriteRoutes = "/api/[[...path]]"
 type Routes = AppRoutes | PageRoutes | LayoutRoutes | RedirectRoutes | RewriteRoutes
 
 
@@ -21,6 +21,7 @@ interface ParamMap {
   "/analytics/queues": {}
   "/analytics/traffic": {}
   "/analytics/zones": {}
+  "/api/[[...path]]": { "path"?: string[]; }
   "/live-cameras": {}
   "/login": {}
   "/reports": {}

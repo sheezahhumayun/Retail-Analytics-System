@@ -24,12 +24,21 @@ export function OccupancyTrendChart() {
 
     async function load() {
       setLoading(true);
-      const rows = await getOccupancyTrend({
-        store_id: storeId ?? undefined,
-      });
-      if (!cancelled) {
-        setData(rows);
-        setLoading(false);
+      try {
+        const rows = await getOccupancyTrend({
+          store_id: storeId ?? undefined,
+        });
+        if (!cancelled) {
+          setData(rows);
+        }
+      } catch {
+        if (!cancelled) {
+          setData([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
 

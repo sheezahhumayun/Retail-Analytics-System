@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from database.session import POOL_SIZE, MAX_OVERFLOW, get_engine, log_pool_settings
 
 from .config import get_settings
 from .exceptions import register_exception_handlers
@@ -65,6 +69,19 @@ app.include_router(alerts.router, prefix=api)
 app.include_router(alerts_extended.router, prefix=api)
 app.include_router(reports.router, prefix=api)
 app.include_router(users.router, prefix=api)
+
+
+@app.on_event("startup")
+def log_database_pool_settings() -> None:
+    log_pool_settings(get_engine())
+    startup_logger = logging.getLogger("uvicorn.error")
+    startup_logger.info(
+        "Database pool limits: up to %d concurrent connections per process "
+        "(pool_size=%d + max_overflow=%d)",
+        POOL_SIZE + MAX_OVERFLOW,
+        POOL_SIZE,
+        MAX_OVERFLOW,
+    )
 
 
 @app.get("/health", tags=["Health"], summary="Health check")

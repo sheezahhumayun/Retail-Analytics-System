@@ -1,6 +1,14 @@
 # Retail Analytics Platform — Project Status
 
-_Last consolidated: 2026-07-25_
+_Last consolidated: 2026-07-25 · API integration: 2026-07-31 (see `PROJECT_STATUS.md`)_
+
+---
+
+## API integration (2026-07-31)
+
+**Status:** `lib/api/*.ts` now calls the live FastAPI backend. See **`frontend/PROJECT_STATUS.md`** for the per-function live vs client-side matrix. Shared client: `lib/api/client.ts` · mappers: `lib/api/mappers.ts`.
+
+**Still mock / client-only at the UI layer:** live camera CV overlays, customer flow trajectories, `fetchIntervalLabel`, report form `alert()` export buttons, `TestCameraModal` inline timer, zones/lines Save-to-console.
 
 ---
 

@@ -33,18 +33,22 @@ def _to_response(row: ZoneShape) -> ZoneShapeResponse:
     "",
     response_model=list[ZoneShapeResponse],
     summary="List zone shapes",
-    description="Return configured zone polygons for a camera (geometry/config, not analytics metrics).",
+    description=(
+        "Return configured zone polygons (geometry/config, not analytics metrics). "
+        "Omit `camera_id` to list all zones in one call."
+    ),
 )
 def list_zones(
     session: DbSession,
     _user: Annotated[TokenPayload, Depends(get_current_user)],
-    camera_id: Annotated[str, Query(description="Camera id")],
+    camera_id: Annotated[str | None, Query(description="Optional camera id filter")] = None,
 ) -> list[ZoneShapeResponse]:
-    if session.get(Camera, camera_id) is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
-    rows = session.exec(
-        select(ZoneShape).where(ZoneShape.camera_id == camera_id).order_by(ZoneShape.name)
-    ).all()
+    stmt = select(ZoneShape).order_by(ZoneShape.name)
+    if camera_id is not None:
+        if session.get(Camera, camera_id) is None:
+            raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+        stmt = stmt.where(ZoneShape.camera_id == camera_id)
+    rows = session.exec(stmt).all()
     return [_to_response(r) for r in rows]
 
 

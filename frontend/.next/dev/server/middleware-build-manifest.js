@@ -1,26 +1,18 @@
 globalThis.__BUILD_MANIFEST = {
-  "pages": {
-    "/_app": []
-  },
-  "devFiles": [],
   "polyfillFiles": [
-    "static/chunks/0lvz_next_dist_build_polyfills_polyfill-nomodule.js"
+    "static/chunks/polyfills.js"
   ],
+  "devFiles": [],
   "lowPriorityFiles": [
     "static/development/_buildManifest.js",
-    "static/development/_ssgManifest.js",
-    "static/development/_clientMiddlewareManifest.js"
+    "static/development/_ssgManifest.js"
   ],
   "rootMainFiles": [
-    "static/chunks/[turbopack]_browser_dev_hmr-client_hmr-client_ts_0w9-qja._.js",
-    "static/chunks/0lvz_next_dist_compiled_next-devtools_index_0xzudop.js",
-    "static/chunks/0lvz_next_dist_compiled_react-dom_0vs3i7e._.js",
-    "static/chunks/0lvz_next_dist_compiled_react-server-dom-turbopack_0l9~_~9._.js",
-    "static/chunks/0lvz_next_dist_compiled_09hwsec._.js",
-    "static/chunks/0lvz_next_dist_client_0rr-jf0._.js",
-    "static/chunks/0lvz_next_dist_0nl0lt5._.js",
-    "static/chunks/0lvz_@swc_helpers_cjs_0rr6b1l._.js",
-    "static/chunks/Desktop_retail-analytics_frontend_0rqeker._.js",
-    "static/chunks/turbopack-Desktop_retail-analytics_frontend_0fjx06m._.js"
-  ]
+    "static/chunks/webpack.js",
+    "static/chunks/main-app.js"
+  ],
+  "rootMainFilesTree": {},
+  "pages": {
+    "/_app": []
+  }
 };

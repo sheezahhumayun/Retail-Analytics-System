@@ -39,18 +39,22 @@ def _to_response(row: CountingLine) -> CountingLineResponse:
     "",
     response_model=list[CountingLineResponse],
     summary="List counting lines",
-    description="Return counting line geometry for a camera.",
+    description=(
+        "Return counting line geometry. "
+        "Omit `camera_id` to list all lines in one call."
+    ),
 )
 def list_lines(
     session: DbSession,
     _user: Annotated[TokenPayload, Depends(get_current_user)],
-    camera_id: Annotated[str, Query(description="Camera id")],
+    camera_id: Annotated[str | None, Query(description="Optional camera id filter")] = None,
 ) -> list[CountingLineResponse]:
-    if session.get(Camera, camera_id) is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
-    rows = session.exec(
-        select(CountingLine).where(CountingLine.camera_id == camera_id).order_by(CountingLine.name)
-    ).all()
+    stmt = select(CountingLine).order_by(CountingLine.name)
+    if camera_id is not None:
+        if session.get(Camera, camera_id) is None:
+            raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+        stmt = stmt.where(CountingLine.camera_id == camera_id)
+    rows = session.exec(stmt).all()
     return [_to_response(r) for r in rows]
 
 

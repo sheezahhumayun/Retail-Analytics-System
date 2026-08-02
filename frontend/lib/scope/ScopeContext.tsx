@@ -50,14 +50,23 @@ export function ScopeProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
 
     async function load() {
-      const org = await getOrganization();
-      if (cancelled) return;
+      try {
+        const org = await getOrganization();
+        if (cancelled) return;
 
-      setOrganization(org);
-      setStoreIdState(org.stores[0]?.id ?? null);
-      setCameraIdState(null);
-      setZoneIdState(null);
-      setIsLoading(false);
+        setOrganization(org);
+        setStoreIdState(org.stores[0]?.id ?? null);
+        setCameraIdState(null);
+        setZoneIdState(null);
+      } catch {
+        if (!cancelled) {
+          setOrganization(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
     }
 
     load();

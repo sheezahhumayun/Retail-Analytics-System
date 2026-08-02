@@ -81,6 +81,11 @@ class TestZoneShapes:
         assert resp.status_code == 200
         assert len(resp.json()) >= 1
 
+    def test_list_all_without_camera_id(self, api_client: TestClient, user_headers: dict):
+        resp = api_client.get("/api/zones", headers=user_headers)
+        assert resp.status_code == 200
+        assert len(resp.json()) >= 1
+
     def test_list_camera_not_found(self, api_client: TestClient, user_headers: dict):
         resp = api_client.get("/api/zones?camera_id=missing", headers=user_headers)
         assert resp.status_code == 404
@@ -143,6 +148,11 @@ class TestZoneShapes:
 class TestCountingLines:
     def test_list_seeded(self, api_client: TestClient, user_headers: dict):
         resp = api_client.get("/api/lines?camera_id=entrance", headers=user_headers)
+        assert resp.status_code == 200
+        assert len(resp.json()) >= 1
+
+    def test_list_all_without_camera_id(self, api_client: TestClient, user_headers: dict):
+        resp = api_client.get("/api/lines", headers=user_headers)
         assert resp.status_code == 200
         assert len(resp.json()) >= 1
 

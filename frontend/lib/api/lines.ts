@@ -1,33 +1,10 @@
-// MOCK IMPLEMENTATION — swap the function bodies below for real fetch() calls
-// to the FastAPI backend when Module 12 is live. Signatures and return types
-// must not change.
-
+import { apiRequest } from "@/lib/api/client";
+import {
+  mapCountingLine,
+  type BackendCountingLine,
+} from "@/lib/api/mappers";
 import { SHAPE_COLORS } from "@/lib/zones-lines-data";
 import type { LineShape, Point } from "@/lib/types";
-import { __getShapes, __setShapes } from "@/lib/api/zones";
-
-// ─── ID helper ───────────────────────────────────────────────────────────────
-
-let lineCounter = 1;
-
-function nextLineId(): string {
-  const id = `l-api-${String(lineCounter).padStart(3, "0")}`;
-  lineCounter += 1;
-  return id;
-}
-
-function clonePoint(p: Point): Point {
-  return { x: p.x, y: p.y };
-}
-
-function cloneLine(line: LineShape): LineShape {
-  return {
-    ...line,
-    points: [clonePoint(line.points[0]), clonePoint(line.points[1])],
-  };
-}
-
-// ─── Types ───────────────────────────────────────────────────────────────────
 
 export type CreateCountingLineData = Omit<LineShape, "kind" | "id" | "color"> & {
   id?: string;
@@ -38,58 +15,74 @@ export type UpdateCountingLineData = Partial<
   Pick<LineShape, "name" | "points" | "insideSide" | "color" | "cameraId">
 >;
 
-// ─── API functions ───────────────────────────────────────────────────────────
-
-export function getCountingLines(camera_id: string): Promise<LineShape[]> {
-  const lines = __getShapes().filter(
-    (s): s is LineShape => s.kind === "line" && s.cameraId === camera_id,
-  );
-  return Promise.resolve(lines.map(cloneLine));
+function denormalizePoint(point: Point, width = 640, height = 360): { x: number; y: number } {
+  return {
+    x: (point.x / 100) * width,
+    y: (point.y / 100) * height,
+  };
 }
 
-export function createCountingLine(
+export async function getCountingLines(camera_id: string): Promise<LineShape[]> {
+  const lines = await apiRequest<BackendCountingLine[]>("/api/lines", {
+    query: { camera_id },
+  });
+  return lines.map(mapCountingLine);
+}
+
+export async function createCountingLine(
   data: CreateCountingLineData,
 ): Promise<LineShape> {
-  const line: LineShape = {
-    kind: "line",
-    id: data.id ?? nextLineId(),
-    name: data.name,
-    points: [clonePoint(data.points[0]), clonePoint(data.points[1])],
-    insideSide: data.insideSide,
-    color: data.color ?? SHAPE_COLORS[3],
-    cameraId: data.cameraId,
-  };
-  __setShapes([...__getShapes(), line]);
-  return Promise.resolve(cloneLine(line));
+  const id =
+    data.id ??
+    `line_${data.cameraId}_${Date.now().toString(36)}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const created = await apiRequest<BackendCountingLine>("/api/lines", {
+    method: "POST",
+    body: {
+      id,
+      camera_id: data.cameraId,
+      name: data.name,
+      point_a: denormalizePoint(data.points[0]),
+      point_b: denormalizePoint(data.points[1]),
+      direction:
+        data.insideSide === "right" ? "right_is_inside" : "left_is_inside",
+    },
+  });
+  return mapCountingLine(created);
 }
 
-export function updateCountingLine(
+export async function updateCountingLine(
   id: string,
   data: UpdateCountingLineData,
 ): Promise<LineShape | null> {
-  const shapes = __getShapes();
-  const existing = shapes.find(
-    (s): s is LineShape => s.id === id && s.kind === "line",
-  );
-  if (!existing) return Promise.resolve(null);
+  const body: Record<string, unknown> = {};
+  if (data.name !== undefined) body.name = data.name;
+  if (data.points !== undefined) {
+    body.point_a = denormalizePoint(data.points[0]);
+    body.point_b = denormalizePoint(data.points[1]);
+  }
+  if (data.insideSide !== undefined) {
+    body.direction =
+      data.insideSide === "right" ? "right_is_inside" : "left_is_inside";
+  }
 
-  const updated: LineShape = {
-    ...existing,
-    ...data,
-    kind: "line",
-    id,
-    points: data.points
-      ? [clonePoint(data.points[0]), clonePoint(data.points[1])]
-      : [clonePoint(existing.points[0]), clonePoint(existing.points[1])],
-  };
-
-  __setShapes(shapes.map((s) => (s.id === id ? updated : s)));
-  return Promise.resolve(cloneLine(updated));
+  try {
+    const updated = await apiRequest<BackendCountingLine>(`/api/lines/${id}`, {
+      method: "PUT",
+      body,
+    });
+    return mapCountingLine(updated);
+  } catch {
+    return null;
+  }
 }
 
-export function deleteCountingLine(id: string): Promise<boolean> {
-  const shapes = __getShapes();
-  const before = shapes.length;
-  __setShapes(shapes.filter((s) => !(s.id === id && s.kind === "line")));
-  return Promise.resolve(__getShapes().length < before);
+export async function deleteCountingLine(id: string): Promise<boolean> {
+  try {
+    await apiRequest<void>(`/api/lines/${id}`, { method: "DELETE" });
+    return true;
+  } catch {
+    return false;
+  }
 }
+
+export { SHAPE_COLORS };

@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-30 (Module 13 — frontend pasted; mock-only, not yet wired to backend)
+**Last updated:** 2026-07-31 (Module 13.5 — frontend wired to live FastAPI backend)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -23,7 +23,7 @@
 | 11 | Database & Event Storage | ✅ Complete |
 | 12 | Backend REST API | ✅ Complete |
 | 12.5 | Extended REST API (frontend seam) | ✅ Complete |
-| 13 | Frontend Web Dashboard | ✅ Built (mock data only — **not wired** to backend) |
+| 13 | Frontend Web Dashboard | ✅ Complete (UI + live API via `lib/api/*`) |
 | 14 | Reports (CSV/PDF export) | ⬜ Not started (backend export in 12.5; frontend still mock) |
 | 15 | Alerting | ⬜ Not started |
 | 16 | System Administration | ⬜ Not started |
@@ -1323,13 +1323,13 @@ backend\.venv\Scripts\python -m pytest tests/test_api_extended.py -v
 
 ---
 
-## ✅ Module 13 — Frontend Web Dashboard — BUILT (mock-only)
+## ✅ Module 13 — Frontend Web Dashboard — COMPLETE
 
-**⚠️ Integration status:** The dashboard UI is complete and runs against in-memory / `localStorage` mocks via `frontend/lib/api/*.ts`. **No route is wired to the real FastAPI backend yet.** Swapping mock function bodies for `fetch()` calls is the next integration step — do not treat any feature as “live” until that swap lands.
+**Integration status (2026-07-31):** All `frontend/lib/api/*.ts` modules now call the live FastAPI backend at `http://127.0.0.1:8000` (override via `NEXT_PUBLIC_API_BASE_URL`). JWT auth stored in `localStorage` under `auth_session`. See **`frontend/PROJECT_STATUS.md`** for per-function live vs client-side notes.
 
-**Source of truth for frontend detail:** `frontend/FRONTEND_PROJECT_STATUS.md` (consolidated 2026-07-25). This section reconciles that doc against the **actual pasted codebase** as of 2026-07-30.
+**Login:** `admin@demo-retail.local` / `demo` (admin) · `user@demo-retail.local` / `demo` (user)
 
-### What was actually done
+### What was built (summary)
 
 1. **Full Next.js App Router dashboard** pasted into `frontend/` — 16 page routes, 51 component files under `components/`, shared `lib/types.ts` + `lib/constants.ts`, 10 `lib/api/*.ts` mock modules, 11 `lib/*-data.ts` internal generators (plus `lib/scope-data.ts` for org hierarchy).
 
@@ -1389,7 +1389,9 @@ backend\.venv\Scripts\python -m pytest tests/test_api_extended.py -v
 | Four user roles | Frontend: Store Manager / Operations Manager / Retail Analyst / System Administrator — backend RBAC is **`admin` / `user` only** |
 | `npx tsc --noEmit` → 0 errors | Not re-verified in monorepo paste; run locally before swap |
 
-### `lib/api/*.ts` → backend endpoint map (all **not yet wired**)
+### `lib/api/*.ts` → backend endpoint map
+
+**Now wired (2026-07-31).** See **`frontend/PROJECT_STATUS.md`** for the current per-function matrix. Summary below retained for architecture reference.
 
 Base URL when wired: `http://127.0.0.1:8000`. All calls will need `Authorization: Bearer <JWT>` except login.
 
@@ -1562,14 +1564,41 @@ npx tsc --noEmit     # typecheck before integration swap
 
 Login with any seed user email + password `demo`. Admin routes require **System Administrator** role in the mock user store.
 
-### ✅ Test Checkpoint 13 — Verified (UI / mock layer)
+### ✅ Test Checkpoint 13 — Verified
 
-- [x] 16 routes present under `frontend/app/` matching route map above
-- [x] 10 `lib/api/*.ts` modules with `MOCK IMPLEMENTATION` headers
-- [x] `app/` and `components/` do not import `lib/*-data.ts` directly
-- [x] Scope selector wired on 10 dashboard pages per frontend status doc
-- [ ] **Not verified:** live integration against `http://127.0.0.1:8000` (intentionally deferred)
+- [x] 16 routes present under `frontend/app/`
+- [x] `lib/api/client.ts` — JWT fetch wrapper + `{error:{code,message}}` handling
+- [x] All 10 `lib/api/*.ts` modules call live backend (see `frontend/PROJECT_STATUS.md`)
+- [x] `npx tsc --noEmit` — 0 errors (2026-07-31)
+- [x] Mappers in `lib/api/mappers.ts` translate backend shapes → existing UI types
 
 ---
 
-## Next Up: Module 13.5 — Mock → Real API Integration
+## ✅ Module 13.5 — Mock → Real API Integration — DONE
+
+**What changed:** Replaced in-memory mock implementations in `frontend/lib/api/*.ts` with HTTP calls to Modules 12 + 12.5 endpoints. Added `lib/api/client.ts` (auth header, base URL, typed errors) and `lib/api/mappers.ts` (response → UI type translation). **No component or page files were modified.**
+
+**Dev startup:**
+```powershell
+# Terminal 1 — backend
+alembic -c database/alembic.ini upgrade head
+python -m database.seed
+backend\.venv\Scripts\uvicorn app.main:app --reload --app-dir backend
+
+# Terminal 2 — frontend
+cd frontend
+npm run dev
+```
+
+**Still client-side / no backend source (UI unchanged):**
+- Live camera CV overlays (`boundingBoxes`, zones on tile) — empty arrays from mapper
+- Customer Flow trajectories — placeholder page, no API
+- `fetchIntervalLabel` — `DateRangeKey` label strings from `lib/analytics-data.ts`
+- Report form CSV/PDF buttons still call `alert()` in the component; `getReport({ format: 'csv'|'pdf' })` triggers real download when invoked
+- Overview KPI dwell/queue cards — partial (traffic + occupancy from API; dwell/queue default to 0 without extra zone-scoped calls)
+- `TestCameraModal` component still uses inline timer logic (not `testCamera()` API) — API function is live for future wiring
+- Zones/lines admin Save button still logs to console — CRUD functions in `lib/api/zones.ts` / `lines.ts` are live
+
+---
+
+## Next Up: Module 14 — Reports UI Export Wiring

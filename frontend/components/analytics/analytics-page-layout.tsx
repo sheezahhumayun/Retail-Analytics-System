@@ -38,14 +38,22 @@ export function AnalyticsPageLayout({ config }: { config: AnalyticsPageConfig })
 
     async function load() {
       setLoading(true);
-      const [rows, summaries] = await Promise.all([
-        config.getData(range),
-        config.getStats(range),
-      ]);
-      if (!cancelled) {
-        setData(rows);
-        setStats(summaries);
-        setLoading(false);
+      try {
+        // Single data fetch — stats are derived client-side (no duplicate HTTP).
+        const rows = await config.getData(range);
+        if (!cancelled) {
+          setData(rows);
+          setStats(config.getStats(rows));
+        }
+      } catch {
+        if (!cancelled) {
+          setData([]);
+          setStats([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
 

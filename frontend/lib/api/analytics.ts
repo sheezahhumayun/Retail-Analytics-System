@@ -1,32 +1,30 @@
-// MOCK IMPLEMENTATION — swap the function bodies below for real fetch() calls
-// to the FastAPI backend when Module 12 is live. Signatures and return types
-// must not change.
-
+import { apiRequest } from "@/lib/api/client";
 import {
-  getDwellTimeData,
-  getDwellTimeStats,
-  getIntervalLabel,
-  getOccupancyData,
-  getOccupancyStats,
-  getQueuesData,
-  getQueuesStats,
-  getTrafficData,
-  getTrafficStats,
-  getZonesData,
-  getZonesStats,
-} from "@/lib/analytics-data";
-import {
+  densityToHeatBlobs,
+  dwellStatsFromSessions,
   FLOOR_ZONES,
-  HEAT_BLOBS,
-  HEATMAP_CAMERAS,
-  ZONE_PERFORMANCE,
-} from "@/lib/heatmap-data";
-import {
-  entriesExitsData,
-  kpiData,
-  occupancyTrendData,
-  visitorsByHourData,
-} from "@/lib/overview-data";
+  mapDwellSessions,
+  mapOccupancyTrend,
+  mapQueueSamples,
+  mapTrafficBuckets,
+  mapZoneBuckets,
+  occupancyStatsFromRows,
+  priorDateRange,
+  queueStatsFromRows,
+  trafficStatsFromRows,
+  zoneRowFromAnalytics,
+  zoneStatsFromRows,
+  type BackendCamera,
+  type BackendDwellResponse,
+  type BackendHeatmapResponse,
+  type BackendOccupancyResponse,
+  type BackendQueueResponse,
+  type BackendTrafficResponse,
+  type BackendZoneAnalyticsResponse,
+} from "@/lib/api/mappers";
+import { getDefaultStoreId, getDefaultZoneId, getOrganization } from "@/lib/api/stores";
+import { getIntervalLabel } from "@/lib/analytics-data";
+import { dateRangeForKey } from "@/lib/scope/date-range";
 import type {
   DataRow,
   DateRangeKey,
@@ -36,36 +34,15 @@ import type {
   StatSummary,
   ZoneRow,
 } from "@/lib/types";
-import {
-  scaleDataRows,
-  scopeScaleFactor,
-  filterZonePerformanceRows,
-} from "@/lib/scope/scope-filters";
+import type { kpiData as OverviewKpiDataType } from "@/lib/overview-data";
 
-export type OverviewKpiData = typeof kpiData;
-export type VisitorsByHourRow = (typeof visitorsByHourData)[number];
-export type EntriesExitsRow = (typeof entriesExitsData)[number];
-export type OccupancyTrendRow = (typeof occupancyTrendData)[number];
+export type OverviewKpiData = typeof OverviewKpiDataType;
+export type VisitorsByHourRow = { hour: string; visitors: number };
+export type EntriesExitsRow = { hour: string; entries: number; exits: number };
+export type OccupancyTrendRow = { day: string; occupancy: number };
 
 export interface OverviewScopeParams {
   store_id?: string;
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function inferDateRangeKey(from: string, to: string): DateRangeKey {
-  const start = new Date(from).getTime();
-  const end = new Date(to).getTime();
-  if (Number.isNaN(start) || Number.isNaN(end)) return "day";
-
-  const diffMs = Math.abs(end - start);
-  const diffHours = diffMs / (1000 * 60 * 60);
-  const diffDays = diffMs / (1000 * 60 * 60 * 24);
-
-  if (diffHours <= 1.5) return "hour";
-  if (diffDays <= 1.5) return "day";
-  if (diffDays <= 8) return "week";
-  return "month";
 }
 
 export interface DateRangeParams {
@@ -118,221 +95,396 @@ export interface ZonesResult {
   performance: ZoneRow | undefined;
 }
 
-// ─── API functions ───────────────────────────────────────────────────────────
+async function findZoneName(zone_id: string): Promise<string> {
+  try {
+    const org = await getOrganization();
+    for (const store of org.stores) {
+      for (const camera of store.cameras) {
+        for (const zone of camera.zones) {
+          if (zone.id === zone_id) {
+            return zone.name;
+          }
+        }
+      }
+    }
+  } catch {
+    // fall through to id
+  }
+  return zone_id;
+}
 
-export function getTraffic({
-  store_id: _store_id,
+async function fetchTrafficResponse(
+  store_id: string,
+  from: string,
+  to: string,
+): Promise<BackendTrafficResponse> {
+  return apiRequest<BackendTrafficResponse>("/api/analytics/traffic", {
+    query: { store_id, from, to },
+  });
+}
+
+export async function getTraffic({
+  store_id,
   from,
   to,
 }: TrafficParams): Promise<DataRow[]> {
-  const range = inferDateRangeKey(from, to);
-  return Promise.resolve(getTrafficData(range));
+  const prior = priorDateRange(from, to);
+  const [current, previous] = await Promise.all([
+    fetchTrafficResponse(store_id, from, to),
+    fetchTrafficResponse(store_id, prior.from, prior.to).catch(() => null),
+  ]);
+  return mapTrafficBuckets(current.buckets, previous?.buckets ?? []);
 }
 
-export function getOccupancy({
-  camera_id: _camera_id,
-  store_id: _store_id,
+export async function getOccupancy({
+  camera_id,
+  store_id,
 }: OccupancyParams = {}): Promise<DataRow[]> {
-  return Promise.resolve(getOccupancyData("day"));
+  const query: Record<string, string> = {};
+  if (camera_id) query.camera_id = camera_id;
+  else if (store_id) query.store_id = store_id;
+  else {
+    query.store_id = await getDefaultStoreId();
+  }
+
+  const response = await apiRequest<BackendOccupancyResponse>(
+    "/api/analytics/occupancy",
+    { query },
+  );
+  return mapOccupancyTrend(response.trend);
 }
 
-export function getZones({
+export async function getZones({
   zone_id,
   from,
   to,
 }: ZonesParams): Promise<ZonesResult> {
-  const range = inferDateRangeKey(from, to);
-  const rows = getZonesData(range);
-  const performance = ZONE_PERFORMANCE.find((z) => z.id === zone_id);
+  const prior = priorDateRange(from, to);
+  const [current, previous] = await Promise.all([
+    apiRequest<BackendZoneAnalyticsResponse>("/api/analytics/zones", {
+      query: { zone_id, from, to },
+    }),
+    apiRequest<BackendZoneAnalyticsResponse>("/api/analytics/zones", {
+      query: { zone_id, from: prior.from, to: prior.to },
+    }).catch(() => null),
+  ]);
 
-  return Promise.resolve({
+  const rows = mapZoneBuckets(current.buckets, previous?.buckets ?? []);
+  const zoneName = await findZoneName(zone_id);
+
+  return {
     zone_id,
     from,
     to,
     rows,
-    performance,
-  });
+    performance: zoneRowFromAnalytics(zone_id, zoneName, current.buckets),
+  };
 }
 
-export function getDwell({
-  zone_id: _zone_id,
+export async function getDwell({
+  zone_id,
   from,
   to,
 }: DwellParams): Promise<DataRow[]> {
-  const range = inferDateRangeKey(from, to);
-  return Promise.resolve(getDwellTimeData(range));
+  const response = await apiRequest<BackendDwellResponse>("/api/analytics/dwell", {
+    query: { zone_id, from, to },
+  });
+  return mapDwellSessions(response.sessions);
 }
 
-export function getHeatmap({
+export async function getHeatmap({
   camera_id,
   date,
   from_time,
   to_time,
 }: HeatmapParams): Promise<HeatmapResult> {
-  const blobs = HEAT_BLOBS[camera_id] ?? HEAT_BLOBS["cam-overview"] ?? [];
+  const response = await apiRequest<BackendHeatmapResponse>(
+    "/api/analytics/heatmap",
+    {
+      query: {
+        camera_id,
+        date,
+        from_time,
+        to_time,
+      },
+    },
+  );
 
-  return Promise.resolve({
+  return {
     camera_id,
     date,
     from_time,
     to_time,
-    blobs,
+    blobs: densityToHeatBlobs(response.density),
     floor_zones: FLOOR_ZONES,
-  });
+  };
 }
 
-export function getQueues({
-  zone_id: _zone_id,
+export async function getQueues({
+  zone_id,
   from,
   to,
 }: QueuesParams): Promise<DataRow[]> {
-  const range = inferDateRangeKey(from, to);
-  return Promise.resolve(getQueuesData(range));
+  const prior = priorDateRange(from, to);
+  const [current, previous] = await Promise.all([
+    apiRequest<BackendQueueResponse>("/api/analytics/queues", {
+      query: { zone_id, from, to },
+    }),
+    apiRequest<BackendQueueResponse>("/api/analytics/queues", {
+      query: { zone_id, from: prior.from, to: prior.to },
+    }).catch(() => null),
+  ]);
+  return mapQueueSamples(current.samples, previous?.samples ?? []);
 }
 
-// ─── Overview dashboard ──────────────────────────────────────────────────────
+export async function getOverviewKpis(
+  params: OverviewScopeParams = {},
+): Promise<OverviewKpiData> {
+  const store_id = params.store_id ?? (await getDefaultStoreId());
+  const today = new Date().toISOString().slice(0, 10);
+  const [traffic, occupancy, cameras] = await Promise.all([
+    fetchTrafficResponse(store_id, today, today).catch(() => null),
+    apiRequest<BackendOccupancyResponse>("/api/analytics/occupancy", {
+      query: { store_id },
+    }).catch(() => null),
+    apiRequest<BackendCamera[]>("/api/cameras", {
+      query: { store_id },
+    }).catch(() => []),
+  ]);
 
-function scaleOverviewKpis(
-  data: OverviewKpiData,
-  factor: number,
-): OverviewKpiData {
+  const visitorsToday = traffic?.total_entries ?? 0;
+  const currentOcc = occupancy?.current ?? 0;
+  const peakOcc = occupancy?.trend.reduce(
+    (max, point) => Math.max(max, point.current_occupancy),
+    0,
+  ) ?? currentOcc;
+  const peakPoint =
+    occupancy?.trend && occupancy.trend.length > 0
+      ? occupancy.trend.reduce(
+          (best, point) =>
+            point.current_occupancy > best.current_occupancy ? point : best,
+          occupancy.trend[0],
+        )
+      : null;
+  const activeCameras = cameras.filter((camera) => camera.status === "online").length;
+
   return {
-    ...data,
     visitorsToday: {
-      ...data.visitorsToday,
-      value: Math.round(data.visitorsToday.value * factor),
+      value: visitorsToday,
+      label: "Visitors Today",
+      trend: 0,
+      icon: "users",
     },
     occupancy: {
-      ...data.occupancy,
-      value: Math.min(100, Math.round(data.occupancy.value * factor)),
+      value: currentOcc,
+      unit: "",
+      label: "Current Occupancy",
+      trend: 0,
+      icon: "activity",
     },
     peakOccupancy: {
-      ...data.peakOccupancy,
-      value: Math.min(100, Math.round(data.peakOccupancy.value * factor)),
+      value: peakOcc,
+      unit: "",
+      label: "Peak Occupancy",
+      subtext: peakPoint?.timestamp?.slice(11, 16) ?? "—",
+      icon: "zap",
+    },
+    dwellTime: {
+      value: 0,
+      unit: "min",
+      label: "Average Dwell Time",
+      trend: 0,
+      icon: "clock",
     },
     queueLength: {
-      ...data.queueLength,
-      value: Math.round(data.queueLength.value * factor),
+      value: 0,
+      label: "Current Queue Length",
+      trend: 0,
+      icon: "list",
+    },
+    activeCameras: {
+      value: activeCameras,
+      total: cameras.length,
+      label: "Active Cameras",
+      icon: "camera",
     },
   };
 }
 
-export function getOverviewKpis(
-  params: OverviewScopeParams = {},
-): Promise<OverviewKpiData> {
-  if (!params.store_id) return Promise.resolve(kpiData);
-  return Promise.resolve(
-    scaleOverviewKpis(kpiData, scopeScaleFactor(params.store_id)),
-  );
-}
-
-export function getVisitorsByHour(
+export async function getVisitorsByHour(
   params: OverviewScopeParams = {},
 ): Promise<VisitorsByHourRow[]> {
-  if (!params.store_id) return Promise.resolve(visitorsByHourData);
-  const factor = scopeScaleFactor(params.store_id);
-  return Promise.resolve(
-    visitorsByHourData.map((row) => ({
-      ...row,
-      visitors: Math.round(row.visitors * factor),
-    })),
-  );
+  const store_id = params.store_id ?? (await getDefaultStoreId());
+  const today = new Date().toISOString().slice(0, 10);
+  const traffic = await fetchTrafficResponse(store_id, today, today);
+  return traffic.buckets.map((bucket) => ({
+    hour:
+      bucket.hour === 0
+        ? "12 AM"
+        : bucket.hour < 12
+          ? `${bucket.hour} AM`
+          : bucket.hour === 12
+            ? "12 PM"
+            : `${bucket.hour - 12} PM`,
+    visitors: bucket.entries,
+  }));
 }
 
-export function getEntriesExits(
+export async function getEntriesExits(
   params: OverviewScopeParams = {},
 ): Promise<EntriesExitsRow[]> {
-  if (!params.store_id) return Promise.resolve(entriesExitsData);
-  const factor = scopeScaleFactor(params.store_id);
-  return Promise.resolve(
-    entriesExitsData.map((row) => ({
-      ...row,
-      entries: Math.round(row.entries * factor),
-      exits: Math.round(row.exits * factor),
-    })),
-  );
+  const store_id = params.store_id ?? (await getDefaultStoreId());
+  const today = new Date().toISOString().slice(0, 10);
+  const traffic = await fetchTrafficResponse(store_id, today, today);
+  return traffic.buckets.map((bucket) => ({
+    hour:
+      bucket.hour === 0
+        ? "12 AM"
+        : bucket.hour < 12
+          ? `${bucket.hour} AM`
+          : bucket.hour === 12
+            ? "12 PM"
+            : `${bucket.hour - 12} PM`,
+    entries: bucket.entries,
+    exits: bucket.exits,
+  }));
 }
 
-export function getOccupancyTrend(
+export async function getOccupancyTrend(
   params: OverviewScopeParams = {},
 ): Promise<OccupancyTrendRow[]> {
-  if (!params.store_id) return Promise.resolve(occupancyTrendData);
-  const factor = scopeScaleFactor(params.store_id);
-  return Promise.resolve(
-    occupancyTrendData.map((row) => ({
-      ...row,
-      occupancy: Math.min(100, Math.round(row.occupancy * factor)),
-    })),
+  const store_id = params.store_id ?? (await getDefaultStoreId());
+  const response = await apiRequest<BackendOccupancyResponse>(
+    "/api/analytics/occupancy",
+    { query: { store_id } },
   );
+  return response.trend.map((point) => ({
+    day: point.timestamp.slice(0, 10),
+    occupancy: point.current_occupancy,
+  }));
 }
 
-// ─── Analytics page helpers (by DateRangeKey) ────────────────────────────────
-
-export function fetchTrafficData(range: DateRangeKey): Promise<DataRow[]> {
-  return Promise.resolve(getTrafficData(range));
+export async function fetchTrafficData(range: DateRangeKey): Promise<DataRow[]> {
+  const { from, to } = dateRangeForKey(range);
+  const store_id = await getDefaultStoreId();
+  return getTraffic({ store_id, from, to });
 }
 
-export function fetchTrafficStats(range: DateRangeKey): Promise<StatSummary[]> {
-  return Promise.resolve(getTrafficStats(range));
+export async function fetchTrafficStats(range: DateRangeKey): Promise<StatSummary[]> {
+  const rows = await fetchTrafficData(range);
+  return trafficStatsFromRows(rows);
 }
 
-export function fetchOccupancyData(range: DateRangeKey): Promise<DataRow[]> {
-  return Promise.resolve(getOccupancyData(range));
+export async function fetchOccupancyData(range: DateRangeKey): Promise<DataRow[]> {
+  const store_id = await getDefaultStoreId();
+  return getOccupancy({ store_id });
 }
 
-export function fetchOccupancyStats(
+export async function fetchOccupancyStats(
   range: DateRangeKey,
 ): Promise<StatSummary[]> {
-  return Promise.resolve(getOccupancyStats(range));
+  const rows = await fetchOccupancyData(range);
+  return occupancyStatsFromRows(rows);
 }
 
-export function fetchZonesData(range: DateRangeKey): Promise<DataRow[]> {
-  return Promise.resolve(getZonesData(range));
+export async function fetchZonesData(range: DateRangeKey): Promise<DataRow[]> {
+  const { from, to } = dateRangeForKey(range);
+  const zone_id = await getDefaultZoneId();
+  const result = await getZones({ zone_id, from, to });
+  return result.rows;
 }
 
-export function fetchZonesStats(range: DateRangeKey): Promise<StatSummary[]> {
-  return Promise.resolve(getZonesStats(range));
+export async function fetchZonesStats(range: DateRangeKey): Promise<StatSummary[]> {
+  const rows = await fetchZonesData(range);
+  return zoneStatsFromRows(rows);
 }
 
-export function fetchDwellTimeData(range: DateRangeKey): Promise<DataRow[]> {
-  return Promise.resolve(getDwellTimeData(range));
+export async function fetchDwellTimeData(range: DateRangeKey): Promise<DataRow[]> {
+  const { from, to } = dateRangeForKey(range);
+  const zone_id = await getDefaultZoneId();
+  return getDwell({ zone_id, from, to });
 }
 
-export function fetchDwellTimeStats(
+export async function fetchDwellTimeStats(
   range: DateRangeKey,
 ): Promise<StatSummary[]> {
-  return Promise.resolve(getDwellTimeStats(range));
+  const { from, to } = dateRangeForKey(range);
+  const zone_id = await getDefaultZoneId();
+  const response = await apiRequest<BackendDwellResponse>("/api/analytics/dwell", {
+    query: { zone_id, from, to },
+  });
+  return dwellStatsFromSessions(response.sessions, response.avg_dwell_seconds);
 }
 
-export function fetchQueuesData(range: DateRangeKey): Promise<DataRow[]> {
-  return Promise.resolve(getQueuesData(range));
+export async function fetchQueuesData(range: DateRangeKey): Promise<DataRow[]> {
+  const { from, to } = dateRangeForKey(range);
+  const zone_id = await getDefaultZoneId();
+  return getQueues({ zone_id, from, to });
 }
 
-export function fetchQueuesStats(range: DateRangeKey): Promise<StatSummary[]> {
-  return Promise.resolve(getQueuesStats(range));
+export async function fetchQueuesStats(range: DateRangeKey): Promise<StatSummary[]> {
+  const rows = await fetchQueuesData(range);
+  return queueStatsFromRows(rows);
 }
 
 export function fetchIntervalLabel(range: DateRangeKey): string {
   return getIntervalLabel(range);
 }
 
-// ─── Heatmap / zone performance ─────────────────────────────────────────────
-
-export function getHeatmapCameras(): Promise<HeatmapCamera[]> {
-  return Promise.resolve(HEATMAP_CAMERAS);
+export async function getHeatmapCameras(): Promise<HeatmapCamera[]> {
+  const cameras = await apiRequest<{ id: string; name: string; camera_type: string }[]>(
+    "/api/cameras",
+  );
+  return cameras
+    .filter((camera) => camera.camera_type === "fixed" || camera.camera_type === "fisheye")
+    .map((camera) => ({ id: camera.id, label: camera.name }));
 }
 
-export function getZonePerformance(
+export async function getZonePerformance(
   params: { store_id?: string; zone_id?: string } = {},
 ): Promise<ZoneRow[]> {
-  if (!params.store_id && !params.zone_id) {
-    return Promise.resolve(ZONE_PERFORMANCE);
+  const { from, to } = dateRangeForKey("week");
+
+  const zoneShapes: Array<{ id: string; name: string }> = [];
+  try {
+    const org = await getOrganization();
+    for (const store of org.stores) {
+      if (params.store_id && store.id !== params.store_id) {
+        continue;
+      }
+      for (const camera of store.cameras) {
+        for (const zone of camera.zones) {
+          if (params.zone_id && zone.id !== params.zone_id) {
+            continue;
+          }
+          zoneShapes.push({ id: zone.id, name: zone.name });
+        }
+      }
+    }
+  } catch {
+    return [];
   }
-  return Promise.resolve(
-    filterZonePerformanceRows(
-      ZONE_PERFORMANCE,
-      params.zone_id ?? null,
-      params.store_id ?? null,
-    ),
-  );
+
+  const uniqueZones = new Map<string, { id: string; name: string }>();
+  for (const shape of zoneShapes) {
+    uniqueZones.set(shape.id, shape);
+  }
+
+  // Backend has no store-level zone analytics aggregate yet (PROJECT_STATUS gap).
+  // Fetch sequentially instead of Promise.all so we never open N concurrent
+  // DB sessions from one page load.
+  const rows: ZoneRow[] = [];
+  for (const shape of uniqueZones.values()) {
+    try {
+      const analytics = await apiRequest<BackendZoneAnalyticsResponse>(
+        "/api/analytics/zones",
+        { query: { zone_id: shape.id, from, to } },
+      );
+      rows.push(zoneRowFromAnalytics(shape.id, shape.name, analytics.buckets));
+    } catch {
+      rows.push(zoneRowFromAnalytics(shape.id, shape.name, []));
+    }
+  }
+
+  return rows;
 }

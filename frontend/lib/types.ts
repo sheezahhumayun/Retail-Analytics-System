@@ -54,8 +54,8 @@ export interface AnalyticsPageConfig {
   chartType: ChartType;
   /** Called whenever range/comparison changes — returns the rows to display */
   getData: (range: DateRangeKey) => Promise<DataRow[]>;
-  /** Called whenever range changes — returns the 3 stat summary cards */
-  getStats: (range: DateRangeKey) => Promise<StatSummary[]>;
+  /** Derive the 3 stat summary cards from already-fetched rows (no extra HTTP) */
+  getStats: (rows: DataRow[]) => StatSummary[];
   /** Column header for the interval column in the data table */
   getIntervalLabel: (range: DateRangeKey) => string;
   /** Labels for current / prior in legend & table header */

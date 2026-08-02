@@ -118,8 +118,13 @@ export function resolveZoneId(
 ): string {
   if (zoneId) return zoneId;
   if (camera?.zones[0]?.id) return camera.zones[0].id;
-  if (store?.cameras[0]?.zones[0]?.id) return store.cameras[0].zones[0].id;
-  return "entrance";
+  if (store) {
+    for (const scopedCamera of store.cameras) {
+      if (scopedCamera.zones[0]?.id) return scopedCamera.zones[0].id;
+    }
+  }
+  // Seeded analytics zone id (see database/seed.py); not a camera id.
+  return "store1";
 }
 
 export function filterZonePerformanceRows(

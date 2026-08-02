@@ -21,10 +21,19 @@ export default function AlertsPage() {
     let cancelled = false;
 
     async function load() {
-      const data = await getAlerts();
-      if (!cancelled) {
-        setAlerts(data);
-        setLoading(false);
+      try {
+        const data = await getAlerts();
+        if (!cancelled) {
+          setAlerts(data);
+        }
+      } catch {
+        if (!cancelled) {
+          setAlerts([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
 

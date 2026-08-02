@@ -1,9 +1,11 @@
-// MOCK IMPLEMENTATION — swap the function bodies below for real fetch() calls
-// to the FastAPI backend when Module 12 is live. Signatures and return types
-// must not change.
-
+import { apiRequest } from "@/lib/api/client";
 import {
-  MOCK_ALERTS,
+  mapAlert,
+  type BackendAlert,
+  type BackendAlertList,
+} from "@/lib/api/mappers";
+import { getOrganization } from "@/lib/api/stores";
+import {
   formatAlertTime,
   getAlertLabel,
   getSeverityColor,
@@ -29,29 +31,59 @@ export type AlertPatch = Partial<
   Pick<Alert, "status" | "severity" | "message">
 >;
 
-export function getAlerts({
+/** Name lookups from the cached org tree — no per-camera zone fan-out. */
+async function buildNameLookups(): Promise<{
+  cameras: Map<string, string>;
+  zones: Map<string, string>;
+}> {
+  const cameraNames = new Map<string, string>();
+  const zoneNames = new Map<string, string>();
+  try {
+    const org = await getOrganization();
+    for (const store of org.stores) {
+      for (const camera of store.cameras) {
+        cameraNames.set(camera.id, camera.name);
+        for (const zone of camera.zones) {
+          zoneNames.set(zone.id, zone.name);
+        }
+      }
+    }
+  } catch {
+    // leave maps empty — mapper falls back to ids
+  }
+  return { cameras: cameraNames, zones: zoneNames };
+}
+
+export async function getAlerts({
   status,
   severity,
 }: GetAlertsParams = {}): Promise<Alert[]> {
-  let results = [...MOCK_ALERTS];
+  const [response, lookups] = await Promise.all([
+    apiRequest<BackendAlertList>("/api/alerts", {
+      query: {
+        status,
+        severity,
+      },
+    }),
+    buildNameLookups(),
+  ]);
 
-  if (status) {
-    results = results.filter((a) => a.status === status);
-  }
-  if (severity) {
-    results = results.filter((a) => a.severity === severity);
-  }
-
-  return Promise.resolve(results);
+  return response.alerts.map((alert) =>
+    mapAlert(alert, lookups.cameras, lookups.zones),
+  );
 }
 
-export function updateAlert(
+export async function updateAlert(
   id: string,
   patch: AlertPatch,
 ): Promise<Alert | null> {
-  const alert = MOCK_ALERTS.find((a) => a.id === id);
-  if (!alert) return Promise.resolve(null);
+  if (!patch.status) return null;
 
-  Object.assign(alert, patch);
-  return Promise.resolve({ ...alert });
+  const updated = await apiRequest<BackendAlert>(`/api/alerts/${id}`, {
+    method: "PATCH",
+    body: { status: patch.status },
+  });
+
+  const lookups = await buildNameLookups();
+  return mapAlert(updated, lookups.cameras, lookups.zones);
 }

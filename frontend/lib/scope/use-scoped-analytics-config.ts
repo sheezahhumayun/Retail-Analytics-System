@@ -4,22 +4,24 @@ import { useMemo } from "react";
 
 import {
   fetchDwellTimeData,
-  fetchDwellTimeStats,
   fetchIntervalLabel,
   fetchOccupancyData,
-  fetchOccupancyStats,
   fetchQueuesData,
-  fetchQueuesStats,
   fetchTrafficData,
-  fetchTrafficStats,
   fetchZonesData,
-  fetchZonesStats,
   getDwell,
   getOccupancy,
   getQueues,
   getTraffic,
   getZones,
 } from "@/lib/api/analytics";
+import {
+  dwellStatsFromRows,
+  occupancyStatsFromRows,
+  queueStatsFromRows,
+  trafficStatsFromRows,
+  zoneStatsFromRows,
+} from "@/lib/api/mappers";
 import { dateRangeForKey } from "@/lib/scope/date-range";
 import {
   resolveZoneId,
@@ -28,7 +30,7 @@ import {
   scopeScaleFactor,
 } from "@/lib/scope/scope-filters";
 import { useScope } from "@/lib/scope/ScopeContext";
-import type { AnalyticsPageConfig } from "@/lib/types";
+import type { AnalyticsPageConfig, DataRow, StatSummary } from "@/lib/types";
 
 type ScopedAnalyticsKind = "traffic" | "occupancy" | "zones" | "dwell" | "queues";
 
@@ -38,6 +40,25 @@ type ScopedAnalyticsBase = Omit<
 > & {
   getIntervalLabel?: AnalyticsPageConfig["getIntervalLabel"];
 };
+
+function statsForKind(kind: ScopedAnalyticsKind, rows: DataRow[]): StatSummary[] {
+  switch (kind) {
+    case "traffic":
+      return trafficStatsFromRows(rows);
+    case "occupancy":
+      return occupancyStatsFromRows(rows);
+    case "zones":
+      return zoneStatsFromRows(rows);
+    case "dwell":
+      return dwellStatsFromRows(rows);
+    case "queues":
+      return queueStatsFromRows(rows);
+    default: {
+      const _exhaustive: never = kind;
+      return _exhaustive;
+    }
+  }
+}
 
 function useScopedAnalyticsConfig(
   kind: ScopedAnalyticsKind,
@@ -94,33 +115,15 @@ function useScopedAnalyticsConfig(
           });
           return scaleDataRows(rows, factor);
         }
+        default: {
+          const _exhaustive: never = kind;
+          return _exhaustive;
+        }
       }
     };
 
-    const getStats: AnalyticsPageConfig["getStats"] = async (range) => {
-      switch (kind) {
-        case "traffic":
-          return storeId
-            ? scaleStatSummaries(await fetchTrafficStats(range), factor)
-            : fetchTrafficStats(range);
-        case "occupancy":
-          return storeId || cameraId
-            ? scaleStatSummaries(await fetchOccupancyStats(range), factor)
-            : fetchOccupancyStats(range);
-        case "zones":
-          return zoneId || storeId
-            ? scaleStatSummaries(await fetchZonesStats(range), factor)
-            : fetchZonesStats(range);
-        case "dwell":
-          return zoneId || storeId
-            ? scaleStatSummaries(await fetchDwellTimeStats(range), factor)
-            : fetchDwellTimeStats(range);
-        case "queues":
-          return zoneId || storeId
-            ? scaleStatSummaries(await fetchQueuesStats(range), factor)
-            : fetchQueuesStats(range);
-      }
-    };
+    const getStats: AnalyticsPageConfig["getStats"] = (rows) =>
+      scaleStatSummaries(statsForKind(kind, rows), factor);
 
     return {
       ...base,

@@ -286,7 +286,8 @@ alembic -c database/alembic.ini upgrade head
 python -m database.seed
 
 # Start API (Swagger at http://127.0.0.1:8000/docs)
-backend\.venv\Scripts\uvicorn backend.app.main:app --reload --port 8000
+# Use the dev script so reload only watches backend/ and database/ (not .venv or frontend/.next)
+.\scripts\dev-backend.ps1
 
 # Login: admin@demo-retail.local / demo (API_DEFAULT_PASSWORD)
 # Tests

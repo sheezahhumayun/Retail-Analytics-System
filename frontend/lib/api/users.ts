@@ -1,62 +1,164 @@
-// MOCK IMPLEMENTATION — swap the function bodies below for real fetch() calls
-// to the FastAPI backend when Module 12 is live. Signatures and return types
-// must not change.
-
+import { apiRequest, getAccessToken } from "@/lib/api/client";
 import {
-  createMockUser,
-  deleteMockUser,
-  listMockUsers,
-  resetMockUserPassword,
-  updateMockUser,
-  type CreateMockUserData,
-  type UpdateMockUserData,
-} from "@/lib/auth/mock-users";
+  buildStoreNameMap,
+  frontendRoleToBackend,
+  mapBackendUser,
+  type BackendStore,
+  type BackendUser,
+} from "@/lib/api/mappers";
+import { getSessionOrgId } from "@/lib/api/auth";
 import {
   ROLE_COLORS,
-  STORES,
   USER_ROLES,
   getStatusColor,
 } from "@/lib/admin-users-data";
 import type { User, UserRole, UserStatus } from "@/lib/types";
 
-export { ROLE_COLORS, STORES, USER_ROLES, getStatusColor };
+export { ROLE_COLORS, USER_ROLES, getStatusColor };
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+/** Hydrated from GET /api/stores — seeded with backend defaults for first paint. */
+export const STORES: string[] = ["Main Street Store"];
 
-export type CreateUserData = CreateMockUserData;
+export type CreateUserData = {
+  name: string;
+  email: string;
+  role: UserRole;
+  assignedStore: string;
+  status?: UserStatus;
+  password: string;
+  id?: string;
+};
 
-export type UpdateUserData = UpdateMockUserData;
+export type UpdateUserData = Partial<
+  Pick<User, "name" | "email" | "role" | "assignedStore" | "status">
+>;
 
 export type ResetPasswordResult = {
   user_id: string;
   success: boolean;
 };
 
-// ─── API functions ───────────────────────────────────────────────────────────
+let storeNameMap: Map<string, string> | null = null;
 
-export function getUsers(): Promise<User[]> {
-  return Promise.resolve(listMockUsers());
+async function ensureStoreNames(): Promise<Map<string, string>> {
+  if (storeNameMap) return storeNameMap;
+  const stores = await apiRequest<BackendStore[]>("/api/stores");
+  storeNameMap = buildStoreNameMap(stores);
+  STORES.length = 0;
+  STORES.push(...stores.map((store) => store.name));
+  return storeNameMap;
 }
 
-export function createUser(data: CreateUserData): Promise<User> {
-  return Promise.resolve(createMockUser(data));
+async function resolveStoreId(storeName: string): Promise<string | null> {
+  const stores = await apiRequest<BackendStore[]>("/api/stores");
+  return stores.find((store) => store.name === storeName)?.id ?? null;
 }
 
-export function updateUser(
+function slugifyId(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+}
+
+const LOGIN_DEMO_USERS: User[] = [
+  {
+    id: "user_admin",
+    name: "Admin User",
+    email: "admin@demo-retail.local",
+    role: "System Administrator",
+    assignedStore: "Main Street Store",
+    status: "Active",
+  },
+  {
+    id: "user_demo",
+    name: "Regular User",
+    email: "user@demo-retail.local",
+    role: "Retail Analyst",
+    assignedStore: "Main Street Store",
+    status: "Active",
+  },
+];
+
+export async function getUsers(): Promise<User[]> {
+  if (!getAccessToken()) {
+    return [...LOGIN_DEMO_USERS];
+  }
+
+  const [users, names] = await Promise.all([
+    apiRequest<BackendUser[]>("/api/users"),
+    ensureStoreNames(),
+  ]);
+  return users.map((user) => mapBackendUser(user, names));
+}
+
+export async function createUser(data: CreateUserData): Promise<User> {
+  const org_id = getSessionOrgId();
+  if (!org_id) {
+    throw new Error("Not authenticated");
+  }
+  const store_id = await resolveStoreId(data.assignedStore);
+  const created = await apiRequest<BackendUser>("/api/users", {
+    method: "POST",
+    body: {
+      id: data.id ?? slugifyId(data.email.split("@")[0] || data.name),
+      email: data.email,
+      name: data.name,
+      role: frontendRoleToBackend(data.role),
+      org_id,
+      store_id,
+      password: data.password,
+    },
+  });
+  const names = await ensureStoreNames();
+  return mapBackendUser(created, names);
+}
+
+export async function updateUser(
   id: string,
   data: UpdateUserData,
 ): Promise<User | null> {
-  return Promise.resolve(updateMockUser(id, data));
+  const body: Record<string, unknown> = {};
+  if (data.name !== undefined) body.name = data.name;
+  if (data.email !== undefined) body.email = data.email;
+  if (data.role !== undefined) body.role = frontendRoleToBackend(data.role);
+  if (data.assignedStore !== undefined) {
+    body.store_id = await resolveStoreId(data.assignedStore);
+  }
+
+  try {
+    const updated = await apiRequest<BackendUser>(`/api/users/${id}`, {
+      method: "PUT",
+      body,
+    });
+    const names = await ensureStoreNames();
+    return mapBackendUser(updated, names);
+  } catch {
+    return null;
+  }
 }
 
-export function deleteUser(id: string): Promise<boolean> {
-  return Promise.resolve(deleteMockUser(id));
+export async function deleteUser(id: string): Promise<boolean> {
+  try {
+    await apiRequest<void>(`/api/users/${id}`, { method: "DELETE" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-export function resetPassword(
+export async function resetPassword(
   id: string,
   newPassword: string,
 ): Promise<ResetPasswordResult> {
-  const success = resetMockUserPassword(id, newPassword);
-  return Promise.resolve({ user_id: id, success });
+  try {
+    await apiRequest<void>(`/api/users/${id}/reset-password`, {
+      method: "POST",
+      body: { new_password: newPassword },
+    });
+    return { user_id: id, success: true };
+  } catch {
+    return { user_id: id, success: false };
+  }
 }

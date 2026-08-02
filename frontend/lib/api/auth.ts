@@ -1,69 +1,104 @@
-// MOCK IMPLEMENTATION — swap the function bodies below for real fetch() calls
-// to the FastAPI backend when Module 12 is live. Signatures and return types
-// must not change.
+import {
+  apiRequest,
+  clearAuthSession,
+  readAuthSession,
+  writeAuthSession,
+  type AuthSession,
+  type SessionUser,
+} from "@/lib/api/client";
+import {
+  backendRoleToFrontend,
+  type BackendMeResponse,
+  type BackendUserInfo,
+} from "@/lib/api/mappers";
+import { clearStoresCache } from "@/lib/api/stores";
+import type { UserRole } from "@/lib/types";
 
-import { getUsers } from "@/lib/api/users";
-import { DEFAULT_MOCK_PASSWORD } from "@/lib/auth/mock-users";
-import type { User, UserRole } from "@/lib/types";
+export type { SessionUser };
 
-const SESSION_KEY = "auth_session";
+const DEV_ROLE_EMAIL: Partial<Record<UserRole, string>> = {
+  "System Administrator": "admin@demo-retail.local",
+  "Store Manager": "user@demo-retail.local",
+  "Operations Manager": "user@demo-retail.local",
+  "Retail Analyst": "user@demo-retail.local",
+};
 
-export type SessionUser = Pick<User, "id" | "name" | "email" | "role">;
-
-export function login(email: string, password: string): Promise<SessionUser> {
-  return getUsers().then((allUsers) => {
-    if (password !== DEFAULT_MOCK_PASSWORD) {
-      throw new Error('Invalid email or password. (Hint: try password "demo")');
-    }
-
-    const user = allUsers.find((u) => u.email === email);
-    if (!user) {
-      throw new Error('Invalid email or password. (Hint: try password "demo")');
-    }
-
-    const session: SessionUser = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-    };
-
-    if (typeof window !== "undefined") {
-      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-    }
-
-    return session;
-  });
+interface LoginResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  user: BackendUserInfo;
 }
 
-export function loginByRole(
+function toSessionUser(user: BackendUserInfo): SessionUser {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: backendRoleToFrontend(user.role),
+  };
+}
+
+export async function login(email: string, password: string): Promise<SessionUser> {
+  const response = await apiRequest<LoginResponse>("/api/auth/login", {
+    method: "POST",
+    body: { email, password },
+    auth: false,
+  });
+
+  const session: AuthSession = {
+    access_token: response.access_token,
+    user: toSessionUser(response.user),
+    org_id: response.user.org_id,
+  };
+  writeAuthSession(session);
+  return session.user;
+}
+
+/** Dev helper — logs in with a seeded demo account for the given UI role. */
+export async function loginByRole(
   role: UserRole,
   password: string,
 ): Promise<SessionUser> {
-  return getUsers().then((allUsers) => {
-    if (password !== DEFAULT_MOCK_PASSWORD) {
-      throw new Error('Invalid email or password. (Hint: try password "demo")');
-    }
-
-    const user = allUsers.find((u) => u.role === role);
-    if (!user) {
-      throw new Error('Invalid email or password. (Hint: try password "demo")');
-    }
-
-    return login(user.email, password);
-  });
+  const email = DEV_ROLE_EMAIL[role] ?? "user@demo-retail.local";
+  return login(email, password);
 }
 
 export function logout(): Promise<void> {
-  if (typeof window !== "undefined") {
-    localStorage.removeItem(SESSION_KEY);
-  }
+  clearAuthSession();
+  clearStoresCache();
   return Promise.resolve();
 }
 
 export function getCurrentUser(): SessionUser | null {
-  if (typeof window === "undefined") return null;
+  const session = readAuthSession();
+  return session?.user ?? null;
+}
 
-  const session = localStorage.getItem(SESSION_KEY);
-  return session ? (JSON.parse(session) as SessionUser) : null;
+export async function refreshCurrentUser(): Promise<SessionUser | null> {
+  const session = readAuthSession();
+  if (!session?.access_token) return null;
+
+  try {
+    const me = await apiRequest<BackendMeResponse>("/api/auth/me");
+    const updated: AuthSession = {
+      access_token: session.access_token,
+      org_id: me.org_id,
+      user: {
+        id: me.id,
+        name: me.name,
+        email: me.email,
+        role: backendRoleToFrontend(me.role),
+      },
+    };
+    writeAuthSession(updated);
+    return updated.user;
+  } catch {
+    clearAuthSession();
+    return null;
+  }
+}
+
+export function getSessionOrgId(): string | null {
+  return readAuthSession()?.org_id ?? null;
 }

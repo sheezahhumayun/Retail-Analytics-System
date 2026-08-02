@@ -1,57 +1,22 @@
-// MOCK IMPLEMENTATION — swap the function bodies below for real fetch() calls
-// to the FastAPI backend when Module 12 is live. Signatures and return types
-// must not change.
-
+import { apiRequest } from "@/lib/api/client";
 import {
-  CAMERAS_LIST,
-  INITIAL_SHAPES,
+  mapCountingLine,
+  mapZoneShape,
+  type BackendCountingLine,
+  type BackendCamera,
+  type BackendZoneShape,
+} from "@/lib/api/mappers";
+import {
   SHAPE_COLORS,
   ZONE_TYPE_COLORS,
   ZONE_TYPES,
 } from "@/lib/zones-lines-data";
-import type { Point, Shape, ZoneShape } from "@/lib/types";
+import type { Point, Shape, ZoneShape, ZoneType } from "@/lib/types";
+import { getCountingLines } from "@/lib/api/lines";
 
-export { CAMERAS_LIST, SHAPE_COLORS, ZONE_TYPE_COLORS, ZONE_TYPES };
+export { SHAPE_COLORS, ZONE_TYPE_COLORS, ZONE_TYPES };
 
 export type ZonesLinesCameraOption = { id: string; label: string };
-
-// ─── Shared in-memory shape store (used by lines.ts too) ─────────────────────
-
-function clonePoint(p: Point): Point {
-  return { x: p.x, y: p.y };
-}
-
-function cloneShape(shape: Shape): Shape {
-  if (shape.kind === "zone") {
-    return { ...shape, points: shape.points.map(clonePoint) };
-  }
-  return {
-    ...shape,
-    points: [clonePoint(shape.points[0]), clonePoint(shape.points[1])],
-  };
-}
-
-let shapes: Shape[] = INITIAL_SHAPES.map(cloneShape);
-
-let shapeCounter = shapes.length + 1;
-
-function nextZoneId(): string {
-  const id = `z-api-${String(shapeCounter).padStart(3, "0")}`;
-  shapeCounter += 1;
-  return id;
-}
-
-/** @internal Shared shape store for lib/api/lines.ts */
-export function __getShapes(): Shape[] {
-  return shapes;
-}
-
-/** @internal */
-export function __setShapes(next: Shape[]): void {
-  shapes = next;
-}
-
-// ─── Types ───────────────────────────────────────────────────────────────────
 
 export type CreateZoneData = Omit<ZoneShape, "kind" | "id" | "color"> & {
   id?: string;
@@ -62,64 +27,98 @@ export type UpdateZoneData = Partial<
   Pick<ZoneShape, "name" | "type" | "points" | "color" | "cameraId">
 >;
 
-// ─── API functions ───────────────────────────────────────────────────────────
-
-export function getAllShapes(): Promise<Shape[]> {
-  return Promise.resolve(shapes.map(cloneShape));
+function frontendZoneTypeToBackend(type: ZoneType): string {
+  if (type === "checkout") return "checkout_queue";
+  return type;
 }
 
-export function getCamerasList(): Promise<ZonesLinesCameraOption[]> {
-  return Promise.resolve(CAMERAS_LIST);
+function denormalizePoint(point: Point, width = 640, height = 360): [number, number] {
+  return [(point.x / 100) * width, (point.y / 100) * height];
 }
 
-export function getZoneShapes(camera_id: string): Promise<ZoneShape[]> {
-  const zones = shapes.filter(
-    (s): s is ZoneShape => s.kind === "zone" && s.cameraId === camera_id,
-  );
-  return Promise.resolve(zones.map((z) => cloneShape(z) as ZoneShape));
+async function listAllCameras(): Promise<BackendCamera[]> {
+  return apiRequest<BackendCamera[]>("/api/cameras");
 }
 
-export function createZone(data: CreateZoneData): Promise<ZoneShape> {
-  const zone: ZoneShape = {
-    kind: "zone",
-    id: data.id ?? nextZoneId(),
-    name: data.name,
-    type: data.type,
-    points: data.points.map(clonePoint),
-    color: data.color ?? ZONE_TYPE_COLORS[data.type],
-    cameraId: data.cameraId,
-  };
-  shapes = [...shapes, zone];
-  return Promise.resolve(cloneShape(zone) as ZoneShape);
+export async function getAllShapes(): Promise<Shape[]> {
+  // Two list calls total — not N per camera (camera_id is optional on both endpoints).
+  const [zones, lines] = await Promise.all([
+    apiRequest<BackendZoneShape[]>("/api/zones"),
+    apiRequest<BackendCountingLine[]>("/api/lines"),
+  ]);
+  return [...zones.map(mapZoneShape), ...lines.map(mapCountingLine)];
 }
 
-export function updateZone(
+export async function getCamerasList(): Promise<ZonesLinesCameraOption[]> {
+  const cameras = await listAllCameras();
+  return cameras.map((camera) => ({
+    id: camera.id,
+    label: `${camera.name}${camera.location ? ` (${camera.location})` : ""}`,
+  }));
+}
+
+export async function getZoneShapes(camera_id: string): Promise<ZoneShape[]> {
+  const zones = await apiRequest<BackendZoneShape[]>("/api/zones", {
+    query: { camera_id },
+  });
+  return zones.map(mapZoneShape);
+}
+
+export async function createZone(data: CreateZoneData): Promise<ZoneShape> {
+  const id =
+    data.id ??
+    `zone_${data.cameraId}_${Date.now().toString(36)}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const created = await apiRequest<BackendZoneShape>("/api/zones", {
+    method: "POST",
+    body: {
+      id,
+      camera_id: data.cameraId,
+      name: data.name,
+      type: frontendZoneTypeToBackend(data.type),
+      polygon_points: data.points.map((point) => denormalizePoint(point)),
+    },
+  });
+  return mapZoneShape(created);
+}
+
+export async function updateZone(
   id: string,
   data: UpdateZoneData,
 ): Promise<ZoneShape | null> {
-  const index = shapes.findIndex((s) => s.id === id && s.kind === "zone");
-  if (index === -1) return Promise.resolve(null);
+  const body: Record<string, unknown> = {};
+  if (data.name !== undefined) body.name = data.name;
+  if (data.type !== undefined) body.type = frontendZoneTypeToBackend(data.type);
+  if (data.points !== undefined) {
+    body.polygon_points = data.points.map((point) => denormalizePoint(point));
+  }
 
-  const existing = shapes[index] as ZoneShape;
-  const updated: ZoneShape = {
-    ...existing,
-    ...data,
-    kind: "zone",
-    id,
-    points: data.points
-      ? data.points.map(clonePoint)
-      : existing.points.map(clonePoint),
-    color:
-      data.color ??
-      (data.type ? ZONE_TYPE_COLORS[data.type] : existing.color),
-  };
-
-  shapes = shapes.map((s) => (s.id === id ? updated : s));
-  return Promise.resolve(cloneShape(updated) as ZoneShape);
+  try {
+    const updated = await apiRequest<BackendZoneShape>(`/api/zones/${id}`, {
+      method: "PUT",
+      body,
+    });
+    return mapZoneShape(updated);
+  } catch {
+    return null;
+  }
 }
 
-export function deleteZone(id: string): Promise<boolean> {
-  const before = shapes.length;
-  shapes = shapes.filter((s) => !(s.id === id && s.kind === "zone"));
-  return Promise.resolve(shapes.length < before);
+export async function deleteZone(id: string): Promise<boolean> {
+  try {
+    await apiRequest<void>(`/api/zones/${id}`, { method: "DELETE" });
+    return true;
+  } catch {
+    return false;
+  }
 }
+
+// Backwards compatibility for lines.ts during migration — no shared in-memory store.
+export function __getShapes(): Shape[] {
+  throw new Error("__getShapes is not available with the live API backend");
+}
+
+export function __setShapes(_next: Shape[]): void {
+  throw new Error("__setShapes is not available with the live API backend");
+}
+
+export { getCountingLines };
