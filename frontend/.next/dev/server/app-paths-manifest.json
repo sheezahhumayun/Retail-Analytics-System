@@ -1,7 +1,0 @@
-{
-  "/reports/page": "app/reports/page.js",
-  "/live-cameras/page": "app/live-cameras/page.js",
-  "/alerts/page": "app/alerts/page.js",
-  "/admin/zones-lines/page": "app/admin/zones-lines/page.js",
-  "/admin/users/page": "app/admin/users/page.js"
-}
