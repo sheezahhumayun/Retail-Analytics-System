@@ -34,9 +34,21 @@ import type {
   StatSummary,
   ZoneRow,
 } from "@/lib/types";
-import type { kpiData as OverviewKpiDataType } from "@/lib/overview-data";
 
-export type OverviewKpiData = typeof OverviewKpiDataType;
+export type OverviewKpiData = {
+  visitorsToday: { value: number; label: string; trend: number; icon: string };
+  occupancy: { value: number; unit: string; label: string; trend: number; icon: string };
+  peakOccupancy: {
+    value: number;
+    unit: string;
+    label: string;
+    subtext: string;
+    icon: string;
+  };
+  dwellTime: { value: number; unit: string; label: string; trend: number; icon: string };
+  queueLength: { value: number; label: string; trend: number; icon: string };
+  activeCameras: { value: number; total: number; label: string; icon: string };
+};
 export type VisitorsByHourRow = { hour: string; visitors: number };
 export type EntriesExitsRow = { hour: string; entries: number; exits: number };
 export type OccupancyTrendRow = { day: string; occupancy: number };
@@ -242,7 +254,8 @@ export async function getOverviewKpis(
 ): Promise<OverviewKpiData> {
   const store_id = params.store_id ?? (await getDefaultStoreId());
   const today = new Date().toISOString().slice(0, 10);
-  const [traffic, occupancy, cameras] = await Promise.all([
+  const zone_id = await getDefaultZoneId();
+  const [traffic, occupancy, cameras, dwell, queues] = await Promise.all([
     fetchTrafficResponse(store_id, today, today).catch(() => null),
     apiRequest<BackendOccupancyResponse>("/api/analytics/occupancy", {
       query: { store_id },
@@ -250,6 +263,12 @@ export async function getOverviewKpis(
     apiRequest<BackendCamera[]>("/api/cameras", {
       query: { store_id },
     }).catch(() => []),
+    apiRequest<BackendDwellResponse>("/api/analytics/dwell", {
+      query: { zone_id, from: today, to: today },
+    }).catch(() => null),
+    apiRequest<BackendQueueResponse>("/api/analytics/queues", {
+      query: { zone_id, from: today, to: today },
+    }).catch(() => null),
   ]);
 
   const visitorsToday = traffic?.total_entries ?? 0;
@@ -267,6 +286,11 @@ export async function getOverviewKpis(
         )
       : null;
   const activeCameras = cameras.filter((camera) => camera.status === "online").length;
+  const avgDwellMinutes = dwell?.avg_dwell_seconds
+    ? Math.round(dwell.avg_dwell_seconds / 60)
+    : 0;
+  const latestQueueSample = queues?.samples?.[queues.samples.length - 1];
+  const queueLength = latestQueueSample?.queue_length ?? queues?.avg_queue_length ?? 0;
 
   return {
     visitorsToday: {
@@ -290,14 +314,14 @@ export async function getOverviewKpis(
       icon: "zap",
     },
     dwellTime: {
-      value: 0,
+      value: avgDwellMinutes,
       unit: "min",
       label: "Average Dwell Time",
       trend: 0,
       icon: "clock",
     },
     queueLength: {
-      value: 0,
+      value: Math.round(queueLength),
       label: "Current Queue Length",
       trend: 0,
       icon: "list",

@@ -63,6 +63,8 @@ export interface BackendCamera {
   name: string;
   location?: string | null;
   rtsp_url?: string | null;
+  source_type?: "live" | "recorded";
+  last_processed_at?: string | null;
   camera_type: string;
   resolution?: string | null;
   fps?: number | null;
@@ -73,9 +75,12 @@ export interface BackendCameraStatus {
   id: string;
   name: string;
   store_id: string;
+  source_type?: "live" | "recorded";
   status: string;
   last_seen?: string | null;
   current_occupancy?: number | null;
+  processed?: boolean | null;
+  last_processed_at?: string | null;
 }
 
 export interface BackendTrafficBucket {
@@ -271,15 +276,19 @@ export function mapTrafficBuckets(
   const priorMap = new Map(
     priorBuckets.map((b) => [bucketKey(b.metric_date, b.hour), b.entries]),
   );
+  const multiDay = new Set(buckets.map((b) => b.metric_date)).size > 1;
 
-  return buckets.map((bucket) => ({
-    label:
-      buckets.length <= 24
-        ? formatHourLabel(bucket.hour)
-        : `${bucket.metric_date} ${formatHourLabel(bucket.hour)}`,
-    current: bucket.entries,
-    prior: priorMap.get(bucketKey(bucket.metric_date, bucket.hour)),
-  }));
+  return buckets.map((bucket) => {
+    const id = bucketKey(bucket.metric_date, bucket.hour);
+    return {
+      id,
+      label: multiDay
+        ? `${bucket.metric_date} ${formatHourLabel(bucket.hour)}`
+        : formatHourLabel(bucket.hour),
+      current: bucket.entries,
+      prior: priorMap.get(id),
+    };
+  });
 }
 
 export function trafficStatsFromRows(rows: DataRow[]): StatSummary[] {
@@ -305,11 +314,19 @@ export function mapOccupancyTrend(
   priorTrend: BackendOccupancyPoint[] = [],
 ): DataRow[] {
   const priorMap = new Map(priorTrend.map((p, index) => [index, p.current_occupancy]));
-  return trend.map((point, index) => ({
-    label: point.timestamp.slice(11, 16) || point.timestamp.slice(0, 10),
-    current: point.current_occupancy,
-    prior: priorMap.get(index),
-  }));
+  const multiDay =
+    new Set(trend.map((p) => p.timestamp.slice(0, 10))).size > 1;
+
+  return trend.map((point, index) => {
+    const datePart = point.timestamp.slice(0, 10);
+    const timePart = point.timestamp.slice(11, 16) || "00:00";
+    return {
+      id: point.timestamp,
+      label: multiDay ? `${datePart} ${timePart}` : timePart,
+      current: point.current_occupancy,
+      prior: priorMap.get(index),
+    };
+  });
 }
 
 export function occupancyStatsFromRows(rows: DataRow[]): StatSummary[] {
@@ -337,11 +354,19 @@ export function mapZoneBuckets(
   const priorMap = new Map(
     priorBuckets.map((b) => [bucketKey(b.metric_date, b.hour), b.visitors]),
   );
-  return buckets.map((bucket) => ({
-    label: formatHourLabel(bucket.hour),
-    current: bucket.visitors,
-    prior: priorMap.get(bucketKey(bucket.metric_date, bucket.hour)),
-  }));
+  const multiDay = new Set(buckets.map((b) => b.metric_date)).size > 1;
+
+  return buckets.map((bucket) => {
+    const id = bucketKey(bucket.metric_date, bucket.hour);
+    return {
+      id,
+      label: multiDay
+        ? `${bucket.metric_date} ${formatHourLabel(bucket.hour)}`
+        : formatHourLabel(bucket.hour),
+      current: bucket.visitors,
+      prior: priorMap.get(id),
+    };
+  });
 }
 
 export function zoneStatsFromRows(rows: DataRow[]): StatSummary[] {
@@ -378,6 +403,7 @@ export function mapDwellSessions(sessions: BackendDwellSession[]): DataRow[] {
   }
   const order = ["0-30s", "30-60s", "1-3 min", "3-10 min", "10+ min"];
   return order.map((label) => ({
+    id: `dwell-${label}`,
     label,
     current: buckets.get(label) ?? 0,
   }));
@@ -417,11 +443,19 @@ export function mapQueueSamples(
   const priorMap = new Map(
     priorSamples.map((sample, index) => [index, sample.queue_length]),
   );
-  return samples.map((sample, index) => ({
-    label: sample.timestamp.slice(11, 16) || `#${index + 1}`,
-    current: sample.queue_length,
-    prior: priorMap.get(index),
-  }));
+  const multiDay =
+    new Set(samples.map((s) => s.timestamp.slice(0, 10))).size > 1;
+
+  return samples.map((sample, index) => {
+    const datePart = sample.timestamp.slice(0, 10);
+    const timePart = sample.timestamp.slice(11, 16) || `#${index + 1}`;
+    return {
+      id: sample.timestamp || `queue-${index}`,
+      label: multiDay && datePart ? `${datePart} ${timePart}` : timePart,
+      current: sample.queue_length,
+      prior: priorMap.get(index),
+    };
+  });
 }
 
 export function queueStatsFromRows(rows: DataRow[]): StatSummary[] {
@@ -563,7 +597,7 @@ export function mapLiveCamera(
     name: camera.name,
     location: camera.location ?? "",
     status: mapLiveStatus(status?.status ?? camera.status),
-    frameUrl: camera.rtsp_url ?? null,
+    frameUrl: camera.source_type === "recorded" ? null : (camera.rtsp_url ?? null),
     occupancy: status?.current_occupancy ?? 0,
     entriesToday: 0,
     exitsToday: 0,
@@ -599,12 +633,15 @@ export function mapAdminCamera(
   camera: BackendCamera,
   storeName: string,
 ): AdminCamera {
+  const sourceType = camera.source_type ?? "live";
   return {
     id: camera.id,
     name: camera.name,
     store: storeName,
     location: camera.location ?? "",
     status: (camera.status as CameraStatus) ?? "offline",
+    sourceType,
+    lastProcessedAt: camera.last_processed_at ?? null,
     resolution: resolutionFromBackend(camera.resolution),
     fps: camera.fps ?? 30,
     rtspUrl: camera.rtsp_url ?? "",
@@ -630,15 +667,49 @@ export function mapBackendUser(
   };
 }
 
+function parsePolygonVertex(
+  point: unknown,
+): { x: number; y: number } | null {
+  if (Array.isArray(point) && point.length >= 2) {
+    const x = Number(point[0]);
+    const y = Number(point[1]);
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      return { x, y };
+    }
+    return null;
+  }
+
+  if (point && typeof point === "object") {
+    const record = point as { x?: unknown; y?: unknown };
+    const x = Number(record.x);
+    const y = Number(record.y);
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      return { x, y };
+    }
+  }
+
+  return null;
+}
+
 function normalizePolygonPoints(
-  points: number[][],
+  points: unknown,
   width = 640,
   height = 360,
 ): Point[] {
-  return points.map(([x, y]) => ({
-    x: Math.max(0, Math.min(100, (x / width) * 100)),
-    y: Math.max(0, Math.min(100, (y / height) * 100)),
-  }));
+  if (!Array.isArray(points)) {
+    return [];
+  }
+
+  return points
+    .map((point) => {
+      const vertex = parsePolygonVertex(point);
+      if (!vertex) return null;
+      return {
+        x: Math.max(0, Math.min(100, (vertex.x / width) * 100)),
+        y: Math.max(0, Math.min(100, (vertex.y / height) * 100)),
+      };
+    })
+    .filter((point): point is Point => point !== null);
 }
 
 function backendZoneTypeToFrontend(type: string): ZoneType {
@@ -666,8 +737,16 @@ export function mapZoneShape(shape: BackendZoneShape): ZoneShape {
 }
 
 export function mapCountingLine(line: BackendCountingLine): LineShape {
-  const pointA = normalizePolygonPoints([[line.point_a.x, line.point_a.y]], 640, 360)[0];
-  const pointB = normalizePolygonPoints([[line.point_b.x, line.point_b.y]], 640, 360)[0];
+  const normalized = normalizePolygonPoints(
+    [
+      [line.point_a.x, line.point_a.y],
+      [line.point_b.x, line.point_b.y],
+    ],
+    640,
+    360,
+  );
+  const pointA = normalized[0] ?? { x: 0, y: 0 };
+  const pointB = normalized[1] ?? { x: 0, y: 0 };
   return {
     kind: "line",
     id: line.id,

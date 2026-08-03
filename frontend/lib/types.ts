@@ -28,6 +28,8 @@ export type ComparisonKey =
 export type SortDirection = "asc" | "desc";
 
 export interface DataRow {
+  /** Stable unique key for React lists (date+hour); falls back to label. */
+  id?: string;
   label: string;
   current: number;
   prior?: number;
@@ -196,12 +198,16 @@ export type AnalyticsModule =
   | "queue";
 export type Resolution = "1080p" | "2k" | "4k";
 
+export type CameraSourceType = "live" | "recorded";
+
 export interface AdminCamera {
   id: string;
   name: string;
   store: string;
   location: string;
   status: CameraStatus;
+  sourceType: CameraSourceType;
+  lastProcessedAt?: string | null;
   resolution: Resolution;
   fps: number;
   rtspUrl: string;

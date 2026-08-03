@@ -5,7 +5,8 @@ import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
 import { Activity, Menu, X } from "lucide-react"
 
-import { NAV_ITEMS, OPEN_ALERT_COUNT } from "@/lib/nav-config"
+import { NAV_ITEMS } from "@/lib/nav-config"
+import { getOpenAlertCount } from "@/lib/api/alerts"
 import { cn } from "@/lib/utils"
 import { AlertBadge } from "@/components/dashboard/alert-badge"
 import { NavDropdown } from "@/components/dashboard/nav-dropdown"
@@ -45,7 +46,6 @@ function MobileNav() {
   const [open, setOpen] = useState(false)
   const pathname = usePathname()
 
-  // Close the drawer whenever the route changes.
   useEffect(() => {
     setOpen(false)
   }, [pathname])
@@ -118,6 +118,30 @@ function MobileNav() {
   )
 }
 
+function OpenAlertBadge() {
+  const [count, setCount] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function load() {
+      try {
+        const openCount = await getOpenAlertCount()
+        if (!cancelled) setCount(openCount)
+      } catch {
+        if (!cancelled) setCount(0)
+      }
+    }
+
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return <AlertBadge count={count} />
+}
+
 export function TopNav() {
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
@@ -137,7 +161,7 @@ export function TopNav() {
         </div>
 
         <div className="ml-auto flex items-center gap-1 sm:gap-2">
-          <AlertBadge count={OPEN_ALERT_COUNT} />
+          <OpenAlertBadge />
           <ThemeToggle />
           <div className="mx-1 hidden h-6 w-px bg-border sm:block" />
           <UserMenu />

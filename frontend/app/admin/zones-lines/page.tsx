@@ -1,40 +1,99 @@
 'use client';
 
 import { useRef, useState, useCallback, useEffect } from 'react';
-import { Camera, Save, CheckCircle } from 'lucide-react';
+import { Camera, Save, CheckCircle, AlertCircle } from 'lucide-react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
 import { EditorToolbar } from '@/components/admin/zones-lines/editor-toolbar';
 import { ShapesSidebar } from '@/components/admin/zones-lines/shapes-sidebar';
 import { ZonesLinesCanvas, triggerFinishZone } from '@/components/admin/zones-lines/zones-lines-canvas';
-import { getAllShapes, getCamerasList } from '@/lib/api/zones';
+import {
+  deleteZone,
+  getAllShapes,
+  getCamerasList,
+  getShapesForCamera,
+  syncCameraShapes,
+} from '@/lib/api/zones';
+import { deleteCountingLine } from '@/lib/api/lines';
 import type { Shape } from '@/lib/types';
 import type { DrawMode } from '@/lib/types';
 
+const SELECTED_CAMERA_STORAGE_KEY = 'admin-zones-lines-selected-camera';
+
+function readStoredCameraId(
+  cameras: { id: string; label: string }[],
+): string {
+  if (typeof window === 'undefined') {
+    return cameras[0]?.id ?? '';
+  }
+
+  const stored = sessionStorage.getItem(SELECTED_CAMERA_STORAGE_KEY);
+  if (stored && cameras.some((camera) => camera.id === stored)) {
+    return stored;
+  }
+
+  return cameras[0]?.id ?? '';
+}
+
+function persistSelectedCamera(cameraId: string) {
+  if (typeof window === 'undefined' || !cameraId) return;
+  sessionStorage.setItem(SELECTED_CAMERA_STORAGE_KEY, cameraId);
+}
+
 export default function AdminZonesLinesPage() {
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
+  const shapesRef = useRef<Shape[]>([]);
+  const savedShapesRef = useRef<Shape[]>([]);
+  const selectedCameraRef = useRef('');
 
   const [camerasList, setCamerasList] = useState<{ id: string; label: string }[]>([]);
   const [selectedCamera, setSelectedCamera] = useState('');
   const [shapes, setShapes] = useState<Shape[]>([]);
+  const [savedShapes, setSavedShapes] = useState<Shape[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [mode, setMode] = useState<DrawMode>('select');
   const [canFinish, setCanFinish] = useState(false);
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
-  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveError, setSaveError] = useState('');
+
+  useEffect(() => {
+    shapesRef.current = shapes;
+  }, [shapes]);
+
+  useEffect(() => {
+    savedShapesRef.current = savedShapes;
+  }, [savedShapes]);
+
+  useEffect(() => {
+    selectedCameraRef.current = selectedCamera;
+  }, [selectedCamera]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      const [cameras, allShapes] = await Promise.all([
-        getCamerasList(),
-        getAllShapes(),
-      ]);
-      if (!cancelled) {
-        setCamerasList(cameras);
-        setSelectedCamera(cameras[0]?.id ?? '');
-        setShapes(allShapes);
-        setLoading(false);
+      try {
+        const cameras = await getCamerasList();
+        const cameraId = readStoredCameraId(cameras);
+        persistSelectedCamera(cameraId);
+
+        const allShapes = await getAllShapes();
+        if (!cancelled) {
+          setCamerasList(cameras);
+          setSelectedCamera(cameraId);
+          setShapes(allShapes);
+          setSavedShapes(allShapes);
+          setLoadError('');
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setLoadError(err instanceof Error ? err.message : 'Failed to load shapes');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
 
@@ -47,39 +106,73 @@ export default function AdminZonesLinesPage() {
   const cameraShapes = shapes.filter((s) => s.cameraId === selectedCamera);
 
   const handleShapesChange = useCallback((updated: Shape[]) => {
-    setShapes((prev) => {
-      const other = prev.filter((s) => s.cameraId !== selectedCamera);
-      return [...other, ...updated.filter((s) => s.cameraId === selectedCamera)];
-    });
-  }, [selectedCamera]);
+    const cameraId =
+      updated.find((shape) => shape.cameraId)?.cameraId ??
+      selectedCameraRef.current;
+    if (!cameraId) return;
 
-  function handleDeleteShape(id: string) {
-    setShapes((prev) => prev.filter((s) => s.id !== id));
-    if (selectedShapeId === id) setSelectedShapeId(null);
+    setShapes((prev) => {
+      const other = prev.filter((shape) => shape.cameraId !== cameraId);
+      return [...other, ...updated];
+    });
+  }, []);
+
+  async function handleDeleteShape(id: string) {
+    const shape = shapesRef.current.find((item) => item.id === id);
+    if (!shape) return;
+
+    try {
+      if (shape.kind === 'zone') {
+        await deleteZone(id);
+      } else {
+        await deleteCountingLine(id);
+      }
+      setShapes((prev) => prev.filter((s) => s.id !== id));
+      setSavedShapes((prev) => prev.filter((s) => s.id !== id));
+      if (selectedShapeId === id) setSelectedShapeId(null);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to delete shape');
+      setSaveState('error');
+    }
   }
 
-  function handleSave() {
+  async function handleSave() {
+    const cameraId = selectedCameraRef.current;
+    if (!cameraId) return;
+
+    const current = shapesRef.current.filter((shape) => shape.cameraId === cameraId);
+    const baseline = savedShapesRef.current.filter((shape) => shape.cameraId === cameraId);
+
     setSaveState('saving');
-    const payload = {
-      cameraId: selectedCamera,
-      shapes: cameraShapes.map((s) => ({
-        id: s.id,
-        kind: s.kind,
-        name: s.name,
-        ...(s.kind === 'zone' ? { type: s.type, points: s.points } : {}),
-        ...(s.kind === 'line' ? { points: s.points, insideSide: s.insideSide } : {}),
-      })),
-    };
-    console.log('[ZonesLines] Save payload:', JSON.stringify(payload, null, 2));
-    setTimeout(() => {
+    setSaveError('');
+
+    try {
+      await syncCameraShapes(cameraId, current, baseline);
+
+      const refreshedForCamera = await getShapesForCamera(cameraId);
+      const refreshedAll = await getAllShapes();
+
+      const missingNew = current.filter(
+        (shape) =>
+          !baseline.some((entry) => entry.id === shape.id) &&
+          !refreshedForCamera.some((entry) => entry.id === shape.id),
+      );
+      if (missingNew.length > 0) {
+        throw new Error(
+          `Server did not return ${missingNew.length} newly saved shape(s). Check the Network tab for POST /api/zones failures.`,
+        );
+      }
+
+      setShapes(refreshedAll);
+      setSavedShapes(refreshedAll);
+      persistSelectedCamera(cameraId);
       setSaveState('saved');
       setTimeout(() => setSaveState('idle'), 2500);
-    }, 600);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save shapes');
+      setSaveState('error');
+    }
   }
-
-  const canvasRefCallback = useCallback((el: HTMLCanvasElement | null) => {
-    canvasElRef.current = el;
-  }, []);
 
   return (
     <DashboardShell>
@@ -93,8 +186,9 @@ export default function AdminZonesLinesPage() {
           </div>
 
           <button
+            type="button"
             onClick={handleSave}
-            disabled={saveState === 'saving'}
+            disabled={saveState === 'saving' || loading || !selectedCamera}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors border bg-primary text-primary-foreground border-primary hover:bg-primary/90 disabled:opacity-60"
           >
             {saveState === 'saved' ? (
@@ -107,6 +201,13 @@ export default function AdminZonesLinesPage() {
           </button>
         </div>
 
+        {saveState === 'error' && saveError && (
+          <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-400">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <span>{saveError}</span>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-card px-5 py-4">
           <div className="flex flex-col gap-1.5 min-w-[280px]">
             <label className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
@@ -117,7 +218,9 @@ export default function AdminZonesLinesPage() {
               <select
                 value={selectedCamera}
                 onChange={(e) => {
-                  setSelectedCamera(e.target.value);
+                  const nextCamera = e.target.value;
+                  setSelectedCamera(nextCamera);
+                  persistSelectedCamera(nextCamera);
                   setMode('select');
                   setSelectedShapeId(null);
                 }}
@@ -154,6 +257,10 @@ export default function AdminZonesLinesPage() {
               </div>
               <p className="text-sm text-muted-foreground">Loading shapes…</p>
             </div>
+          </div>
+        ) : loadError ? (
+          <div className="flex items-center justify-center py-24 rounded-xl border border-dashed border-border bg-card">
+            <p className="text-sm text-muted-foreground">{loadError}</p>
           </div>
         ) : (
           <div className="flex gap-5 items-start">

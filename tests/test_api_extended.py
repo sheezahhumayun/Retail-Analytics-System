@@ -201,17 +201,19 @@ class TestCountingLines:
 
 class TestCamerasExtended:
     def test_update_and_soft_delete(self, api_client: TestClient, admin_headers: dict):
-        cam_id = f"cam_{uuid.uuid4().hex[:8]}"
-        api_client.post(
+        create_resp = api_client.post(
             "/api/cameras",
             headers=admin_headers,
             json={
-                "id": cam_id,
                 "store_id": STORE_ID,
                 "name": "Temp",
-                "rtsp_url": "sample-data/town.mp4",
+                "rtsp_url": "rtsp://192.168.1.50:554/stream1",
+                "source_type": "live",
             },
         )
+        assert create_resp.status_code == 201
+        cam_id = create_resp.json()["id"]
+        assert cam_id.startswith("cam_")
         resp = api_client.put(
             f"/api/cameras/{cam_id}",
             headers=admin_headers,
@@ -236,6 +238,35 @@ class TestCamerasExtended:
             json={"name": "Hacked"},
         )
         assert resp.status_code == 403
+
+    def test_create_recorded_camera(self, api_client: TestClient, admin_headers: dict):
+        resp = api_client.post(
+            "/api/cameras",
+            headers=admin_headers,
+            json={
+                "store_id": STORE_ID,
+                "name": "Recorded Checkout",
+                "location": "Checkout aisle",
+                "rtsp_url": "sample-data/checkout.mp4",
+                "source_type": "recorded",
+            },
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["source_type"] == "recorded"
+        assert data["last_processed_at"] is None
+
+    def test_process_rejected_for_live_camera(self, api_client: TestClient, admin_headers: dict):
+        resp = api_client.post("/api/cameras/entrance/process", headers=admin_headers)
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_camera_source"
+
+    def test_camera_status_includes_source_type(self, api_client: TestClient, admin_headers: dict):
+        resp = api_client.get("/api/cameras/entrance/status", headers=admin_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source_type"] == "live"
+        assert data["processed"] is None
 
 
 class TestAlertsExtended:

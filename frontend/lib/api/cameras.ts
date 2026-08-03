@@ -19,10 +19,10 @@ export {
   getStatusLabel,
 };
 
-/** Hydrated from GET /api/stores — seeded with backend defaults for first paint. */
-export const STORES: string[] = ["Main Street Store"];
+/** Hydrated from GET /api/stores — populated on first cameras/users API call. */
+export const STORES: string[] = [];
 
-export type CreateCameraData = AdminCamera;
+export type CreateCameraData = Omit<AdminCamera, "id">;
 export type UpdateCameraData = Partial<AdminCamera>;
 
 export type TestCameraSuccess = {
@@ -41,6 +41,14 @@ export type TestCameraError = {
 
 export type TestCameraResult = TestCameraSuccess | TestCameraError;
 
+export type ProcessCameraStatus = {
+  camera_id: string;
+  status: "idle" | "running" | "completed" | "failed";
+  message?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
+
 let storeNameMap: Map<string, string> | null = null;
 
 async function loadStoreNames(): Promise<Map<string, string>> {
@@ -52,6 +60,11 @@ async function loadStoreNames(): Promise<Map<string, string>> {
   STORES.length = 0;
   STORES.push(...stores.map((store) => store.name));
   return storeNameMap;
+}
+
+/** Populate `STORES` from the API — call before opening camera create/edit UI. */
+export async function ensureStoresLoaded(): Promise<void> {
+  await loadStoreNames();
 }
 
 async function resolveStoreId(storeName: string): Promise<string> {
@@ -70,12 +83,10 @@ export async function getCameras(): Promise<AdminCamera[]> {
 }
 
 export async function getLiveCameras(): Promise<Camera[]> {
-  // Single list call. Per-camera GET /status fan-out removed — it scaled with
-  // camera count and exhausted the Postgres pool. Occupancy on tiles uses 0
-  // until a batched status endpoint exists (flagged in PROJECT_STATUS).
   const cameras = await apiRequest<BackendCamera[]>("/api/cameras");
   return cameras
     .filter((camera) => camera.status !== "disabled")
+    .filter((camera) => (camera.source_type ?? "live") === "live")
     .map((camera) => mapLiveCamera(camera, null));
 }
 
@@ -90,11 +101,11 @@ export async function getCameraStatus(id: string): Promise<CameraStatus | null> 
 export async function createCamera(data: CreateCameraData): Promise<AdminCamera> {
   const store_id = await resolveStoreId(data.store);
   const body = {
-    id: data.id,
     store_id,
     name: data.name,
     location: data.location,
     rtsp_url: data.rtspUrl,
+    source_type: data.sourceType,
     camera_type: data.cameraType,
     resolution: resolutionToBackend(data.resolution),
     fps: data.fps,
@@ -116,6 +127,7 @@ export async function updateCamera(
   if (data.name !== undefined) body.name = data.name;
   if (data.location !== undefined) body.location = data.location;
   if (data.rtspUrl !== undefined) body.rtsp_url = data.rtspUrl;
+  if (data.sourceType !== undefined) body.source_type = data.sourceType;
   if (data.cameraType !== undefined) body.camera_type = data.cameraType;
   if (data.resolution !== undefined) body.resolution = resolutionToBackend(data.resolution);
   if (data.fps !== undefined) body.fps = data.fps;
@@ -141,6 +153,16 @@ export async function deleteCamera(id: string): Promise<boolean> {
   }
 }
 
+export async function processCameraVideo(id: string): Promise<ProcessCameraStatus> {
+  return apiRequest<ProcessCameraStatus>(`/api/cameras/${id}/process`, {
+    method: "POST",
+  });
+}
+
+export async function getCameraProcessStatus(id: string): Promise<ProcessCameraStatus> {
+  return apiRequest<ProcessCameraStatus>(`/api/cameras/${id}/process-status`);
+}
+
 export async function testCamera(id: string): Promise<TestCameraResult> {
   const response = await apiRequest<{
     status: "success" | "error";
@@ -161,8 +183,8 @@ export async function testCamera(id: string): Promise<TestCameraResult> {
   return {
     status: "success",
     camera_id: id,
-    resolution: "1080p",
-    fps: response.fps ?? 30,
+    resolution: (response.resolution as Resolution) ?? "1080p",
+    fps: response.fps ?? 0,
     latency_ms: response.latency_ms ?? 0,
   };
 }

@@ -1,4 +1,4 @@
-import { apiRequest, getAccessToken } from "@/lib/api/client";
+import { apiRequest } from "@/lib/api/client";
 import {
   buildStoreNameMap,
   frontendRoleToBackend,
@@ -16,8 +16,8 @@ import type { User, UserRole, UserStatus } from "@/lib/types";
 
 export { ROLE_COLORS, USER_ROLES, getStatusColor };
 
-/** Hydrated from GET /api/stores — seeded with backend defaults for first paint. */
-export const STORES: string[] = ["Main Street Store"];
+/** Hydrated from GET /api/stores — populated on first users API call. */
+export const STORES: string[] = [];
 
 export type CreateUserData = {
   name: string;
@@ -62,30 +62,7 @@ function slugifyId(value: string): string {
     .slice(0, 64);
 }
 
-const LOGIN_DEMO_USERS: User[] = [
-  {
-    id: "user_admin",
-    name: "Admin User",
-    email: "admin@demo-retail.local",
-    role: "System Administrator",
-    assignedStore: "Main Street Store",
-    status: "Active",
-  },
-  {
-    id: "user_demo",
-    name: "Regular User",
-    email: "user@demo-retail.local",
-    role: "Retail Analyst",
-    assignedStore: "Main Street Store",
-    status: "Active",
-  },
-];
-
 export async function getUsers(): Promise<User[]> {
-  if (!getAccessToken()) {
-    return [...LOGIN_DEMO_USERS];
-  }
-
   const [users, names] = await Promise.all([
     apiRequest<BackendUser[]>("/api/users"),
     ensureStoreNames(),

@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-07-31 (Module 13.5 — frontend wired to live FastAPI backend)
+**Last updated:** 2026-08-03 (Demo seed synthetic heatmaps + analytics duplicate-key fix)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -24,13 +24,13 @@
 | 12 | Backend REST API | ✅ Complete |
 | 12.5 | Extended REST API (frontend seam) | ✅ Complete |
 | 13 | Frontend Web Dashboard | ✅ Complete (UI + live API via `lib/api/*`) |
-| 14 | Reports (CSV/PDF export) | ⬜ Not started (backend export in 12.5; frontend still mock) |
+| 14 | Reports (CSV/PDF export) | ✅ Complete (frontend export wired in 13.5 pass 2) |
 | 15 | Alerting | ⬜ Not started |
 | 16 | System Administration | ⬜ Not started |
 | 17 | Dockerization & Deployment | ⬜ Not started |
 | 18 | Testing, Evaluation & Accuracy Validation | ⬜ Not started |
 | 19 | Scalability & Path to Multi-Camera/Multi-Store | ⬜ Not started |
-| 20 | Final Demo Script | ⬜ Not started |
+| 20 | Final Demo Script | 🟡 In progress (demo DB seed) |
 
 ---
 
@@ -49,11 +49,13 @@ Base URL: `http://127.0.0.1:8000` · Swagger: **`/docs`** · OpenAPI: **`/openap
 | `GET` | `/api/stores` | JWT | List stores |
 | `POST` | `/api/stores` | admin | Create store |
 | `GET` | `/api/cameras` | JWT | List cameras (`?store_id=` optional) |
-| `POST` | `/api/cameras` | admin | Create camera |
-| `GET` | `/api/cameras/{id}/status` | JWT | Camera health + occupancy snapshot |
+| `POST` | `/api/cameras` | admin | Create camera (server assigns `id`; `source_type`: `live` \| `recorded`) |
+| `GET` | `/api/cameras/{id}/status` | JWT | Camera health + occupancy snapshot (+ recorded processing state) |
 | `PUT` | `/api/cameras/{id}` | admin | Update camera |
 | `DELETE` | `/api/cameras/{id}` | admin | Soft delete (`status=disabled`) |
-| `POST` | `/api/cameras/{id}/test` | admin | Test stream connectivity |
+| `POST` | `/api/cameras/{id}/test` | admin | Test stream connectivity (live cameras) |
+| `POST` | `/api/cameras/{id}/process` | admin | Process recorded video → analytics DB (background thread) |
+| `GET` | `/api/cameras/{id}/process-status` | admin | Poll recorded-video processing job status |
 | `GET` | `/api/zones` | JWT | List zone **geometry** (`?camera_id=`) — `zone_shapes` table |
 | `POST` | `/api/zones` | admin | Create zone shape |
 | `PUT` | `/api/zones/{id}` | admin | Update zone shape |
@@ -79,7 +81,7 @@ Base URL: `http://127.0.0.1:8000` · Swagger: **`/docs`** · OpenAPI: **`/openap
 | `DELETE` | `/api/users/{id}` | admin | Delete user |
 | `POST` | `/api/users/{id}/reset-password` | admin | Reset user password |
 
-**36 endpoints total** (1 public health, 1 public login, 34 JWT-protected).
+**38 endpoints total** (1 public health, 1 public login, 36 JWT-protected).
 
 **RBAC (two tiers):** `admin` and `user`. All `POST`/`PUT`/`PATCH`/`DELETE` except `PATCH /api/alerts/{id}` require **admin**. All `GET` routes + alert status updates are open to any authenticated user.
 
@@ -1116,7 +1118,7 @@ erDiagram
 | `organizations` | `id` | Tenant name (multi-store retail group) | `database.seed` (Module 16 admin later) |
 | `stores` | `id` | Store name, address; belongs to one org | Seed / admin |
 | `users` | `id` | Name, email, role (`admin`, `viewer`, …); belongs to one org | Seed / Module 16 |
-| `cameras` | `id` | Camera name, location, RTSP URL, type, resolution, fps, online status; belongs to one store | Seed / Module 16 |
+| `cameras` | `id` | Camera name, location, RTSP URL **or** video file path (`rtsp_url`), `source_type` (`live` \| `recorded`), `last_processed_at`, type, resolution, fps, online status; belongs to one store | Seed (fixed ids) / `POST /api/cameras` (auto `cam_{slug}_{suffix}`) |
 | `zones` | `id` | Polygon coordinates (JSON), zone type, analytics on/off; belongs to one camera | Seed / `polygon_editor` JSON |
 | `counting_lines` | `id` | Line endpoints (`point_a`, `point_b`), crossing direction; belongs to one camera | Seed / `line_editor` JSON |
 
@@ -1152,14 +1154,31 @@ erDiagram
 
 #### Seed data (dev)
 
-`python -m database.seed` inserts:
+**Minimal test fixture** (used by `tests/test_api*.py` — non-destructive upsert):
 
-- `org_demo` → `store_main` → cameras `entrance`, `town`, `shop`
-- Zones from `tests/videos/town_zones.json` and `shop_zones.json`
-- Counting line from `tests/videos/entrance_line.json`
-- 24 hours of synthetic `visitor_metrics` for yesterday (dashboard chart smoke test)
+```powershell
+python -m database.seed
+```
 
-Pipeline runs with `--persist-db` append live `events`, `dwell_events`, `zone_metrics`, `occupancy_metrics`, etc. on top of seed data.
+Inserts `org_demo` → `store_main` → cameras `entrance`, `town`, `shop`; zones/lines from `tests/videos/*.json`; 24 hours of synthetic `visitor_metrics` for **yesterday** only.
+
+**Demo dashboard dataset** (**destructive** — truncates all application tables, then reloads):
+
+```powershell
+python -m database.seed --demo
+```
+
+Equivalent: `python -m database.seed_demo`.
+
+- **Wipes** all rows from `organizations`, `stores`, `cameras`, `zone_shapes`, `counting_lines`, `zones`, `events`, `visitor_metrics`, `occupancy_metrics`, `zone_metrics`, `dwell_events`, `queue_metrics`, `alerts`, `users`, `tracks` (schema/migrations untouched).
+- **Reloads** `org_demo` with **3 stores** (`store_main`, `store_west`, `store_east`), **8 cameras** (`live` + `recorded` `source_type`), zone shapes + counting lines, and **~3 calendar months** of hourly metrics through **today (UTC)**.
+- **Date range** is computed at run time: first day of the month three months before the current month → today. Example when run on 2026-08-03 UTC: **`2026-05-01` through `2026-08-03`** (inclusive).
+- **Users** (password = `API_DEFAULT_PASSWORD`, default `demo`): `admin@demo-retail.local` (admin), `user@demo-retail.local` (user), `analyst@demo-retail.local` (user, scoped to `store_east`).
+- **Idempotent:** running twice yields the same row counts (no duplicates). Observed runtime on dev hardware: **~30–90 s** (DB metrics + synthetic heatmap NPZ buckets).
+- **Synthetic Module 8 heatmaps:** also writes `data/heatmaps/{camera_id}/{YYYY-MM-DD}/{HH}.npz` for every seeded camera across the same date range, using `HeatmapStore.save()` (same NPZ schema as real inference). Density is concentrated near zone/line hotspots and scaled from that hour’s `visitor_metrics` entries — **not real CV output**; do not treat it as validated detection/tracking accuracy.
+- **Most recent seeded date** (for heatmap date picker / “today”): printed at end of seed run as `most recent heatmap date` (= `date_range.end`, UTC today when the script runs).
+
+Pipeline runs with `--persist-db` append live `events`, `dwell_events`, etc. on top of whichever seed was loaded last.
 
 ### Decisions made
 
@@ -1462,7 +1481,7 @@ Base URL when wired: `http://127.0.0.1:8000`. All calls will need `Authorization
 | `getCameras()` | `GET /api/cameras` | Map `CameraResponse[]` → `AdminCamera` |
 | `getLiveCameras()` | `GET /api/cameras` + `GET /api/cameras/{id}/status` | Compose status/occupancy; overlays/bboxes **have no backend source** |
 | `getCameraStatus(id)` | `GET /api/cameras/{id}/status` | |
-| `createCamera(data)` | `POST /api/cameras` | Field mapping required (see gaps) |
+| `createCamera(data)` | `POST /api/cameras` | No `id` in request — server returns generated id in response |
 | `updateCamera(id, data)` | `PUT /api/cameras/{id}` | |
 | `deleteCamera(id)` | `DELETE /api/cameras/{id}` | Soft-delete → `status=disabled` |
 | `testCamera(id)` | `POST /api/cameras/{id}/test` | Modal does not call this yet |
@@ -1576,29 +1595,110 @@ Login with any seed user email + password `demo`. Admin routes require **System 
 
 ## ✅ Module 13.5 — Mock → Real API Integration — DONE
 
-**What changed:** Replaced in-memory mock implementations in `frontend/lib/api/*.ts` with HTTP calls to Modules 12 + 12.5 endpoints. Added `lib/api/client.ts` (auth header, base URL, typed errors) and `lib/api/mappers.ts` (response → UI type translation). **No component or page files were modified.**
+**What changed (pass 1, 2026-07-31):** Replaced in-memory mock implementations in `frontend/lib/api/*.ts` with HTTP calls to Modules 12 + 12.5 endpoints. Added `lib/api/client.ts` (auth header, base URL, typed errors) and `lib/api/mappers.ts` (response → UI type translation).
+
+**Pass 2 verification & cleanup (2026-08-02):** Re-audited `lib/api/*.ts` and all `frontend/` consumers. Fixed remaining gaps where components still simulated success or used hardcoded business data.
+
+### Pass 2 — fixes applied
+
+| Area | Was | Now |
+|------|-----|-----|
+| `ReportForm` CSV/PDF buttons | `alert()` stubs | `getReport(..., { format: 'csv'\|'pdf' })` → `GET /api/reports/{type}/export` + `downloadBlob` |
+| `TestCameraModal` | Inline `setTimeout` fake pass/fail | `POST /api/cameras/{id}/test` via `testCamera()` |
+| Admin zones/lines **Save** | `console.log` + fake saved state | `syncCameraShapes()` → zone/line CRUD endpoints |
+| Sidebar shape **Delete** | Local state only | `DELETE /api/zones/{id}` / `DELETE /api/lines/{id}` |
+| Nav alert badge | `OPEN_ALERT_COUNT = 3` constant | `getOpenAlertCount()` → `GET /api/alerts?status=open` |
+| Login page | `getUsers()` without auth + hardcoded `LOGIN_DEMO_USERS` fallback | Real `POST /api/auth/login` only; seed email picker uses `LOGIN_HINTS` (documented seed accounts) |
+| `AuthContext` mount | `localStorage` cache only | `refreshCurrentUser()` → `GET /api/auth/me` |
+| Overview dwell/queue KPIs | Hardcoded `0` | `GET /api/analytics/dwell` + `GET /api/analytics/queues` for default zone |
+| Reports page | Artificial 1.5s delay before fetch | Direct `getReport()` call |
+| `reports.ts` / `cameras.ts` / `users.ts` `STORES` | Seeded fake store/camera names for first paint | Empty until hydrated from API |
+| Customer Flow page | Hardcoded SVG trajectory paths | “Not available yet” UI (`// TODO: no backend endpoint yet`) |
+| Dead mock modules | `auth-data.ts`, `mock-users.ts`, `overview-data.ts`, `camera-data.ts` | **Deleted** |
+| `*-data.ts` generators | Full mock chart/report/alert datasets | Trimmed to **UI constants only** (labels, colors, `REPORT_TYPES`, `FLOOR_ZONES` SVG layout, `getIntervalLabel`) |
+| `scope-data.ts` | Full fake org tree (`DEPLOYMENT_ORGANIZATION`) | Only `DEPLOYMENT_ORG_ID` fallback constant; org name from `GET /api/organizations` |
+| `loginByRole()` | Dev shortcut still exported | **Removed** — login page uses email + password only |
+
+### Verified real-data only checklist
+
+- [x] All `lib/api/*.ts` functions call live backend through `lib/api/client.ts` with JWT + `{error:{code,message,details}}` parsing
+- [x] No `lib/*-data.ts` mock datasets imported by `app/` or `components/` (only `lib/api/*` + mappers)
+- [x] No hardcoded KPI/chart/table numbers in components
+- [x] Loading / empty / error states reflect real API outcomes (no fake success fallbacks)
+- [x] `getCurrentUser()` / role checks refreshed from `GET /api/auth/me`
+- [x] Organization name from `GET /api/organizations` via `ScopeContext`
+- [x] Camera create/update/delete/test → real endpoints
+- [x] Zone/line create/update/delete + editor Save → real endpoints
+- [x] Alert acknowledge/resolve → `PATCH /api/alerts/{id}`
+- [x] User create/update/delete/reset-password → real endpoints
+- [x] Report JSON preview + CSV/PDF export → `GET /api/reports/{type}` and `/export`
+- [x] Login → `POST /api/auth/login` (no dev-only password bypass)
+- [x] `npx tsc --noEmit` — 0 errors (2026-08-02)
+- [x] Backend smoke: login → `/api/auth/me` → `/api/organizations` → `/api/alerts` → CSV export (200)
+
+### Still TODO — no backend endpoint yet
+
+| UI surface | Gap | UI behavior |
+|------------|-----|-------------|
+| Live camera tiles (`source_type=live` only) | No MJPEG/HLS/WebRTC stream URL for **live** cameras | `frameUrl` null; placeholder tile. Recorded cameras excluded from live grid; processed via `POST /api/cameras/{id}/process` instead |
+| Live camera overlays | No inference overlay API | Empty `boundingBoxes` / zones on tile from mapper |
+| Camera test modal preview | Stream probe only, no frame feed | Success shows probe metrics; preview panel says not available |
+| Customer Flow page | No path/trajectory analytics API | “Not available yet” empty state |
+| Heatmap floor plan labels | `FLOOR_ZONES` in `lib/heatmap-data.ts` | **UI layout constants only** — heatmap density from `GET /api/analytics/heatmap` |
+| Zone performance rollup | No single-store multi-zone endpoint | Fans out `GET /api/analytics/zones` per zone |
+| Overview KPI trends | No prior-period comparison on overview cards | `trend: 0` (comparison exists on analytics pages) |
+| Camera `enabled` / `analyticsModules` | Not in camera schema | Admin form fields have no backend counterpart |
+| `fetchIntervalLabel` | Client-only date-range axis labels | `lib/analytics-data.ts` — not business data |
 
 **Dev startup:**
 ```powershell
-# Terminal 1 — backend
+# Terminal 0 — database (once per machine)
+docker compose -f docker/docker-compose.yml up -d
 alembic -c database/alembic.ini upgrade head
+
+# Minimal seed (tests / API smoke) — safe upsert
 python -m database.seed
-backend\.venv\Scripts\uvicorn app.main:app --reload --app-dir backend
+
+# OR demo seed (destructive full reset + 3 months of analytics history)
+python -m database.seed --demo
+
+# Terminal 1 — backend
+cd retail-analytics
+backend\.venv\Scripts\uvicorn backend.app.main:app --reload --port 8000
 
 # Terminal 2 — frontend
 cd frontend
 npm run dev
 ```
 
-**Still client-side / no backend source (UI unchanged):**
-- Live camera CV overlays (`boundingBoxes`, zones on tile) — empty arrays from mapper
-- Customer Flow trajectories — placeholder page, no API
-- `fetchIntervalLabel` — `DateRangeKey` label strings from `lib/analytics-data.ts`
-- Report form CSV/PDF buttons still call `alert()` in the component; `getReport({ format: 'csv'|'pdf' })` triggers real download when invoked
-- Overview KPI dwell/queue cards — partial (traffic + occupancy from API; dwell/queue default to 0 without extra zone-scoped calls)
-- `TestCameraModal` component still uses inline timer logic (not `testCamera()` API) — API function is live for future wiring
-- Zones/lines admin Save button still logs to console — CRUD functions in `lib/api/zones.ts` / `lines.ts` are live
+**Login:** `admin@demo-retail.local` / `demo` (admin) · `user@demo-retail.local` / `demo` (user) · `analyst@demo-retail.local` / `demo` (user, East Market)
 
 ---
 
-## Next Up: Module 14 — Reports UI Export Wiring
+## Recorded-video cameras (2026-08-03)
+
+Distinguishes **live stream** cameras from **recorded video** sources so file-based analytics are processed on demand and never shown as live preview tiles.
+
+### Backend
+
+- **Alembic `004_camera_source_type`** — `cameras.source_type` (`live` \| `recorded`, default `live`) and `last_processed_at` (nullable timestamp).
+- **Path field** — reuses existing `rtsp_url` column (no new `video_path` column): live cameras store RTSP/HTTP URLs; recorded cameras store local file paths (e.g. `sample-data/town.mp4`).
+- **`POST /api/cameras/{id}/process`** (admin) — runs `inference.pipeline.process_recorded` (same detect→track→analytics→`AnalyticsDbWriter` path as `run-events-demo.py --persist-db`) using zone/line config from the DB for that camera. **Background thread + subprocess** (inference venv) because sample videos take 30–60+ seconds at CPU inference speeds — not practical for a blocking HTTP request.
+- **`GET /api/cameras/{id}/process-status`** (admin) — poll job state (`idle` \| `running` \| `completed` \| `failed`).
+- **`GET /api/cameras/{id}/status`** — includes `source_type`; for `recorded` cameras also returns `processed` and `last_processed_at`.
+- **Live cameras unchanged** — `source_type=live` cameras cannot use `/process`; behavior otherwise identical to before.
+
+### Frontend
+
+- **Admin camera form** — source type toggle (Live Stream / Recorded Video); conditional RTSP vs video path field; **Process Video** action on saved recorded cameras (polls process-status).
+- **Live Cameras page** — only `source_type=live` cameras in the tile grid.
+- **Admin camera table** — recorded cameras show “Recorded — processed” / “Recorded — not yet processed” badge, last-processed timestamp, analytics link, and Process action (not live-test).
+- **Analytics pages** — no special-casing; processed recorded cameras write to the same metric tables as live cameras.
+
+---
+
+## Next Up: Module 15 — Alerting (backend delivery) / Module 16 — System Administration
+
+### Module 17 note (not started)
+
+- **TODO (heatmap storage):** local-disk NPZ under `data/heatmaps/` will not survive multi-instance / containerized deployment — move heatmap hour buckets to object storage or DB-stored blobs before any multi-replica rollout.

@@ -1,41 +1,28 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth/AuthContext';
-import { getUsers } from '@/lib/api/users';
-import type { User } from '@/lib/types';
+import { LOGIN_HINTS } from '@/lib/api/auth';
 
 export default function LoginPage() {
   const router = useRouter();
   const { login } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [selectedUserId, setSelectedUserId] = useState('');
+  const [selectedHint, setSelectedHint] = useState('');
   const [errors, setErrors] = useState<{ email?: string; password?: string }>({});
   const [loginError, setLoginError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const [demoUsers, setDemoUsers] = useState<User[]>([]);
-
   useEffect(() => {
-    getUsers().then((users) => {
-      setDemoUsers(users.filter((user) => user.status === 'Active'));
-    });
-  }, []);
+    if (!selectedHint) return;
+    setEmail(selectedHint);
+  }, [selectedHint]);
 
-  useEffect(() => {
-    if (!selectedUserId) return;
-
-    const user = demoUsers.find((item) => item.id === selectedUserId);
-    if (user) {
-      setEmail(user.email);
-    }
-  }, [selectedUserId, demoUsers]);
-
-  const validateEmail = (email: string): boolean => {
+  const validateEmail = (value: string): boolean => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    return emailRegex.test(email);
+    return emailRegex.test(value);
   };
 
   const validateForm = (): boolean => {
@@ -65,13 +52,11 @@ export default function LoginPage() {
 
     setIsLoading(true);
 
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
     try {
       await login(email, password);
       router.push('/');
     } catch {
-      setLoginError('Invalid email or password. (Hint: try password "demo")');
+      setLoginError('Invalid email or password.');
       setIsLoading(false);
     }
   };
@@ -96,7 +81,7 @@ export default function LoginPage() {
                 value={email}
                 onChange={(e) => {
                   setEmail(e.target.value);
-                  setSelectedUserId('');
+                  setSelectedHint('');
                   if (errors.email) {
                     setErrors({ ...errors, email: undefined });
                   }
@@ -148,33 +133,28 @@ export default function LoginPage() {
 
           <div className="pt-4 border-t border-border space-y-3">
             <div>
-              <label htmlFor="demo-user" className="block text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                Demo: Select User
+              <label htmlFor="login-hint" className="block text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                Quick fill (seed accounts)
               </label>
               <select
-                id="demo-user"
-                value={selectedUserId}
-                onChange={(e) => setSelectedUserId(e.target.value)}
+                id="login-hint"
+                value={selectedHint}
+                onChange={(e) => setSelectedHint(e.target.value)}
                 className="w-full px-3 py-2 bg-muted border border-border rounded text-foreground text-sm"
               >
-                <option value="">Choose a user...</option>
-                {demoUsers.map((user) => (
-                  <option key={user.id} value={user.id}>
-                    {user.name} — {user.role}
+                <option value="">Choose a seed account...</option>
+                {LOGIN_HINTS.map((hint) => (
+                  <option key={hint.email} value={hint.email}>
+                    {hint.label}
                   </option>
                 ))}
               </select>
               <p className="text-xs text-muted-foreground mt-1.5">
-                Selecting a user will auto-fill their email. Password:{' '}
-                <code className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono">demo</code>
+                Credentials are validated by POST /api/auth/login against the backend database.
               </p>
             </div>
           </div>
         </div>
-
-        <p className="text-center text-xs text-muted-foreground mt-6">
-          For demo purposes, use password <code className="bg-muted px-1 py-0.5 rounded text-xs font-mono">demo</code> with any email.
-        </p>
       </div>
     </div>
   );

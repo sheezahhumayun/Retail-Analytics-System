@@ -15,6 +15,7 @@ import {
   getCurrentUser,
   login as apiLogin,
   logout as apiLogout,
+  refreshCurrentUser,
   type SessionUser,
 } from "@/lib/api/auth";
 import type { UserRole } from "@/lib/types";
@@ -52,9 +53,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const session = getCurrentUser();
-    setUser(session ? sessionToAuthUser(session) : null);
-    setIsLoading(false);
+    let cancelled = false;
+
+    async function hydrate() {
+      const cached = getCurrentUser();
+      if (!cached) {
+        if (!cancelled) setIsLoading(false);
+        return;
+      }
+
+      const refreshed = await refreshCurrentUser();
+      if (!cancelled) {
+        setUser(refreshed ? sessionToAuthUser(refreshed) : null);
+        setIsLoading(false);
+      }
+    }
+
+    hydrate();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {

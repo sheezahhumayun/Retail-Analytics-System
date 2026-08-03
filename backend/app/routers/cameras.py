@@ -12,7 +12,12 @@ from database.models import Camera, Event, OccupancyMetric, Store
 from ..auth import TokenPayload, get_current_user, require_admin
 from ..deps import DbSession
 from ..exceptions import ApiError
-from ..schemas.cameras import CameraCreate, CameraResponse, CameraStatusResponse
+from ..schemas.cameras import (
+    CameraCreate,
+    CameraResponse,
+    CameraStatusResponse,
+)
+from ..services.camera_ids import generate_camera_id
 
 router = APIRouter(prefix="/cameras", tags=["Cameras"])
 
@@ -27,13 +32,14 @@ def list_cameras(
     session: DbSession,
     _user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str | None, Query(description="Filter by store id")] = None,
-) -> list[Camera]:
+) -> list[CameraResponse]:
     stmt = select(Camera).order_by(Camera.name)
     if store_id is not None:
         if session.get(Store, store_id) is None:
             raise ApiError(404, "store_not_found", f"Store '{store_id}' not found")
         stmt = stmt.where(Camera.store_id == store_id)
-    return list(session.exec(stmt).all())
+    cameras = list(session.exec(stmt).all())
+    return [_camera_response(camera) for camera in cameras]
 
 
 @router.post(
@@ -41,23 +47,43 @@ def list_cameras(
     response_model=CameraResponse,
     status_code=201,
     summary="Create camera",
-    description="Register a new camera for a store. Requires admin role.",
+    description=(
+        "Register a new camera for a store. The server assigns a unique `id` "
+        "(e.g. `cam_entrance_a1b2c3`); do not send `id` in the request body. Admin only."
+    ),
 )
 def create_camera(
     body: CameraCreate,
     session: DbSession,
     _user: Annotated[TokenPayload, Depends(require_admin)],
-) -> Camera:
-    if session.get(Camera, body.id) is not None:
-        raise ApiError(409, "camera_exists", f"Camera '{body.id}' already exists")
+) -> CameraResponse:
     store = session.get(Store, body.store_id)
     if store is None:
         raise ApiError(404, "store_not_found", f"Store '{body.store_id}' not found")
-    camera = Camera(**body.model_dump(), status="offline")
+    camera_id = generate_camera_id(session, body.name)
+    camera = Camera(id=camera_id, **body.model_dump(), status="offline")
     session.add(camera)
     session.flush()
     session.refresh(camera)
-    return camera
+    return _camera_response(camera)
+
+
+def _camera_response(camera: Camera) -> CameraResponse:
+    return CameraResponse(
+        id=camera.id,
+        store_id=camera.store_id,
+        name=camera.name,
+        location=camera.location,
+        rtsp_url=camera.rtsp_url,
+        source_type=camera.source_type,  # type: ignore[arg-type]
+        last_processed_at=(
+            camera.last_processed_at.isoformat() if camera.last_processed_at else None
+        ),
+        camera_type=camera.camera_type,
+        resolution=camera.resolution,
+        fps=camera.fps,
+        status=camera.status,
+    )
 
 
 @router.get(
@@ -91,7 +117,16 @@ def camera_status(
         id=camera.id,
         name=camera.name,
         store_id=camera.store_id,
+        source_type=camera.source_type,  # type: ignore[arg-type]
         status=camera.status,
         last_seen=last_event.timestamp.isoformat() if last_event else None,
         current_occupancy=occ_row.current_occupancy if occ_row else None,
+        processed=(
+            camera.last_processed_at is not None if camera.source_type == "recorded" else None
+        ),
+        last_processed_at=(
+            camera.last_processed_at.isoformat()
+            if camera.source_type == "recorded" and camera.last_processed_at
+            else None
+        ),
     )

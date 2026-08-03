@@ -1,9 +1,17 @@
 'use client';
 
-import { Trash2, Edit2, Check, X, Zap } from 'lucide-react';
+import Link from 'next/link';
+import { Trash2, Edit2, Check, X, Zap, Play } from 'lucide-react';
 import type { AdminCamera } from '@/lib/types';
-import { ANALYTICS_MODULES_LABELS, getStatusColor, getStatusLabel } from '@/lib/api/cameras';
+import {
+  ANALYTICS_MODULES_LABELS,
+  getStatusColor,
+  getStatusLabel,
+  processCameraVideo,
+  getCameraProcessStatus,
+} from '@/lib/api/cameras';
 import { ACTION_STATUS_COLORS } from '@/lib/constants';
+import { useState } from 'react';
 
 interface CameraTableProps {
   cameras: AdminCamera[];
@@ -11,6 +19,22 @@ interface CameraTableProps {
   onDelete: (cameraId: string) => void;
   onToggleEnabled: (cameraId: string, enabled: boolean) => void;
   onTestCamera: (camera: AdminCamera) => void;
+  onCameraUpdated?: (camera: AdminCamera) => void;
+}
+
+function RecordedBadge({ camera }: { camera: AdminCamera }) {
+  const processed = Boolean(camera.lastProcessedAt);
+  return (
+    <span
+      className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${
+        processed
+          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+          : 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+      }`}
+    >
+      Recorded — {processed ? 'processed' : 'not yet processed'}
+    </span>
+  );
 }
 
 export function CameraTable({
@@ -19,7 +43,29 @@ export function CameraTable({
   onDelete,
   onToggleEnabled,
   onTestCamera,
+  onCameraUpdated,
 }: CameraTableProps) {
+  const [processingId, setProcessingId] = useState<string | null>(null);
+
+  const handleProcess = async (camera: AdminCamera) => {
+    setProcessingId(camera.id);
+    try {
+      let status = await processCameraVideo(camera.id);
+      while (status.status === 'running') {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        status = await getCameraProcessStatus(camera.id);
+      }
+      if (status.status === 'completed') {
+        onCameraUpdated?.({
+          ...camera,
+          lastProcessedAt: status.finished_at ?? new Date().toISOString(),
+        });
+      }
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
   return (
     <div className="overflow-x-auto border border-border rounded-lg bg-card">
       <table className="w-full text-sm">
@@ -27,6 +73,7 @@ export function CameraTable({
           <tr>
             <th className="px-4 py-3 text-left font-semibold text-foreground">Camera ID</th>
             <th className="px-4 py-3 text-left font-semibold text-foreground">Name</th>
+            <th className="px-4 py-3 text-left font-semibold text-foreground">Source</th>
             <th className="px-4 py-3 text-left font-semibold text-foreground">Store</th>
             <th className="px-4 py-3 text-left font-semibold text-foreground">Location</th>
             <th className="px-4 py-3 text-left font-semibold text-foreground">Status</th>
@@ -41,6 +88,26 @@ export function CameraTable({
             <tr key={camera.id} className="hover:bg-muted/40 transition-colors">
               <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{camera.id}</td>
               <td className="px-4 py-3 font-medium text-foreground">{camera.name}</td>
+              <td className="px-4 py-3">
+                {camera.sourceType === 'recorded' ? (
+                  <div className="space-y-1">
+                    <RecordedBadge camera={camera} />
+                    {camera.lastProcessedAt && (
+                      <p className="text-xs text-muted-foreground">
+                        {new Date(camera.lastProcessedAt).toLocaleString()}
+                      </p>
+                    )}
+                    <Link
+                      href="/analytics/occupancy"
+                      className="text-xs text-primary hover:underline block"
+                    >
+                      Analytics →
+                    </Link>
+                  </div>
+                ) : (
+                  <span className="text-xs text-muted-foreground">Live stream</span>
+                )}
+              </td>
               <td className="px-4 py-3 text-foreground text-sm">{camera.store}</td>
               <td className="px-4 py-3 text-foreground text-sm">{camera.location}</td>
               <td className="px-4 py-3">
@@ -64,13 +131,24 @@ export function CameraTable({
               </td>
               <td className="px-4 py-3">
                 <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => onTestCamera(camera)}
-                    title="Test camera"
-                    className="p-1.5 hover:bg-muted rounded transition-colors text-muted-foreground hover:text-foreground"
-                  >
-                    <Zap className="w-4 h-4" />
-                  </button>
+                  {camera.sourceType === 'recorded' ? (
+                    <button
+                      onClick={() => handleProcess(camera)}
+                      disabled={processingId === camera.id}
+                      title="Process video"
+                      className="p-1.5 hover:bg-muted rounded transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    >
+                      <Play className="w-4 h-4" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => onTestCamera(camera)}
+                      title="Test camera"
+                      className="p-1.5 hover:bg-muted rounded transition-colors text-muted-foreground hover:text-foreground"
+                    >
+                      <Zap className="w-4 h-4" />
+                    </button>
+                  )}
                   <button
                     onClick={() => onToggleEnabled(camera.id, !camera.enabled)}
                     title={camera.enabled ? 'Disable camera' : 'Enable camera'}

@@ -242,5 +242,19 @@ def _seed_historical_metrics(session: Session) -> None:
 
 
 if __name__ == "__main__":
-    seed_reference_data(force=True)
-    print("Seed data applied.")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Seed the retail analytics database.")
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Wipe all rows and load the multi-month demo dataset (destructive).",
+    )
+    args = parser.parse_args()
+    if args.demo:
+        from .seed_demo import seed_demo_data
+
+        seed_demo_data()
+    else:
+        seed_reference_data(force=True)
+        print("Minimal seed data applied (test fixture).")

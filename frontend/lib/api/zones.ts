@@ -12,7 +12,12 @@ import {
   ZONE_TYPES,
 } from "@/lib/zones-lines-data";
 import type { Point, Shape, ZoneShape, ZoneType } from "@/lib/types";
-import { getCountingLines } from "@/lib/api/lines";
+import {
+  createCountingLine,
+  deleteCountingLine,
+  getCountingLines,
+  updateCountingLine,
+} from "@/lib/api/lines";
 
 export { SHAPE_COLORS, ZONE_TYPE_COLORS, ZONE_TYPES };
 
@@ -36,6 +41,31 @@ function denormalizePoint(point: Point, width = 640, height = 360): [number, num
   return [(point.x / 100) * width, (point.y / 100) * height];
 }
 
+function mapShapesSafe(
+  zones: BackendZoneShape[],
+  lines: BackendCountingLine[],
+): Shape[] {
+  const mapped: Shape[] = [];
+
+  for (const zone of zones) {
+    try {
+      mapped.push(mapZoneShape(zone));
+    } catch (err) {
+      console.error(`Failed to map zone shape "${zone.id}"`, err);
+    }
+  }
+
+  for (const line of lines) {
+    try {
+      mapped.push(mapCountingLine(line));
+    } catch (err) {
+      console.error(`Failed to map counting line "${line.id}"`, err);
+    }
+  }
+
+  return mapped;
+}
+
 async function listAllCameras(): Promise<BackendCamera[]> {
   return apiRequest<BackendCamera[]>("/api/cameras");
 }
@@ -46,7 +76,7 @@ export async function getAllShapes(): Promise<Shape[]> {
     apiRequest<BackendZoneShape[]>("/api/zones"),
     apiRequest<BackendCountingLine[]>("/api/lines"),
   ]);
-  return [...zones.map(mapZoneShape), ...lines.map(mapCountingLine)];
+  return mapShapesSafe(zones, lines);
 }
 
 export async function getCamerasList(): Promise<ZonesLinesCameraOption[]> {
@@ -61,7 +91,16 @@ export async function getZoneShapes(camera_id: string): Promise<ZoneShape[]> {
   const zones = await apiRequest<BackendZoneShape[]>("/api/zones", {
     query: { camera_id },
   });
-  return zones.map(mapZoneShape);
+  return zones.map((zone) => mapZoneShape(zone));
+}
+
+/** Zones + counting lines for one camera (editor hydration after save/reload). */
+export async function getShapesForCamera(camera_id: string): Promise<Shape[]> {
+  const [zones, lines] = await Promise.all([
+    apiRequest<BackendZoneShape[]>("/api/zones", { query: { camera_id } }),
+    apiRequest<BackendCountingLine[]>("/api/lines", { query: { camera_id } }),
+  ]);
+  return mapShapesSafe(zones, lines);
 }
 
 export async function createZone(data: CreateZoneData): Promise<ZoneShape> {
@@ -84,7 +123,7 @@ export async function createZone(data: CreateZoneData): Promise<ZoneShape> {
 export async function updateZone(
   id: string,
   data: UpdateZoneData,
-): Promise<ZoneShape | null> {
+): Promise<ZoneShape> {
   const body: Record<string, unknown> = {};
   if (data.name !== undefined) body.name = data.name;
   if (data.type !== undefined) body.type = frontendZoneTypeToBackend(data.type);
@@ -92,15 +131,11 @@ export async function updateZone(
     body.polygon_points = data.points.map((point) => denormalizePoint(point));
   }
 
-  try {
-    const updated = await apiRequest<BackendZoneShape>(`/api/zones/${id}`, {
-      method: "PUT",
-      body,
-    });
-    return mapZoneShape(updated);
-  } catch {
-    return null;
-  }
+  const updated = await apiRequest<BackendZoneShape>(`/api/zones/${id}`, {
+    method: "PUT",
+    body,
+  });
+  return mapZoneShape(updated);
 }
 
 export async function deleteZone(id: string): Promise<boolean> {
@@ -122,3 +157,79 @@ export function __setShapes(_next: Shape[]): void {
 }
 
 export { getCountingLines };
+
+/** Persist create/update/delete for one camera's shapes vs last saved snapshot. */
+export async function syncCameraShapes(
+  cameraId: string,
+  current: Shape[],
+  baseline: Shape[],
+): Promise<void> {
+  if (current.length === 0 && baseline.length > 0) {
+    throw new Error(
+      "No shapes to save for this camera. Redraw the zone or reload the page, then try Save again.",
+    );
+  }
+
+  const baselineIds = new Set(baseline.map((shape) => shape.id));
+  const currentIds = new Set(current.map((shape) => shape.id));
+
+  for (const shape of baseline) {
+    if (!currentIds.has(shape.id)) {
+      if (shape.kind === "zone") {
+        await deleteZone(shape.id);
+      } else {
+        await deleteCountingLine(shape.id);
+      }
+    }
+  }
+
+  for (const shape of current) {
+    if (shape.cameraId !== cameraId) continue;
+
+    if (baselineIds.has(shape.id)) {
+      if (shape.kind === "zone") {
+        if (shape.points.length < 3) {
+          throw new Error(`Zone "${shape.name}" must have at least 3 points`);
+        }
+        await updateZone(shape.id, {
+          name: shape.name,
+          type: shape.type,
+          points: shape.points,
+        });
+      } else {
+        const updatedLine = await updateCountingLine(shape.id, {
+          name: shape.name,
+          points: shape.points,
+          insideSide: shape.insideSide,
+        });
+        if (!updatedLine) {
+          throw new Error(`Failed to update counting line "${shape.name}"`);
+        }
+      }
+      continue;
+    }
+
+    if (shape.kind === "zone") {
+      if (shape.points.length < 3) {
+        throw new Error(`Zone "${shape.name}" must have at least 3 points`);
+      }
+      await createZone({
+        id: shape.id,
+        cameraId: shape.cameraId,
+        name: shape.name,
+        type: shape.type,
+        points: shape.points,
+        color: shape.color,
+      });
+    } else {
+      await createCountingLine({
+        id: shape.id,
+        cameraId: shape.cameraId,
+        name: shape.name,
+        points: shape.points,
+        insideSide: shape.insideSide,
+        color: shape.color,
+      });
+    }
+  }
+}

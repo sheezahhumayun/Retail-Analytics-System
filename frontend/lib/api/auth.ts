@@ -12,16 +12,14 @@ import {
   type BackendUserInfo,
 } from "@/lib/api/mappers";
 import { clearStoresCache } from "@/lib/api/stores";
-import type { UserRole } from "@/lib/types";
 
 export type { SessionUser };
 
-const DEV_ROLE_EMAIL: Partial<Record<UserRole, string>> = {
-  "System Administrator": "admin@demo-retail.local",
-  "Store Manager": "user@demo-retail.local",
-  "Operations Manager": "user@demo-retail.local",
-  "Retail Analyst": "user@demo-retail.local",
-};
+/** Seed-account emails shown on the login page picker (documented in PROJECT_STATUS.md). */
+export const LOGIN_HINTS = [
+  { email: "admin@demo-retail.local", label: "Admin (System Administrator)" },
+  { email: "user@demo-retail.local", label: "User (Retail Analyst)" },
+] as const;
 
 interface LoginResponse {
   access_token: string;
@@ -53,15 +51,6 @@ export async function login(email: string, password: string): Promise<SessionUse
   };
   writeAuthSession(session);
   return session.user;
-}
-
-/** Dev helper — logs in with a seeded demo account for the given UI role. */
-export async function loginByRole(
-  role: UserRole,
-  password: string,
-): Promise<SessionUser> {
-  const email = DEV_ROLE_EMAIL[role] ?? "user@demo-retail.local";
-  return login(email, password);
 }
 
 export function logout(): Promise<void> {

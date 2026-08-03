@@ -390,7 +390,7 @@ export function ZonesLinesCanvas({
 
   function confirmZone(name: string, type: ZoneType) {
     if (popup.kind !== 'zone') return;
-    const id = `z-${Date.now()}`;
+    const id = `zone_${cameraId}_${Date.now().toString(36)}`.replace(/[^a-zA-Z0-9_-]/g, '_');
     const newZone: ZoneShape = {
       kind: 'zone',
       id,
@@ -416,7 +416,7 @@ export function ZonesLinesCanvas({
     const endPt = (popup.pendingLine as any)._end as Point | undefined;
     if (!endPt) { setPopup({ kind: 'none' }); return; }
 
-    const id = `l-${Date.now()}`;
+    const id = `line_${cameraId}_${Date.now().toString(36)}`.replace(/[^a-zA-Z0-9_-]/g, '_');
     const color = popup.pendingLine.color;
     const newLine: LineShape = {
       kind: 'line',

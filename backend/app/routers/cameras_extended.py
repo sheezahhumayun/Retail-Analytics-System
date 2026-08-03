@@ -11,9 +11,11 @@ from database.models import Camera, Store
 from ..auth import TokenPayload, require_admin
 from ..deps import DbSession
 from ..exceptions import ApiError
-from ..schemas.cameras import CameraResponse
+from ..schemas.cameras import CameraProcessResponse, CameraResponse
 from ..schemas.extended.cameras import CameraTestResponse, CameraUpdate
+from ..services.camera_process import ProcessJobState, get_process_job, start_recorded_processing
 from ..services.camera_test import test_camera_stream
+from .cameras import _camera_response
 
 router = APIRouter(prefix="/cameras", tags=["Cameras"])
 
@@ -29,7 +31,7 @@ def update_camera(
     body: CameraUpdate,
     session: DbSession,
     _admin: Annotated[TokenPayload, Depends(require_admin)],
-) -> Camera:
+) -> CameraResponse:
     camera = session.get(Camera, camera_id)
     if camera is None:
         raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
@@ -44,6 +46,8 @@ def update_camera(
         camera.location = body.location
     if body.rtsp_url is not None:
         camera.rtsp_url = body.rtsp_url
+    if body.source_type is not None:
+        camera.source_type = body.source_type
     if body.camera_type is not None:
         camera.camera_type = body.camera_type
     if body.resolution is not None:
@@ -54,7 +58,7 @@ def update_camera(
     session.add(camera)
     session.flush()
     session.refresh(camera)
-    return camera
+    return _camera_response(camera)
 
 
 @router.delete(
@@ -67,7 +71,7 @@ def disable_camera(
     camera_id: str,
     session: DbSession,
     _admin: Annotated[TokenPayload, Depends(require_admin)],
-) -> Camera:
+) -> CameraResponse:
     camera = session.get(Camera, camera_id)
     if camera is None:
         raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
@@ -75,7 +79,7 @@ def disable_camera(
     session.add(camera)
     session.flush()
     session.refresh(camera)
-    return camera
+    return _camera_response(camera)
 
 
 @router.post(
@@ -96,3 +100,78 @@ def test_camera(
     if camera is None:
         raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
     return test_camera_stream(camera.rtsp_url)
+
+
+def _process_response(camera_id: str) -> CameraProcessResponse:
+    job = get_process_job(camera_id)
+    status_map = {
+        ProcessJobState.IDLE: "idle",
+        ProcessJobState.RUNNING: "running",
+        ProcessJobState.COMPLETED: "completed",
+        ProcessJobState.FAILED: "failed",
+    }
+    return CameraProcessResponse(
+        camera_id=camera_id,
+        status=status_map[job.state],  # type: ignore[arg-type]
+        message=job.message,
+        started_at=job.started_at.isoformat() if job.started_at else None,
+        finished_at=job.finished_at.isoformat() if job.finished_at else None,
+    )
+
+
+@router.post(
+    "/{camera_id}/process",
+    response_model=CameraProcessResponse,
+    summary="Process recorded video",
+    description=(
+        "Run inference→analytics→persistence on a recorded camera's video file. "
+        "Admin only. Applies only to `source_type=recorded` cameras. "
+        "Runs in a background thread (sample videos take 30–60+ seconds)."
+    ),
+)
+def process_recorded_video(
+    camera_id: str,
+    session: DbSession,
+    _admin: Annotated[TokenPayload, Depends(require_admin)],
+) -> CameraProcessResponse:
+    camera = session.get(Camera, camera_id)
+    if camera is None:
+        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    if camera.source_type != "recorded":
+        raise ApiError(
+            400,
+            "invalid_camera_source",
+            "Processing is only available for recorded-video cameras",
+        )
+    if not camera.rtsp_url:
+        raise ApiError(400, "missing_video_path", "No video file path configured for this camera")
+
+    job = get_process_job(camera_id)
+    if job.state == ProcessJobState.RUNNING:
+        return _process_response(camera_id)
+
+    start_recorded_processing(camera_id)
+    return _process_response(camera_id)
+
+
+@router.get(
+    "/{camera_id}/process-status",
+    response_model=CameraProcessResponse,
+    summary="Recorded video processing status",
+    description="Poll processing job status for a recorded camera. Admin only.",
+)
+def recorded_process_status(
+    camera_id: str,
+    session: DbSession,
+    _admin: Annotated[TokenPayload, Depends(require_admin)],
+) -> CameraProcessResponse:
+    camera = session.get(Camera, camera_id)
+    if camera is None:
+        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    if camera.source_type != "recorded":
+        raise ApiError(
+            400,
+            "invalid_camera_source",
+            "Processing status is only available for recorded-video cameras",
+        )
+    return _process_response(camera_id)

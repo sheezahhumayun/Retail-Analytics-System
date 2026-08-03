@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { X, AlertCircle, CheckCircle, Loader } from 'lucide-react';
 import type { AdminCamera } from '@/lib/types';
+import { testCamera } from '@/lib/api/cameras';
 import { ACTION_STATUS_COLORS } from '@/lib/constants';
 
 type TestState = 'idle' | 'testing' | 'success' | 'error';
@@ -16,38 +17,51 @@ interface TestCameraModalProps {
 export function TestCameraModal({ camera, isOpen, onClose }: TestCameraModalProps) {
   const [state, setState] = useState<TestState>('idle');
   const [error, setError] = useState<string>('');
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [detectedResolution, setDetectedResolution] = useState<string>('—');
+  const [detectedFps, setDetectedFps] = useState<number | null>(null);
 
   useEffect(() => {
-    if (isOpen && camera && state === 'idle') {
-      // Simulate test starting
+    if (!isOpen || !camera) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function runTest() {
       setState('testing');
       setError('');
-    }
-  }, [isOpen, camera]);
+      setLatencyMs(null);
+      setDetectedResolution('—');
+      setDetectedFps(null);
 
-  useEffect(() => {
-    if (state === 'testing' && camera) {
-      // Simulate API call with random success/failure
-      const timer = setTimeout(() => {
-        // Cameras with status 'error' will fail the test, others succeed
-        if (camera.status === 'error') {
-          setError(
-            'Connection timeout: Camera at ' +
-              camera.rtspUrl +
-              ' did not respond within 30 seconds.'
-          );
+      try {
+        const result = await testCamera(camera!.id);
+        if (cancelled) return;
+
+        if (result.status === 'error') {
+          setError(result.error);
           setState('error');
-        } else if (camera.status === 'offline') {
-          setError('Camera is currently offline. Please check the power and network connection.');
-          setState('error');
-        } else {
-          setState('success');
+          return;
         }
-      }, 2000);
 
-      return () => clearTimeout(timer);
+        setLatencyMs(result.latency_ms);
+        setDetectedResolution(result.resolution);
+        setDetectedFps(result.fps);
+        setState('success');
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Camera test failed');
+        setState('error');
+      }
     }
-  }, [state, camera]);
+
+    runTest();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, camera]);
 
   if (!isOpen || !camera) return null;
 
@@ -59,7 +73,6 @@ export function TestCameraModal({ camera, isOpen, onClose }: TestCameraModalProp
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
       <div className="w-full max-w-md bg-card border border-border rounded-lg shadow-lg overflow-hidden">
-        {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-border">
           <h2 className="text-lg font-semibold text-foreground">Test Camera</h2>
           <button
@@ -70,7 +83,6 @@ export function TestCameraModal({ camera, isOpen, onClose }: TestCameraModalProp
           </button>
         </div>
 
-        {/* Content */}
         <div className="p-6 space-y-6">
           <div className="space-y-2">
             <p className="text-sm text-muted-foreground">Camera</p>
@@ -78,7 +90,6 @@ export function TestCameraModal({ camera, isOpen, onClose }: TestCameraModalProp
             <p className="text-xs text-muted-foreground">{camera.rtspUrl}</p>
           </div>
 
-          {/* Loading State */}
           {state === 'testing' && (
             <div className="flex flex-col items-center justify-center py-8 space-y-4">
               <div className="relative w-16 h-16">
@@ -87,51 +98,51 @@ export function TestCameraModal({ camera, isOpen, onClose }: TestCameraModalProp
               <div className="text-center">
                 <p className="font-medium text-foreground">Testing connection...</p>
                 <p className="text-sm text-muted-foreground mt-1">
-                  Verifying camera availability and settings
+                  Calling POST /api/cameras/{camera.id}/test
                 </p>
               </div>
             </div>
           )}
 
-          {/* Success State */}
           {state === 'success' && (
             <div className="space-y-4">
               <div className="flex items-center gap-3">
                 <CheckCircle className={`w-6 h-6 ${ACTION_STATUS_COLORS.positiveIcon}`} />
                 <div>
                   <p className="font-semibold text-foreground">Connection successful</p>
-                  <p className="text-sm text-muted-foreground">Camera is online and responding</p>
+                  <p className="text-sm text-muted-foreground">Backend stream probe succeeded</p>
                 </div>
               </div>
 
-              {/* Mock Preview Frame */}
-              <div className="bg-gradient-to-br from-muted to-muted/50 rounded-lg aspect-video flex items-center justify-center border border-border">
-                <div className="text-center">
-                  <div className="text-3xl mb-2">📹</div>
-                  <p className="text-sm text-muted-foreground">Live Feed Preview</p>
-                  <p className="text-xs text-muted-foreground mt-1">(Mock frame)</p>
-                </div>
+              <div className="rounded-lg border border-dashed border-border bg-muted/30 px-4 py-6 text-center">
+                <p className="text-sm font-medium text-foreground">Live preview not available</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {/* TODO: no backend endpoint yet - see PROJECT_STATUS.md */}
+                  No MJPEG/HLS/WebRTC stream endpoint exists yet.
+                </p>
               </div>
 
-              {/* Readback Info */}
               <div className="bg-muted/50 rounded-lg p-4 space-y-2">
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">Detected Resolution:</span>
-                  <span className="font-medium text-foreground">{camera.resolution}</span>
+                  <span className="font-medium text-foreground">{detectedResolution}</span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">Frame Rate:</span>
-                  <span className="font-medium text-foreground">{camera.fps} FPS</span>
+                  <span className="font-medium text-foreground">
+                    {detectedFps != null ? `${detectedFps} FPS` : '—'}
+                  </span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">Latency:</span>
-                  <span className="font-medium text-foreground">45ms</span>
+                  <span className="font-medium text-foreground">
+                    {latencyMs != null ? `${latencyMs}ms` : '—'}
+                  </span>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Error State */}
           {state === 'error' && (
             <div className="space-y-4">
               <div className="flex items-start gap-3">
@@ -152,7 +163,6 @@ export function TestCameraModal({ camera, isOpen, onClose }: TestCameraModalProp
           )}
         </div>
 
-        {/* Footer */}
         <div className="flex justify-end gap-3 px-6 py-4 border-t border-border bg-muted/40">
           <button
             onClick={handleClose}

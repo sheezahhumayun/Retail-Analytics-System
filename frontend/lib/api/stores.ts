@@ -102,37 +102,29 @@ export function clearStoresCache(): void {
   loadPromise = null;
 }
 
-/** First configured zone shape for the deployment, or seeded fallback. */
+/** First configured zone shape for the deployment. */
 export async function getDefaultZoneId(): Promise<string> {
   if (cachedDefaultZoneId) return cachedDefaultZoneId;
-  try {
-    const org = await getOrganization();
-    for (const store of org.stores) {
-      for (const camera of store.cameras) {
-        for (const zone of camera.zones) {
-          if (zone.id) {
-            cachedDefaultZoneId = zone.id;
-            return zone.id;
-          }
+
+  const org = await getOrganization();
+  for (const store of org.stores) {
+    for (const camera of store.cameras) {
+      for (const zone of camera.zones) {
+        if (zone.id) {
+          cachedDefaultZoneId = zone.id;
+          return zone.id;
         }
       }
     }
-  } catch {
-    // fall through to seed default
   }
-  cachedDefaultZoneId = "store1";
-  return cachedDefaultZoneId;
+
+  throw new Error("No zone configured for this deployment");
 }
 
 export async function getDefaultStoreId(): Promise<string> {
-  if (getAccessToken()) {
-    try {
-      const stores = await getStores();
-      const preferred = stores.find((store) => store.id === "store_main");
-      return preferred?.id ?? stores[0]?.id ?? "store_main";
-    } catch {
-      // fall through to seed default
-    }
+  const stores = await getStores();
+  if (stores.length === 0) {
+    throw new Error("No stores configured for this deployment");
   }
-  return "store_main";
+  return stores[0].id;
 }

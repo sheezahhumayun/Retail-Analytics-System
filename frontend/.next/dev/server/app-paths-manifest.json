@@ -1,11 +1,8 @@
 {
-  "/_not-found/page": "app/_not-found/page.js",
+  "/visual-analytics/heatmap/page": "app/visual-analytics/heatmap/page.js",
   "/page": "app/page.js",
-  "/reports/page": "app/reports/page.js",
-  "/alerts/page": "app/alerts/page.js",
   "/live-cameras/page": "app/live-cameras/page.js",
-  "/analytics/zones/page": "app/analytics/zones/page.js",
-  "/analytics/queues/page": "app/analytics/queues/page.js",
-  "/login/page": "app/login/page.js",
-  "/admin/cameras/page": "app/admin/cameras/page.js"
+  "/analytics/traffic/page": "app/analytics/traffic/page.js",
+  "/reports/page": "app/reports/page.js",
+  "/alerts/page": "app/alerts/page.js"
 }

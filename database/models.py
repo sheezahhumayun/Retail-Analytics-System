@@ -46,6 +46,8 @@ class Camera(SQLModel, table=True):
     name: str = Field(max_length=255, nullable=False)
     location: str | None = Field(default=None, max_length=255)
     rtsp_url: str | None = Field(default=None, max_length=1024)
+    source_type: str = Field(default="live", max_length=16)
+    last_processed_at: datetime | None = Field(default=None)
     camera_type: str = Field(default="fixed", max_length=64)
     resolution: str | None = Field(default=None, max_length=32)
     fps: float | None = Field(default=None)

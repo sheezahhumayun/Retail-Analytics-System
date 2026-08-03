@@ -87,3 +87,10 @@ export async function updateAlert(
   const lookups = await buildNameLookups();
   return mapAlert(updated, lookups.cameras, lookups.zones);
 }
+
+export async function getOpenAlertCount(): Promise<number> {
+  const response = await apiRequest<BackendAlertList>("/api/alerts", {
+    query: { status: "open" },
+  });
+  return response.count;
+}

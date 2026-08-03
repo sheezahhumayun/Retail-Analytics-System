@@ -40,5 +40,3 @@ export const NAV_ITEMS: NavItem[] = [
   },
 ]
 
-/** Mocked count of unread / open alerts shown in the nav pill. */
-export const OPEN_ALERT_COUNT = 3

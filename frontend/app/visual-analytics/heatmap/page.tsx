@@ -11,6 +11,7 @@ import {
   getHeatmapCameras,
   getZonePerformance,
 } from '@/lib/api/analytics';
+import { ApiClientError } from '@/lib/api/client';
 import {
   filterHeatmapCameras,
   resolveEffectiveCameraId,
@@ -18,20 +19,26 @@ import {
 import { useScope } from '@/lib/scope/ScopeContext';
 import type { FloorZone, HeatBlob, HeatmapCamera, ZoneRow } from '@/lib/types';
 
+/** UTC calendar date matching demo seed end (`compute_demo_date_range().end`). */
+function mostRecentSeedDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export default function HeatmapPage() {
   const { storeId, cameraId, zoneId, storeCameraIds } = useScope();
-  const today = new Date().toISOString().slice(0, 10);
+  const defaultDate = mostRecentSeedDate();
 
   const [allCameras, setAllCameras] = useState<HeatmapCamera[]>([]);
   const [zoneRows, setZoneRows] = useState<ZoneRow[]>([]);
   const [pageCamera, setPageCamera] = useState('');
-  const [date, setDate] = useState(today);
+  const [date, setDate] = useState(defaultDate);
   const [timeFrom, setTimeFrom] = useState('09:00');
   const [timeTo, setTimeTo] = useState('18:00');
   const [opacity, setOpacity] = useState(0.72);
   const [blobs, setBlobs] = useState<HeatBlob[]>([]);
   const [floorZones, setFloorZones] = useState<FloorZone[]>([]);
   const [loading, setLoading] = useState(true);
+  const [emptyMessage, setEmptyMessage] = useState<string | null>(null);
 
   const scopedCameras = useMemo(
     () => filterHeatmapCameras(allCameras, cameraId, storeCameraIds),
@@ -57,16 +64,23 @@ export default function HeatmapPage() {
     let cancelled = false;
 
     async function loadMeta() {
-      const [cameraList, performance] = await Promise.all([
-        getHeatmapCameras(),
-        getZonePerformance({
-          store_id: storeId ?? undefined,
-          zone_id: zoneId ?? undefined,
-        }),
-      ]);
-      if (!cancelled) {
-        setAllCameras(cameraList);
-        setZoneRows(performance);
+      try {
+        const [cameraList, performance] = await Promise.all([
+          getHeatmapCameras(),
+          getZonePerformance({
+            store_id: storeId ?? undefined,
+            zone_id: zoneId ?? undefined,
+          }),
+        ]);
+        if (!cancelled) {
+          setAllCameras(cameraList);
+          setZoneRows(performance);
+        }
+      } catch {
+        if (!cancelled) {
+          setAllCameras([]);
+          setZoneRows([]);
+        }
       }
     }
 
@@ -77,22 +91,56 @@ export default function HeatmapPage() {
   }, [storeId, zoneId]);
 
   useEffect(() => {
-    if (!effectiveCamera) return;
+    if (!effectiveCamera) {
+      setLoading(false);
+      setBlobs([]);
+      setFloorZones([]);
+      setEmptyMessage('Select a camera to view heatmap data.');
+      return;
+    }
 
     let cancelled = false;
 
     async function loadHeatmap() {
       setLoading(true);
-      const result = await getHeatmap({
-        camera_id: effectiveCamera,
-        date,
-        from_time: timeFrom,
-        to_time: timeTo,
-      });
-      if (!cancelled) {
-        setBlobs(result.blobs);
-        setFloorZones(result.floor_zones);
-        setLoading(false);
+      setEmptyMessage(null);
+      try {
+        const result = await getHeatmap({
+          camera_id: effectiveCamera,
+          date,
+          from_time: timeFrom,
+          to_time: timeTo,
+        });
+        if (!cancelled) {
+          setBlobs(result.blobs);
+          setFloorZones(result.floor_zones);
+          setEmptyMessage(
+            result.blobs.length === 0
+              ? `No heatmap density for camera '${effectiveCamera}' on ${date}.`
+              : null,
+          );
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setBlobs([]);
+          setFloorZones([]);
+          if (err instanceof ApiClientError && err.status === 404) {
+            setEmptyMessage(
+              err.message ||
+                `No heatmap data for camera '${effectiveCamera}' on ${date}.`,
+            );
+          } else {
+            setEmptyMessage(
+              err instanceof Error
+                ? err.message
+                : 'Failed to load heatmap data.',
+            );
+          }
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
 
@@ -138,6 +186,16 @@ export default function HeatmapPage() {
                 <div className="absolute inset-0 border-4 border-transparent border-t-primary border-r-primary rounded-full animate-spin" />
               </div>
               <p className="text-sm text-muted-foreground">Loading heatmap…</p>
+            </div>
+          </div>
+        ) : emptyMessage ? (
+          <div className="flex aspect-[16/9] items-center justify-center rounded-lg border border-dashed border-border bg-card">
+            <div className="max-w-md px-6 text-center">
+              <p className="text-sm font-medium text-foreground">No heatmap data</p>
+              <p className="mt-1.5 text-sm text-muted-foreground">{emptyMessage}</p>
+              <p className="mt-3 text-xs text-muted-foreground">
+                Try another date in the seeded range, or a different camera / time window.
+              </p>
             </div>
           </div>
         ) : (

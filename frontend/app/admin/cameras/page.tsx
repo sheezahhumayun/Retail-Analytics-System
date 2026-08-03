@@ -9,10 +9,12 @@ import { TestCameraModal } from '@/components/admin/test-camera-modal';
 import {
   createCamera,
   deleteCamera,
+  ensureStoresLoaded,
   getCameras,
   updateCamera,
 } from '@/lib/api/cameras';
 import type { AdminCamera } from '@/lib/types';
+import type { CreateCameraData } from '@/lib/api/cameras';
 
 export default function AdminCamerasPage() {
   const [cameras, setCameras] = useState<AdminCamera[]>([]);
@@ -25,10 +27,18 @@ export default function AdminCamerasPage() {
     let cancelled = false;
 
     async function load() {
-      const data = await getCameras();
-      if (!cancelled) {
-        setCameras(data);
-        setLoading(false);
+      try {
+        await ensureStoresLoaded();
+        const data = await getCameras();
+        if (!cancelled) {
+          setCameras(data);
+        }
+      } catch (err) {
+        console.error('Failed to load cameras', err);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
 
@@ -48,17 +58,19 @@ export default function AdminCamerasPage() {
     setShowAddModal(true);
   };
 
-  const handleSaveCamera = async (camera: AdminCamera) => {
+  const handleSaveCamera = async (camera: AdminCamera | CreateCameraData) => {
     if (editingCamera) {
-      const updated = await updateCamera(camera.id, camera);
-      if (updated) {
-        setCameras((prev) => prev.map((c) => (c.id === camera.id ? updated : c)));
+      const updated = await updateCamera(editingCamera.id, camera as AdminCamera);
+      if (!updated) {
+        throw new Error('Failed to update camera');
       }
+      setCameras((prev) => prev.map((c) => (c.id === editingCamera.id ? updated : c)));
     } else {
-      const created = await createCamera(camera);
+      const created = await createCamera(camera as CreateCameraData);
       setCameras((prev) => [...prev, created]);
     }
     setShowAddModal(false);
+    setEditingCamera(undefined);
   };
 
   const handleDeleteCamera = async (cameraId: string) => {
@@ -92,6 +104,7 @@ export default function AdminCamerasPage() {
             <p className="text-muted-foreground mt-1">Manage retail store cameras and analytics</p>
           </div>
           <button
+            type="button"
             onClick={handleAddCamera}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors font-medium"
           >
@@ -144,15 +157,25 @@ export default function AdminCamerasPage() {
             onDelete={handleDeleteCamera}
             onToggleEnabled={handleToggleEnabled}
             onTestCamera={handleTestCamera}
+            onCameraUpdated={(updated) =>
+              setCameras((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
+            }
           />
         )}
       </div>
 
       <CameraModal
+        key={showAddModal ? (editingCamera?.id ?? 'new') : 'closed'}
         camera={editingCamera}
         isOpen={showAddModal}
-        onClose={() => setShowAddModal(false)}
+        onClose={() => {
+          setShowAddModal(false);
+          setEditingCamera(undefined);
+        }}
         onSave={handleSaveCamera}
+        onProcessed={(updated) =>
+          setCameras((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
+        }
       />
       <TestCameraModal
         camera={testingCamera}

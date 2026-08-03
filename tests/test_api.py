@@ -121,13 +121,31 @@ class TestCameras:
             "/api/cameras",
             headers=auth_headers,
             json={
-                "id": "bad_cam",
                 "store_id": STORE_ID,
                 "name": "Bad",
                 "rtsp_url": "not-a-valid-url!!!",
             },
         )
         assert resp.status_code == 422
+
+    def test_create_camera_generates_id(self, api_client: TestClient, auth_headers: dict):
+        resp = api_client.post(
+            "/api/cameras",
+            headers=auth_headers,
+            json={
+                "store_id": STORE_ID,
+                "name": "Back Lot Camera",
+                "location": "Rear entrance",
+                "rtsp_url": "rtsp://192.168.1.50:554/stream1",
+                "source_type": "live",
+            },
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["id"]
+        assert data["id"].startswith("cam_")
+        assert data["name"] == "Back Lot Camera"
+        assert data["store_id"] == STORE_ID
 
     def test_create_camera_forbidden_for_regular_user(
         self, api_client: TestClient, user_auth_headers: dict
@@ -136,7 +154,6 @@ class TestCameras:
             "/api/cameras",
             headers=user_auth_headers,
             json={
-                "id": "cam_user_forbidden",
                 "store_id": STORE_ID,
                 "name": "Should Fail",
                 "rtsp_url": "sample-data/town.mp4",
