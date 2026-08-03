@@ -2,16 +2,19 @@
 
 import { useEffect, useState } from 'react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
+import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { KPICard } from '@/components/overview/kpi-card';
 import { VisitorsByHourChart } from '@/components/overview/visitors-by-hour-chart';
 import { EntriesExitsChart } from '@/components/overview/entries-exits-chart';
 import { OccupancyTrendChart } from '@/components/overview/occupancy-trend-chart';
 import { getOverviewKpis } from '@/lib/api/analytics';
+import { resolveZoneId } from '@/lib/scope/scope-filters';
 import { useScope } from '@/lib/scope/ScopeContext';
 import type { OverviewKpiData } from '@/lib/api/analytics';
 
 export default function OverviewPage() {
-  const { storeId } = useScope();
+  const { storeId, cameraId, zoneId, camera, store } = useScope();
+  const resolvedZoneId = resolveZoneId(zoneId, camera, store);
   const [kpis, setKpis] = useState<OverviewKpiData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -22,6 +25,8 @@ export default function OverviewPage() {
       setLoading(true);
       const kpiData = await getOverviewKpis({
         store_id: storeId ?? undefined,
+        camera_id: cameraId ?? undefined,
+        zone_id: resolvedZoneId,
       });
       if (!cancelled) {
         setKpis(kpiData);
@@ -33,7 +38,7 @@ export default function OverviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [storeId]);
+  }, [storeId, cameraId, resolvedZoneId]);
 
   return (
     <DashboardShell>
@@ -46,6 +51,8 @@ export default function OverviewPage() {
             High-level performance across the selected scope.
           </p>
         </div>
+
+        <ScopeContextBanner storeOnly />
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <KPICard

@@ -31,12 +31,14 @@ export type TestCameraSuccess = {
   resolution: Resolution;
   fps: number;
   latency_ms: number;
+  camera_status?: CameraStatus;
 };
 
 export type TestCameraError = {
   status: "error";
   camera_id: string;
   error: string;
+  camera_status?: CameraStatus;
 };
 
 export type TestCameraResult = TestCameraSuccess | TestCameraError;
@@ -84,10 +86,19 @@ export async function getCameras(): Promise<AdminCamera[]> {
 
 export async function getLiveCameras(): Promise<Camera[]> {
   const cameras = await apiRequest<BackendCamera[]>("/api/cameras");
-  return cameras
+  const live = cameras
     .filter((camera) => camera.status !== "disabled")
-    .filter((camera) => (camera.source_type ?? "live") === "live")
-    .map((camera) => mapLiveCamera(camera, null));
+    .filter((camera) => (camera.source_type ?? "live") === "live");
+
+  const statuses = await Promise.all(
+    live.map((camera) =>
+      apiRequest<BackendCameraStatus>(`/api/cameras/${camera.id}/status`).catch(
+        () => null,
+      ),
+    ),
+  );
+
+  return live.map((camera, index) => mapLiveCamera(camera, statuses[index]));
 }
 
 export async function getCameraStatus(id: string): Promise<CameraStatus | null> {
@@ -170,13 +181,17 @@ export async function testCamera(id: string): Promise<TestCameraResult> {
     resolution?: string | null;
     fps?: number | null;
     message?: string | null;
+    camera_status?: CameraStatus | null;
   }>(`/api/cameras/${id}/test`, { method: "POST" });
+
+  const cameraStatus = response.camera_status as CameraStatus | undefined;
 
   if (response.status === "error") {
     return {
       status: "error",
       camera_id: id,
       error: response.message ?? "Camera test failed",
+      camera_status: cameraStatus,
     };
   }
 
@@ -186,5 +201,6 @@ export async function testCamera(id: string): Promise<TestCameraResult> {
     resolution: (response.resolution as Resolution) ?? "1080p",
     fps: response.fps ?? 0,
     latency_ms: response.latency_ms ?? 0,
+    camera_status: cameraStatus,
   };
 }

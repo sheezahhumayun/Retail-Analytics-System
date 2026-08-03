@@ -13,6 +13,7 @@ import { ComparisonToggle }  from './comparison-toggle';
 import { AnalyticsChart } from './analytics-chart';
 import { StatCard }          from './stat-card';
 import { DataTable }         from './data-table';
+import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { useScope } from '@/lib/scope/ScopeContext';
 
 
@@ -73,6 +74,8 @@ export function AnalyticsPageLayout({ config }: { config: AnalyticsPageConfig })
           <p className="mt-0.5 text-sm text-muted-foreground">{config.description}</p>
         )}
       </div>
+
+      <ScopeContextBanner />
 
       {/* Controls row */}
       <div className="flex flex-wrap items-center gap-4 rounded-lg border border-border bg-card px-4 py-3">

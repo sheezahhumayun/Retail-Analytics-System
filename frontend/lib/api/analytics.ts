@@ -55,6 +55,8 @@ export type OccupancyTrendRow = { day: string; occupancy: number };
 
 export interface OverviewScopeParams {
   store_id?: string;
+  camera_id?: string;
+  zone_id?: string;
 }
 
 export interface DateRangeParams {
@@ -254,11 +256,18 @@ export async function getOverviewKpis(
 ): Promise<OverviewKpiData> {
   const store_id = params.store_id ?? (await getDefaultStoreId());
   const today = new Date().toISOString().slice(0, 10);
-  const zone_id = await getDefaultZoneId();
+  const zone_id = params.zone_id ?? (await getDefaultZoneId());
+
+  const occupancyQuery: Record<string, string> = { store_id };
+  if (params.camera_id) {
+    delete occupancyQuery.store_id;
+    occupancyQuery.camera_id = params.camera_id;
+  }
+
   const [traffic, occupancy, cameras, dwell, queues] = await Promise.all([
     fetchTrafficResponse(store_id, today, today).catch(() => null),
     apiRequest<BackendOccupancyResponse>("/api/analytics/occupancy", {
-      query: { store_id },
+      query: occupancyQuery,
     }).catch(() => null),
     apiRequest<BackendCamera[]>("/api/cameras", {
       query: { store_id },

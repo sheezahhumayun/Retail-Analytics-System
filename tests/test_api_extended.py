@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
+from database.models import Camera
 from database.seed import ORG_ID, STORE_ID, seed_reference_data
 from database.session import create_all, reset_engine, session_scope
 
@@ -229,7 +230,35 @@ class TestCamerasExtended:
     def test_test_stream(self, api_client: TestClient, admin_headers: dict):
         resp = api_client.post("/api/cameras/entrance/test", headers=admin_headers)
         assert resp.status_code == 200
-        assert resp.json()["status"] in ("success", "error")
+        data = resp.json()
+        assert data["status"] in ("success", "error")
+        assert "camera_status" in data
+
+    def test_test_stream_updates_persisted_status(
+        self, api_client: TestClient, admin_headers: dict,
+    ):
+        original_url: str | None = None
+        with session_scope() as session:
+            camera = session.get(Camera, "entrance")
+            assert camera is not None
+            original_url = camera.rtsp_url
+            camera.rtsp_url = "rtsp://127.0.0.1:9/unreachable"
+            camera.status = "online"
+            session.add(camera)
+
+        resp = api_client.post("/api/cameras/entrance/test", headers=admin_headers)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "error"
+        assert resp.json()["camera_status"] == "error"
+
+        with session_scope() as session:
+            camera = session.get(Camera, "entrance")
+            assert camera is not None
+            assert camera.status == "error"
+            if original_url is not None:
+                camera.rtsp_url = original_url
+                camera.status = "online"
+                session.add(camera)
 
     def test_update_forbidden_for_user(self, api_client: TestClient, user_headers: dict):
         resp = api_client.put(

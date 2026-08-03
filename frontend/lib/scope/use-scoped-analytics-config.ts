@@ -3,6 +3,16 @@
 import { useMemo } from "react";
 
 import {
+  dwellStatsFromRows,
+  occupancyStatsFromRows,
+  queueStatsFromRows,
+  trafficStatsFromRows,
+  zoneStatsFromRows,
+} from "@/lib/api/mappers";
+import { dateRangeForKey } from "@/lib/scope/date-range";
+import { resolveZoneId } from "@/lib/scope/scope-filters";
+import { useScope } from "@/lib/scope/ScopeContext";
+import {
   fetchDwellTimeData,
   fetchIntervalLabel,
   fetchOccupancyData,
@@ -15,21 +25,6 @@ import {
   getTraffic,
   getZones,
 } from "@/lib/api/analytics";
-import {
-  dwellStatsFromRows,
-  occupancyStatsFromRows,
-  queueStatsFromRows,
-  trafficStatsFromRows,
-  zoneStatsFromRows,
-} from "@/lib/api/mappers";
-import { dateRangeForKey } from "@/lib/scope/date-range";
-import {
-  resolveZoneId,
-  scaleDataRows,
-  scaleStatSummaries,
-  scopeScaleFactor,
-} from "@/lib/scope/scope-filters";
-import { useScope } from "@/lib/scope/ScopeContext";
 import type { AnalyticsPageConfig, DataRow, StatSummary } from "@/lib/types";
 
 type ScopedAnalyticsKind = "traffic" | "occupancy" | "zones" | "dwell" | "queues";
@@ -65,55 +60,50 @@ function useScopedAnalyticsConfig(
   base: ScopedAnalyticsBase,
 ): AnalyticsPageConfig {
   const { storeId, cameraId, zoneId, camera, store } = useScope();
+  const resolvedZoneId = useMemo(
+    () => resolveZoneId(zoneId, camera, store),
+    [zoneId, camera, store],
+  );
 
   return useMemo(() => {
-    const scaleId = zoneId ?? cameraId ?? storeId;
-    const factor = scopeScaleFactor(scaleId);
-    const resolvedZoneId = resolveZoneId(zoneId, camera, store);
-
     const getData: AnalyticsPageConfig["getData"] = async (range) => {
       const { from, to } = dateRangeForKey(range);
 
       switch (kind) {
         case "traffic": {
           if (!storeId) return fetchTrafficData(range);
-          const rows = await getTraffic({ store_id: storeId, from, to });
-          return scaleDataRows(rows, factor);
+          return getTraffic({ store_id: storeId, from, to });
         }
         case "occupancy": {
           if (!storeId && !cameraId) return fetchOccupancyData(range);
-          const rows = await getOccupancy({
+          return getOccupancy({
             store_id: storeId ?? undefined,
             camera_id: cameraId ?? undefined,
           });
-          return scaleDataRows(rows, factor);
         }
         case "zones": {
           if (!zoneId && !storeId) return fetchZonesData(range);
-          const result = await getZones({
+          return getZones({
             zone_id: resolvedZoneId,
             from,
             to,
-          });
-          return scaleDataRows(result.rows, factor);
+          }).then((result) => result.rows);
         }
         case "dwell": {
           if (!zoneId && !storeId) return fetchDwellTimeData(range);
-          const rows = await getDwell({
+          return getDwell({
             zone_id: resolvedZoneId,
             from,
             to,
           });
-          return scaleDataRows(rows, factor);
         }
         case "queues": {
           if (!zoneId && !storeId) return fetchQueuesData(range);
-          const rows = await getQueues({
+          return getQueues({
             zone_id: resolvedZoneId,
             from,
             to,
           });
-          return scaleDataRows(rows, factor);
         }
         default: {
           const _exhaustive: never = kind;
@@ -123,7 +113,7 @@ function useScopedAnalyticsConfig(
     };
 
     const getStats: AnalyticsPageConfig["getStats"] = (rows) =>
-      scaleStatSummaries(statsForKind(kind, rows), factor);
+      statsForKind(kind, rows);
 
     return {
       ...base,
@@ -131,7 +121,7 @@ function useScopedAnalyticsConfig(
       getStats,
       getIntervalLabel: base.getIntervalLabel ?? fetchIntervalLabel,
     };
-  }, [kind, base, storeId, cameraId, zoneId, camera, store]);
+  }, [kind, base, storeId, cameraId, zoneId, resolvedZoneId]);
 }
 
 export function useTrafficAnalyticsConfig(): AnalyticsPageConfig {

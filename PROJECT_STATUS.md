@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-08-03 (Demo seed synthetic heatmaps + analytics duplicate-key fix)
+**Last updated:** 2026-08-03 (Camera status + scope filter fixes)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -1694,6 +1694,74 @@ Distinguishes **live stream** cameras from **recorded video** sources so file-ba
 - **Live Cameras page** — only `source_type=live` cameras in the tile grid.
 - **Admin camera table** — recorded cameras show “Recorded — processed” / “Recorded — not yet processed” badge, last-processed timestamp, analytics link, and Process action (not live-test).
 - **Analytics pages** — no special-casing; processed recorded cameras write to the same metric tables as live cameras.
+
+---
+
+---
+
+## Bug fixes — camera status + scope filtering (2026-08-03)
+
+Two data-flow bugs fixed after root-cause tracing (not UI-only patches).
+
+### BUG 1 — Camera online/offline status
+
+**Diagnosis (which of a/b/c/d was true):**
+
+| Hypothesis | Verdict |
+|------------|---------|
+| **(a)** `POST /api/cameras/{id}/test` probes but never writes `cameras.status` | **TRUE — primary bug for failed tests** |
+| **(b)** Frontend list not re-fetching after test | **Partially true** — modal called the API but admin table never updated local state from the result |
+| **(c)** `GET /status` vs `GET /cameras` list out of sync | **TRUE** — both read the same stored column, but nothing updated that column on probe |
+| **(d)** No background health check | **TRUE** — status only changed at seed time until manual test |
+
+**Chosen source of truth:** **(i) persisted `cameras.status`** — test, status, and a background worker all probe connectivity and **write back** to `cameras.status`. `GET /api/cameras` and `GET /api/cameras/{id}/status` read that column (status endpoint also probes live cameras on read so a single check is fresh). Rationale: schema already has `cameras.status`; live-probing every camera on every list request would be too slow for N cameras.
+
+**Backend changes:**
+
+- `backend/app/services/camera_health.py` — shared probe + `apply_probe_to_camera()` / `refresh_all_live_camera_statuses()`
+- `POST /api/cameras/{id}/test` — persists `online` or `error` for live cameras; response includes `camera_status`
+- `GET /api/cameras/{id}/status` — probes live cameras before returning (updates DB)
+- Background worker on API startup — probes all live cameras every **120 s** (`CAMERA_HEALTH_INTERVAL_SECONDS` in `.env` / `backend/app/config.py`)
+
+**Frontend changes:**
+
+- `TestCameraModal` → `onTestComplete` updates admin camera table row immediately (no page refresh)
+- `getLiveCameras()` fetches per-camera `/status` (live probe) instead of trusting list-only status
+- Live Cameras page polls every **90 s** + shows `ScopeContextBanner`
+
+**Verify:** Run Test Camera on a bad RTSP URL → admin table shows **error** immediately. Stop a live stream → within ~2 min background check (or ~90 s live-cameras poll) status flips to **error** offline.
+
+---
+
+### BUG 2 — Scope filters not filtering pages
+
+**Per-page diagnosis:**
+
+| Page | Request updates on scope change? | Root cause | Fix |
+|------|----------------------------------|------------|-----|
+| **Overview** (`/`) | Traffic yes (`store_id`); occupancy/dwell/queue used defaults | Only subscribed to `storeId`; dwell/queue ignored camera/zone scope | Pass `camera_id` + resolved `zone_id` to `getOverviewKpis`; banner shows store scope |
+| **Traffic** | Yes (`store_id`) | **Fake `scaleDataRows` / `scopeScaleFactor`** made tiny cosmetic deltas instead of real API scoping | Removed mock scaling; API params only |
+| **Occupancy** | Yes (`store_id` / `camera_id`) | Same fake scaling | Removed scaling |
+| **Zones** | Yes (`zone_id`) | Scaling + fallback zone when none selected | Removed scaling; `resolveZoneId()` picks first zone in store when “All zones” |
+| **Dwell** | Yes (`zone_id`) | Same as zones | Same fix |
+| **Queues** | Yes (`zone_id`) | Same as zones | Same fix |
+| **Heatmap** | Yes (`camera_id`) | **`SCOPE_TO_HEATMAP` mock ID map** (`cam-entrance` → `cam-overview`) broke real backend camera ids | Filter by actual `storeCameraIds` / `cameraId` |
+| **Zone performance** | Yes (`store_id` / `zone_id` on fan-out) | Hardcoded KPI cards (“2m 38s”, “Entrance”) | KPIs computed from scoped `getZonePerformance()` rows |
+| **Live cameras** | List filtered client-side; status now probed | Status stale (BUG 1) | Status probe + poll; `filterLiveCameras` by scope |
+| **Customer flow** | N/A — no backend | Placeholder page; scope only affects camera dropdown labels | Uses store camera ids from org tree; banner notes no API |
+| **Alerts** | `GET /api/alerts` has no scope params (by design) | Hardcoded filter dropdown names; global scope ignored | Client-side filter by `storeCameraIds` / `cameraId` / `zoneId`; dynamic filter options from org tree |
+| **Reports** (`/reports`) | Own store picker in form | **Intentional** — report export is store-scoped via form, not global scope | Global scope selector **hidden** on `/reports`; `ScopeContextBanner notScoped` on page |
+| **Admin** (`/admin/*`) | N/A | **Intentional** — org-wide admin, not analytics scope | Global scope selector **hidden** under `/admin/*`; `ScopeContextBanner notScoped` on admin pages |
+
+**Zone ID mismatch (item 4):** Demo seed writes matching ids to `zones` (analytics) and `zone_shapes` (geometry) — **not mismatched** in seeded data. Scope dropdown uses `zone_shapes` ids which match analytics `zone_id` in seed.
+
+**Scope persistence (item 5):** `ScopeProvider` wraps the app — store/camera/zone persist across navigation. Changing store clears camera + zone (by design).
+
+**Frontend patterns fixed:**
+
+- Removed `scopeScaleFactor` / `scaleDataRows` / `scaleStatSummaries` from analytics config (leftover mock-era fake scaling)
+- `ScopeContextBanner` on all scope-aware pages; `storeOnly` on overview; `notScoped` on admin cameras
+- Scope selector: **All cameras** / **All zones** options; zones aggregate across store when no camera selected
 
 ---
 

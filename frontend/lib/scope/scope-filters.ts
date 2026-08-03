@@ -1,3 +1,7 @@
+"use client";
+
+import { useMemo } from "react";
+
 import type {
   Camera,
   DataRow,
@@ -7,42 +11,6 @@ import type {
   Store,
   ZoneRow,
 } from "@/lib/types";
-
-/** Deterministic scale factor from a scope id (store/camera/zone). */
-export function scopeScaleFactor(id: string | null | undefined): number {
-  if (!id) return 1;
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash + id.charCodeAt(i) * (i + 1)) % 97;
-  }
-  return 0.85 + (hash % 30) / 100;
-}
-
-export function scaleDataRows(rows: DataRow[], factor: number): DataRow[] {
-  return rows.map((row) => ({
-    ...row,
-    current: Math.round(row.current * factor),
-    prior:
-      row.prior !== undefined
-        ? Math.round(row.prior * factor)
-        : undefined,
-  }));
-}
-
-export function scaleStatSummaries(
-  stats: StatSummary[],
-  factor: number,
-): StatSummary[] {
-  return stats.map((stat) => {
-    const numeric = Number.parseInt(stat.value.replace(/[^\d]/g, ""), 10);
-    if (Number.isNaN(numeric)) return stat;
-    const scaled = Math.round(numeric * factor);
-    const value = stat.value.includes("%")
-      ? `${scaled}%`
-      : scaled.toLocaleString();
-    return { ...stat, value };
-  });
-}
 
 export function getStoreCameraIds(store: Store | null): string[] {
   return store?.cameras.map((camera) => camera.id) ?? [];
@@ -62,39 +30,20 @@ export function filterLiveCameras(
   return cameras;
 }
 
-const SCOPE_TO_HEATMAP: Record<string, string> = {
-  "cam-entrance": "cam-entrance",
-  "cam-checkout": "cam-checkout",
-  "cam-apparel": "cam-apparel",
-  "cam-atrium": "cam-overview",
-  "cam-electronics": "cam-aisle3",
-  "cam-produce": "cam-overview",
-  "cam-deli": "cam-overview",
-};
-
-export function heatmapCameraIdsForScope(
-  cameraId: string | null,
-  storeCameraIds: string[],
-): string[] {
-  const ids = new Set<string>();
-  if (cameraId) {
-    ids.add(SCOPE_TO_HEATMAP[cameraId] ?? "cam-overview");
-  }
-  for (const id of storeCameraIds) {
-    ids.add(SCOPE_TO_HEATMAP[id] ?? "cam-overview");
-  }
-  return [...ids];
-}
-
 export function filterHeatmapCameras(
   cameras: HeatmapCamera[],
   cameraId: string | null,
   storeCameraIds: string[],
 ): HeatmapCamera[] {
-  const allowed = heatmapCameraIdsForScope(cameraId, storeCameraIds);
-  if (allowed.length === 0) return cameras;
-  const filtered = cameras.filter((camera) => allowed.includes(camera.id));
-  return filtered.length > 0 ? filtered : cameras;
+  if (cameraId) {
+    const match = cameras.filter((camera) => camera.id === cameraId);
+    return match.length > 0 ? match : cameras;
+  }
+  if (storeCameraIds.length > 0) {
+    const filtered = cameras.filter((camera) => storeCameraIds.includes(camera.id));
+    return filtered.length > 0 ? filtered : cameras;
+  }
+  return cameras;
 }
 
 /** Global scope is the outer filter; pageCamera narrows within allowed ids. */
@@ -104,9 +53,8 @@ export function resolveEffectiveCameraId(
   allowedIds: string[],
 ): string {
   if (pageCameraId && allowedIds.includes(pageCameraId)) return pageCameraId;
-  if (globalCameraId) {
-    const mapped = SCOPE_TO_HEATMAP[globalCameraId] ?? globalCameraId;
-    if (allowedIds.includes(mapped)) return mapped;
+  if (globalCameraId && allowedIds.includes(globalCameraId)) {
+    return globalCameraId;
   }
   return allowedIds[0] ?? pageCameraId ?? globalCameraId ?? "";
 }
@@ -123,7 +71,6 @@ export function resolveZoneId(
       if (scopedCamera.zones[0]?.id) return scopedCamera.zones[0].id;
     }
   }
-  // Seeded analytics zone id (see database/seed.py); not a camera id.
   return "store1";
 }
 
@@ -133,70 +80,31 @@ export function filterZonePerformanceRows(
   storeId: string | null,
 ): ZoneRow[] {
   if (zoneId) {
-    const match = rows.find(
-      (row) =>
-        row.id === zoneId ||
-        row.zone.toLowerCase().includes(zoneId.split("-").pop()?.toLowerCase() ?? ""),
-    );
+    const match = rows.find((row) => row.id === zoneId);
     return match ? [match] : rows;
   }
   if (storeId) {
-    const factor = scopeScaleFactor(storeId);
-    return rows.map((row) => ({
-      ...row,
-      visits: Math.round(row.visits * factor),
-      occupancy: Math.min(100, Math.round(row.occupancy * factor)),
-    }));
+    return rows;
   }
   return rows;
 }
 
 export type CustomerFlowCamera = { id: string; label: string };
 
-export const CUSTOMER_FLOW_CAMERAS: CustomerFlowCamera[] = [
-  { id: "main", label: "Main Floor" },
-  { id: "entrance", label: "Entrance" },
-  { id: "retail", label: "Retail Section" },
-];
-
-const SCOPE_TO_FLOW_CAMERAS: Record<string, string[]> = {
-  "cam-entrance": ["entrance", "main"],
-  "cam-checkout": ["retail", "main"],
-  "cam-apparel": ["retail", "main"],
-  "cam-atrium": ["main", "entrance"],
-  "cam-electronics": ["retail", "main"],
-  "cam-produce": ["entrance", "main"],
-  "cam-deli": ["retail", "main"],
-};
-
-const FLOW_CAMERA_TRAJECTORIES: Record<string, string[]> = {
-  main: ["path1", "path2", "path3", "path4"],
-  entrance: ["path1", "path3"],
-  retail: ["path2", "path3", "path4"],
-};
-
 export function filterCustomerFlowCameras(
+  cameras: CustomerFlowCamera[],
   globalCameraId: string | null,
   storeCameraIds: string[],
 ): CustomerFlowCamera[] {
-  const allowed = new Set<string>();
-
   if (globalCameraId) {
-    for (const id of SCOPE_TO_FLOW_CAMERAS[globalCameraId] ?? ["main"]) {
-      allowed.add(id);
-    }
+    const match = cameras.filter((camera) => camera.id === globalCameraId);
+    if (match.length > 0) return match;
   }
-
-  if (storeCameraIds.length > 0 && !globalCameraId) {
-    for (const scopeCameraId of storeCameraIds) {
-      for (const flowId of SCOPE_TO_FLOW_CAMERAS[scopeCameraId] ?? ["main"]) {
-        allowed.add(flowId);
-      }
-    }
+  if (storeCameraIds.length > 0) {
+    const filtered = cameras.filter((camera) => storeCameraIds.includes(camera.id));
+    if (filtered.length > 0) return filtered;
   }
-
-  if (allowed.size === 0) return CUSTOMER_FLOW_CAMERAS;
-  return CUSTOMER_FLOW_CAMERAS.filter((camera) => allowed.has(camera.id));
+  return cameras;
 }
 
 export function resolveCustomerFlowCameraId(
@@ -205,13 +113,24 @@ export function resolveCustomerFlowCameraId(
   allowedIds: string[],
 ): string {
   if (allowedIds.includes(pageCameraId)) return pageCameraId;
-  if (globalCameraId) {
-    const mapped = SCOPE_TO_FLOW_CAMERAS[globalCameraId]?.[0];
-    if (mapped && allowedIds.includes(mapped)) return mapped;
+  if (globalCameraId && allowedIds.includes(globalCameraId)) {
+    return globalCameraId;
   }
   return allowedIds[0] ?? pageCameraId;
 }
 
-export function trajectoryIdsForFlowCamera(cameraId: string): string[] {
-  return FLOW_CAMERA_TRAJECTORIES[cameraId] ?? FLOW_CAMERA_TRAJECTORIES.main;
+/** Aggregate zones from all cameras in the current store for the scope selector. */
+export function zonesForScope(
+  store: Store | null,
+  camera: ScopeCamera | null,
+): { id: string; name: string }[] {
+  if (camera) return camera.zones;
+  if (!store) return [];
+  const seen = new Map<string, { id: string; name: string }>();
+  for (const storeCamera of store.cameras) {
+    for (const zone of storeCamera.zones) {
+      seen.set(zone.id, zone);
+    }
+  }
+  return [...seen.values()];
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
+import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { HeatmapCanvas } from '@/components/heatmap/heatmap-canvas';
 import { HeatmapControls } from '@/components/heatmap/heatmap-controls';
 import { HeatmapLegend } from '@/components/heatmap/heatmap-legend';
@@ -164,6 +165,8 @@ export default function HeatmapPage() {
             Updated just now
           </div>
         </div>
+
+        <ScopeContextBanner />
 
         <HeatmapControls
           cameras={scopedCameras}

@@ -1,21 +1,55 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
+import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { AlertFilters } from '@/components/alerts/alert-filters';
 import { AlertCard } from '@/components/alerts/alert-card';
 import { getAlerts, updateAlert } from '@/lib/api/alerts';
+import { zonesForScope } from '@/lib/scope/scope-filters';
+import { useScope } from '@/lib/scope/ScopeContext';
 import { SEVERITY_COLORS } from '@/lib/constants';
 import type { Alert, AlertSeverity, AlertStatus } from '@/lib/types';
 import { AlertCircle } from 'lucide-react';
 
 export default function AlertsPage() {
+  const { store, cameraId, zoneId, storeCameraIds } = useScope();
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(true);
   const [severity, setSeverity] = useState<AlertSeverity | 'all'>('all');
   const [status, setStatus] = useState<AlertStatus | 'all'>('all');
   const [camera, setCamera] = useState('all');
   const [zone, setZone] = useState('all');
+
+  const cameraOptions = useMemo(
+    () =>
+      store?.cameras.map((c) => ({ id: c.id, label: c.name })) ?? [],
+    [store],
+  );
+
+  const zoneOptions = useMemo(
+    () =>
+      zonesForScope(store, store?.cameras.find((c) => c.id === cameraId) ?? null).map(
+        (z) => ({ id: z.id, label: z.name }),
+      ),
+    [store, cameraId],
+  );
+
+  useEffect(() => {
+    if (cameraId) {
+      setCamera(cameraId);
+    } else {
+      setCamera('all');
+    }
+  }, [cameraId]);
+
+  useEffect(() => {
+    if (zoneId) {
+      setZone(zoneId);
+    } else {
+      setZone('all');
+    }
+  }, [zoneId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,11 +77,31 @@ export default function AlertsPage() {
     };
   }, []);
 
-  const filteredAlerts = alerts.filter((alert) => {
+  const scopeFilteredAlerts = useMemo(() => {
+    return alerts.filter((alert) => {
+      if (cameraId && alert.cameraId && alert.cameraId !== cameraId) {
+        return false;
+      }
+      if (
+        !cameraId &&
+        storeCameraIds.length > 0 &&
+        alert.cameraId &&
+        !storeCameraIds.includes(alert.cameraId)
+      ) {
+        return false;
+      }
+      if (zoneId && alert.zoneId && alert.zoneId !== zoneId) {
+        return false;
+      }
+      return true;
+    });
+  }, [alerts, cameraId, zoneId, storeCameraIds]);
+
+  const filteredAlerts = scopeFilteredAlerts.filter((alert) => {
     if (severity !== 'all' && alert.severity !== severity) return false;
     if (status !== 'all' && alert.status !== status) return false;
-    if (camera !== 'all' && alert.camera !== camera) return false;
-    if (zone !== 'all' && alert.zone !== zone) return false;
+    if (camera !== 'all' && alert.cameraId !== camera) return false;
+    if (zone !== 'all' && alert.zoneId !== zone) return false;
     return true;
   });
 
@@ -69,8 +123,8 @@ export default function AlertsPage() {
     }
   };
 
-  const openCount = alerts.filter((a) => a.status === 'open').length;
-  const criticalCount = alerts.filter((a) => a.severity === 'critical').length;
+  const openCount = scopeFilteredAlerts.filter((a) => a.status === 'open').length;
+  const criticalCount = scopeFilteredAlerts.filter((a) => a.severity === 'critical').length;
 
   return (
     <DashboardShell>
@@ -81,6 +135,8 @@ export default function AlertsPage() {
             Monitor and manage store events in real-time
           </p>
         </div>
+
+        <ScopeContextBanner />
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="rounded-lg border border-border bg-card/50 px-4 py-3">
@@ -112,6 +168,8 @@ export default function AlertsPage() {
           onCameraChange={setCamera}
           zone={zone}
           onZoneChange={setZone}
+          cameraOptions={cameraOptions}
+          zoneOptions={zoneOptions}
         />
 
         {loading ? (
@@ -128,7 +186,7 @@ export default function AlertsPage() {
             <AlertCircle className="mb-3 h-8 w-8 text-muted-foreground" />
             <h3 className="mb-1 text-base font-medium text-foreground">No alerts</h3>
             <p className="text-sm text-muted-foreground">
-              No alerts match your current filter selection.
+              No alerts match your current scope and filter selection.
             </p>
           </div>
         ) : (

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from database.session import POOL_SIZE, MAX_OVERFLOW, get_engine, log_pool_settings
+from database.session import POOL_SIZE, MAX_OVERFLOW, get_engine, log_pool_settings, session_scope
+from .services.camera_health import refresh_all_live_camera_statuses
 
 from .config import get_settings
 from .exceptions import register_exception_handlers
@@ -71,17 +74,43 @@ app.include_router(reports.router, prefix=api)
 app.include_router(users.router, prefix=api)
 
 
+_health_logger = logging.getLogger("uvicorn.error")
+
+
+def _camera_health_worker(interval_seconds: int) -> None:
+    """Background loop: probe live cameras and persist status."""
+    while True:
+        try:
+            with session_scope() as session:
+                count = refresh_all_live_camera_statuses(session)
+            _health_logger.info("Camera health check updated %d live camera(s)", count)
+        except Exception:
+            _health_logger.exception("Camera health check failed")
+        time.sleep(interval_seconds)
+
+
 @app.on_event("startup")
 def log_database_pool_settings() -> None:
     log_pool_settings(get_engine())
-    startup_logger = logging.getLogger("uvicorn.error")
-    startup_logger.info(
+    _health_logger.info(
         "Database pool limits: up to %d concurrent connections per process "
         "(pool_size=%d + max_overflow=%d)",
         POOL_SIZE + MAX_OVERFLOW,
         POOL_SIZE,
         MAX_OVERFLOW,
     )
+    interval = settings.camera_health_interval_seconds
+    if interval > 0:
+        thread = threading.Thread(
+            target=_camera_health_worker,
+            args=(interval,),
+            name="camera-health",
+            daemon=True,
+        )
+        thread.start()
+        _health_logger.info(
+            "Camera health worker started (interval=%ds)", interval,
+        )
 
 
 @app.get("/health", tags=["Health"], summary="Health check")

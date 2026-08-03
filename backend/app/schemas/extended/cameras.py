@@ -47,3 +47,7 @@ class CameraTestResponse(BaseModel):
     resolution: str | None = None
     fps: float | None = None
     message: str | None = None
+    camera_status: Literal["online", "offline", "error", "disabled", "processing"] | None = Field(
+        default=None,
+        description="Persisted camera status after this probe (live cameras only).",
+    )

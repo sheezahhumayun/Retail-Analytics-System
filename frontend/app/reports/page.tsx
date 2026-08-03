@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
+import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { ReportForm } from '@/components/reports/report-form';
 import { ReportPreview } from '@/components/reports/report-preview';
 import { fetchReportPdfBlob } from '@/lib/api/reports';
@@ -57,6 +58,8 @@ export default function ReportsPage() {
             Generate and export custom analytics reports for your store
           </p>
         </div>
+
+        <ScopeContextBanner notScoped />
 
         <ReportForm onSubmit={handleGenerateReport} isLoading={isLoading} />
 

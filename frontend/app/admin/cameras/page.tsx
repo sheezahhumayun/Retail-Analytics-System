@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Plus } from 'lucide-react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
+import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { CameraTable } from '@/components/admin/camera-table';
 import { CameraModal } from '@/components/admin/camera-modal';
 import { TestCameraModal } from '@/components/admin/test-camera-modal';
@@ -113,6 +114,8 @@ export default function AdminCamerasPage() {
           </button>
         </div>
 
+        <ScopeContextBanner notScoped />
+
         <div className="grid grid-cols-4 gap-4">
           {[
             { label: 'Total Cameras', value: loading ? '—' : cameras.length },
@@ -181,6 +184,11 @@ export default function AdminCamerasPage() {
         camera={testingCamera}
         isOpen={!!testingCamera}
         onClose={() => setTestingCamera(undefined)}
+        onTestComplete={(cameraId, status) =>
+          setCameras((prev) =>
+            prev.map((c) => (c.id === cameraId ? { ...c, status } : c)),
+          )
+        }
       />
     </DashboardShell>
   );

@@ -3,6 +3,7 @@
 import { Check, ChevronDown, ChevronRight } from "lucide-react"
 
 import { useScope } from "@/lib/scope/ScopeContext"
+import { zonesForScope } from "@/lib/scope/scope-filters"
 import { cn } from "@/lib/utils"
 import { useDismiss } from "@/hooks/use-dismiss"
 import { useRef, useState } from "react"
@@ -15,18 +16,22 @@ function ScopeSelect({
   value,
   onChange,
   disabled,
+  allowAll = false,
+  allLabel = "All",
 }: {
   label: string
   options: Option[]
   value: string | null
-  onChange: (id: string) => void
+  onChange: (id: string | null) => void
   disabled?: boolean
+  allowAll?: boolean
+  allLabel?: string
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   useDismiss(ref, open, () => setOpen(false))
 
-  const selected = options.find((o) => o.id === value)
+  const selected = value ? options.find((o) => o.id === value) : null
 
   return (
     <div className="relative min-w-0 flex-1 sm:flex-none" ref={ref}>
@@ -35,7 +40,7 @@ function ScopeSelect({
         disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-label={`${label}: ${selected?.name ?? "none selected"}`}
+        aria-label={`${label}: ${selected?.name ?? (allowAll && !value ? allLabel : "none selected")}`}
         onClick={() => setOpen((v) => !v)}
         className={cn(
           "flex h-9 w-full items-center gap-2 rounded-lg border border-border bg-background px-2.5 text-left transition-colors sm:w-52",
@@ -48,7 +53,7 @@ function ScopeSelect({
             {label}
           </span>
           <span className="truncate text-sm text-foreground">
-            {selected?.name ?? "Select…"}
+            {selected?.name ?? (allowAll ? allLabel : "Select…")}
           </span>
         </span>
         <ChevronDown className="ml-auto size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -60,6 +65,24 @@ function ScopeSelect({
           aria-label={label}
           className="absolute left-0 top-full z-50 mt-1.5 max-h-72 w-full min-w-52 overflow-auto rounded-xl border border-border bg-popover p-1 shadow-lg"
         >
+          {allowAll && (
+            <button
+              type="button"
+              role="option"
+              aria-selected={!value}
+              onClick={() => {
+                onChange(null)
+                setOpen(false)
+              }}
+              className={cn(
+                "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition-colors",
+                !value ? "bg-muted font-medium text-foreground" : "text-foreground hover:bg-muted",
+              )}
+            >
+              <span className="truncate">{allLabel}</span>
+              {!value && <Check className="ml-auto size-4 shrink-0 text-primary" aria-hidden="true" />}
+            </button>
+          )}
           {options.map((option) => {
             const active = option.id === value
             return (
@@ -102,6 +125,8 @@ export function ScopeSelector({ className }: { className?: string }) {
     setZoneId,
   } = useScope()
 
+  const zoneOptions = zonesForScope(store, camera)
+
   if (isLoading || !organization) {
     return (
       <div className={cn("flex items-center gap-2 text-xs text-muted-foreground", className)}>
@@ -127,7 +152,7 @@ export function ScopeSelector({ className }: { className?: string }) {
         label="Store"
         options={organization.stores}
         value={storeId}
-        onChange={setStoreId}
+        onChange={(id) => id && setStoreId(id)}
       />
 
       <ScopeSelect
@@ -135,14 +160,18 @@ export function ScopeSelector({ className }: { className?: string }) {
         options={store?.cameras ?? []}
         value={cameraId}
         disabled={!store}
+        allowAll
+        allLabel="All cameras"
         onChange={setCameraId}
       />
 
       <ScopeSelect
         label="Zone"
-        options={camera?.zones ?? []}
+        options={zoneOptions}
         value={zoneId}
-        disabled={!camera}
+        disabled={!store}
+        allowAll
+        allLabel="All zones"
         onChange={setZoneId}
       />
     </div>

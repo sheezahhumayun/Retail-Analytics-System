@@ -17,6 +17,7 @@ from ..schemas.cameras import (
     CameraResponse,
     CameraStatusResponse,
 )
+from ..services.camera_health import refresh_camera_status
 from ..services.camera_ids import generate_camera_id
 
 router = APIRouter(prefix="/cameras", tags=["Cameras"])
@@ -100,6 +101,9 @@ def camera_status(
     camera = session.get(Camera, camera_id)
     if camera is None:
         raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+
+    if camera.source_type == "live" and camera.status != "disabled":
+        refresh_camera_status(session, camera)
 
     last_event = session.exec(
         select(Event)

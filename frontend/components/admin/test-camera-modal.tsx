@@ -12,9 +12,10 @@ interface TestCameraModalProps {
   camera?: AdminCamera;
   isOpen: boolean;
   onClose: () => void;
+  onTestComplete?: (cameraId: string, status: AdminCamera['status']) => void;
 }
 
-export function TestCameraModal({ camera, isOpen, onClose }: TestCameraModalProps) {
+export function TestCameraModal({ camera, isOpen, onClose, onTestComplete }: TestCameraModalProps) {
   const [state, setState] = useState<TestState>('idle');
   const [error, setError] = useState<string>('');
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
@@ -42,6 +43,9 @@ export function TestCameraModal({ camera, isOpen, onClose }: TestCameraModalProp
         if (result.status === 'error') {
           setError(result.error);
           setState('error');
+          if (result.camera_status) {
+            onTestComplete?.(camera!.id, result.camera_status);
+          }
           return;
         }
 
@@ -49,6 +53,9 @@ export function TestCameraModal({ camera, isOpen, onClose }: TestCameraModalProp
         setDetectedResolution(result.resolution);
         setDetectedFps(result.fps);
         setState('success');
+        if (result.camera_status) {
+          onTestComplete?.(camera!.id, result.camera_status);
+        }
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : 'Camera test failed');

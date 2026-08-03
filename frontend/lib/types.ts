@@ -180,7 +180,9 @@ export interface Alert {
   type: AlertType;
   severity: AlertSeverity;
   camera: string;
+  cameraId?: string;
   zone: string;
+  zoneId?: string;
   timestamp: Date;
   status: AlertStatus;
   message: string;

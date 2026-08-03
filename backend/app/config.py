@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     heatmap_data_dir: str = str(REPO_ROOT / "data" / "heatmaps")
     store_timezone: str = "UTC"
     cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    camera_health_interval_seconds: int = 120
 
 
 @lru_cache(maxsize=1)

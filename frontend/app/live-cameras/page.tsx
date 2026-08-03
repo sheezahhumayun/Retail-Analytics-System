@@ -1,35 +1,46 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
+import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { CameraTile } from '@/components/cameras/camera-tile';
 import { getLiveCameras } from '@/lib/api/cameras';
 import { filterLiveCameras } from '@/lib/scope/scope-filters';
 import { useScope } from '@/lib/scope/ScopeContext';
 import type { Camera } from '@/lib/types';
 
+const STATUS_POLL_MS = 90_000;
+
 export default function LiveCamerasPage() {
   const { cameraId, storeCameraIds } = useScope();
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const loadCameras = useCallback(async () => {
+    const data = await getLiveCameras();
+    setCameras(filterLiveCameras(data, cameraId, storeCameraIds));
+    setLoading(false);
+  }, [cameraId, storeCameraIds]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
       setLoading(true);
-      const data = await getLiveCameras();
-      if (!cancelled) {
-        setCameras(filterLiveCameras(data, cameraId, storeCameraIds));
-        setLoading(false);
-      }
+      await loadCameras();
+      if (cancelled) return;
     }
 
     load();
+    const interval = window.setInterval(() => {
+      if (!cancelled) loadCameras();
+    }, STATUS_POLL_MS);
+
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
     };
-  }, [cameraId, storeCameraIds]);
+  }, [loadCameras]);
 
   const onlineCount = cameras.filter((c) => c.status === 'online').length;
 
@@ -56,6 +67,8 @@ export default function LiveCamerasPage() {
             )}
           </p>
         </div>
+
+        <ScopeContextBanner />
 
         {loading ? (
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">

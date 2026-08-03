@@ -526,7 +526,9 @@ export function mapAlert(
     type: alert.alert_type as Alert["type"],
     severity: alert.severity as Alert["severity"],
     camera: cameraNames.get(alert.camera_id ?? "") ?? alert.camera_id ?? "Unknown camera",
+    cameraId: alert.camera_id ?? undefined,
     zone: zoneNames.get(alert.zone_id ?? "") ?? alert.zone_id ?? "—",
+    zoneId: alert.zone_id ?? undefined,
     timestamp: new Date(alert.timestamp),
     status: alert.status as Alert["status"],
     message:

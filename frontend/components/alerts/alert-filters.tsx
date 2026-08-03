@@ -3,6 +3,8 @@
 import { Filter } from 'lucide-react';
 import type { AlertSeverity, AlertStatus } from '@/lib/types';
 
+export type AlertFilterOption = { id: string; label: string };
+
 interface AlertFiltersProps {
   severity: AlertSeverity | 'all';
   onSeverityChange: (s: AlertSeverity | 'all') => void;
@@ -12,28 +14,9 @@ interface AlertFiltersProps {
   onCameraChange: (c: string) => void;
   zone: string;
   onZoneChange: (z: string) => void;
+  cameraOptions: AlertFilterOption[];
+  zoneOptions: AlertFilterOption[];
 }
-
-const CAMERAS = [
-  'All Cameras',
-  'Main Floor - Camera 1',
-  'Apparel - Camera 2',
-  'Checkout - Camera 3',
-  'Food Court - Camera 4',
-  'Back Section - Camera 5',
-  'Entrance - Camera 1A',
-];
-
-const ZONES = [
-  'All Zones',
-  'Entrance',
-  'Electronics',
-  'Apparel',
-  'Checkout',
-  'Retail Section',
-  'Food Court',
-  'Back Wall',
-];
 
 export function AlertFilters({
   severity,
@@ -44,19 +27,21 @@ export function AlertFilters({
   onCameraChange,
   zone,
   onZoneChange,
+  cameraOptions,
+  zoneOptions,
 }: AlertFiltersProps) {
   return (
     <div className="rounded-xl border border-border bg-card px-5 py-4">
       <div className="flex flex-col gap-4">
-        {/* Header */}
         <div className="flex items-center gap-2">
           <Filter className="h-4 w-4 text-muted-foreground" />
           <h3 className="font-medium text-foreground">Filters</h3>
+          <span className="text-xs text-muted-foreground">
+            Refine within the global scope above
+          </span>
         </div>
 
-        {/* Filter grid */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {/* Severity */}
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-medium text-muted-foreground">
               Severity
@@ -73,7 +58,6 @@ export function AlertFilters({
             </select>
           </div>
 
-          {/* Status */}
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-medium text-muted-foreground">
               Status
@@ -90,7 +74,6 @@ export function AlertFilters({
             </select>
           </div>
 
-          {/* Camera */}
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-medium text-muted-foreground">
               Camera
@@ -100,15 +83,15 @@ export function AlertFilters({
               onChange={(e) => onCameraChange(e.target.value)}
               className="w-full appearance-none rounded-lg border border-border bg-background px-3 py-2 pr-8 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 cursor-pointer"
             >
-              {CAMERAS.map((c) => (
-                <option key={c} value={c === 'All Cameras' ? 'all' : c}>
-                  {c}
+              <option value="all">All Cameras</option>
+              {cameraOptions.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
                 </option>
               ))}
             </select>
           </div>
 
-          {/* Zone */}
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-medium text-muted-foreground">
               Zone
@@ -118,9 +101,10 @@ export function AlertFilters({
               onChange={(e) => onZoneChange(e.target.value)}
               className="w-full appearance-none rounded-lg border border-border bg-background px-3 py-2 pr-8 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 cursor-pointer"
             >
-              {ZONES.map((z) => (
-                <option key={z} value={z === 'All Zones' ? 'all' : z}>
-                  {z}
+              <option value="all">All Zones</option>
+              {zoneOptions.map((z) => (
+                <option key={z.id} value={z.id}>
+                  {z.label}
                 </option>
               ))}
             </select>

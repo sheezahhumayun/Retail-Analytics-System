@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
+import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { ZonePerformance } from '@/components/heatmap/zone-performance';
 import { getZonePerformance } from '@/lib/api/analytics';
 import { useScope } from '@/lib/scope/ScopeContext';
@@ -51,6 +52,16 @@ export default function ZonePerformancePage() {
   }, [storeId, zoneId]);
 
   const totalVisits = zoneRows.reduce((s, r) => s + r.visits, 0);
+  const avgDwellSeconds = zoneRows.length
+    ? Math.round(zoneRows.reduce((s, r) => s + r.dwellSec, 0) / zoneRows.length)
+    : 0;
+  const peakZone = zoneRows.reduce(
+    (best, row) => (row.visits > best.visits ? row : best),
+    zoneRows[0] ?? { zone: '—', visits: 0 },
+  );
+  const avgOccupancy = zoneRows.length
+    ? Math.round(zoneRows.reduce((s, r) => s + r.occupancy, 0) / zoneRows.length)
+    : 0;
 
   return (
     <DashboardShell>
@@ -66,6 +77,8 @@ export default function ZonePerformancePage() {
             Updated just now
           </span>
         </div>
+
+        <ScopeContextBanner />
 
         <div className="flex flex-wrap gap-3 rounded-xl border border-border bg-card p-4">
           <div className="flex items-center gap-1.5">
@@ -155,10 +168,26 @@ export default function ZonePerformancePage() {
                 </div>
               ))
             : [
-                { label: 'Total Visits', value: totalVisits.toLocaleString(), sub: 'across all zones' },
-                { label: 'Avg Dwell Time', value: '2m 38s', sub: 'across all zones' },
-                { label: 'Peak Zone', value: 'Entrance', sub: '1,284 visits today' },
-                { label: 'Avg Occupancy', value: '58%', sub: 'store-wide' },
+                {
+                  label: 'Total Visits',
+                  value: totalVisits.toLocaleString(),
+                  sub: 'in selected scope',
+                },
+                {
+                  label: 'Avg Dwell Time',
+                  value: `${Math.floor(avgDwellSeconds / 60)}m ${avgDwellSeconds % 60}s`,
+                  sub: 'across scoped zones',
+                },
+                {
+                  label: 'Peak Zone',
+                  value: peakZone.zone,
+                  sub: `${peakZone.visits.toLocaleString()} visits`,
+                },
+                {
+                  label: 'Avg Occupancy',
+                  value: `${avgOccupancy}%`,
+                  sub: 'scoped zones',
+                },
               ].map((kpi) => (
                 <div key={kpi.label} className="rounded-xl border border-border bg-card px-5 py-4">
                   <p className="text-xs text-muted-foreground">{kpi.label}</p>

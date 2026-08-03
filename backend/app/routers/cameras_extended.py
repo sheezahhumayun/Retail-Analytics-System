@@ -13,8 +13,8 @@ from ..deps import DbSession
 from ..exceptions import ApiError
 from ..schemas.cameras import CameraProcessResponse, CameraResponse
 from ..schemas.extended.cameras import CameraTestResponse, CameraUpdate
+from ..services.camera_health import apply_probe_to_camera, probe_camera
 from ..services.camera_process import ProcessJobState, get_process_job, start_recorded_processing
-from ..services.camera_test import test_camera_stream
 from .cameras import _camera_response
 
 router = APIRouter(prefix="/cameras", tags=["Cameras"])
@@ -99,7 +99,22 @@ def test_camera(
     camera = session.get(Camera, camera_id)
     if camera is None:
         raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
-    return test_camera_stream(camera.rtsp_url)
+
+    result = probe_camera(camera)
+    camera_status = None
+    if camera.source_type == "live" and camera.status != "disabled":
+        camera_status = apply_probe_to_camera(camera, result)
+        session.add(camera)
+        session.flush()
+
+    return CameraTestResponse(
+        status=result.status,
+        latency_ms=result.latency_ms,
+        resolution=result.resolution,
+        fps=result.fps,
+        message=result.message,
+        camera_status=camera_status,
+    )
 
 
 def _process_response(camera_id: str) -> CameraProcessResponse:
