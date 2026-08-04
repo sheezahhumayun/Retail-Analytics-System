@@ -8,7 +8,13 @@ export default function TrafficPage() {
   const config = useTrafficAnalyticsConfig();
 
   return (
-    <DashboardShell>
+    <DashboardShell
+      scopeBarConfig={{
+        showCamera: true,
+        showZone: true,
+        excludeQueueZones: true,
+      }}
+    >
       <AnalyticsPageLayout config={config} />
     </DashboardShell>
   );

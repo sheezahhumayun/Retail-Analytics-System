@@ -52,6 +52,10 @@ class Camera(SQLModel, table=True):
     resolution: str | None = Field(default=None, max_length=32)
     fps: float | None = Field(default=None)
     status: str = Field(default="offline", max_length=32)
+    analytics_modules: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSONB, nullable=False, server_default="[]"),
+    )
 
 
 class ZoneShape(SQLModel, table=True):

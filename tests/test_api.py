@@ -162,6 +162,82 @@ class TestCameras:
         assert resp.status_code == 403
         assert resp.json()["error"]["code"] == "forbidden"
 
+    def _create_camera(self, api_client: TestClient, auth_headers: dict, name: str) -> str:
+        resp = api_client.post(
+            "/api/cameras",
+            headers=auth_headers,
+            json={
+                "store_id": STORE_ID,
+                "name": name,
+                "rtsp_url": "rtsp://192.168.1.51:554/stream1",
+                "source_type": "live",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        return resp.json()["id"]
+
+    def test_delete_camera_is_soft_delete_excluded_from_default_list(
+        self, api_client: TestClient, auth_headers: dict
+    ):
+        camera_id = self._create_camera(api_client, auth_headers, "Soft Delete Target")
+
+        resp = api_client.delete(f"/api/cameras/{camera_id}", headers=auth_headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "disabled"
+
+        # Bug 2 regression: default list must exclude soft-deleted cameras so
+        # they don't reappear after a reload.
+        default_list = api_client.get("/api/cameras", headers=auth_headers).json()
+        assert camera_id not in {c["id"] for c in default_list}
+
+        # But an admin can still opt in to see disabled cameras (e.g. to
+        # re-enable them from the management UI).
+        full_list = api_client.get(
+            "/api/cameras", headers=auth_headers, params={"include_disabled": True}
+        ).json()
+        assert camera_id in {c["id"] for c in full_list}
+
+    def test_put_status_disable_and_reenable_camera(
+        self, api_client: TestClient, auth_headers: dict
+    ):
+        camera_id = self._create_camera(api_client, auth_headers, "Toggle Target")
+
+        # Bug 1 regression: PUT must actually accept a status/enable field and
+        # persist it — this used to be silently dropped from the update body.
+        disable_resp = api_client.put(
+            f"/api/cameras/{camera_id}",
+            headers=auth_headers,
+            json={"status": "disabled"},
+        )
+        assert disable_resp.status_code == 200, disable_resp.text
+        assert disable_resp.json()["status"] == "disabled"
+
+        default_list = api_client.get("/api/cameras", headers=auth_headers).json()
+        assert camera_id not in {c["id"] for c in default_list}
+
+        reenable_resp = api_client.put(
+            f"/api/cameras/{camera_id}",
+            headers=auth_headers,
+            json={"status": "offline"},
+        )
+        assert reenable_resp.status_code == 200, reenable_resp.text
+        assert reenable_resp.json()["status"] == "offline"
+
+        default_list = api_client.get("/api/cameras", headers=auth_headers).json()
+        assert camera_id in {c["id"] for c in default_list}
+
+    def test_put_status_rejects_probe_derived_values(
+        self, api_client: TestClient, auth_headers: dict
+    ):
+        camera_id = self._create_camera(api_client, auth_headers, "Rejects Online Target")
+
+        resp = api_client.put(
+            f"/api/cameras/{camera_id}",
+            headers=auth_headers,
+            json={"status": "online"},
+        )
+        assert resp.status_code == 422
+
 
 class TestAnalytics:
     def test_traffic(self, api_client: TestClient, auth_headers: dict):

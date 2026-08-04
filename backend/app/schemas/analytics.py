@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+ComparisonStatus = Literal["ok", "module_disabled", "insufficient_history"]
+
+
+class ComparisonInfo(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    status: ComparisonStatus
+    from_: str = Field(alias="from", serialization_alias="from")
+    to: str
+    message: str | None = None
 
 
 class TrafficBucket(BaseModel):
@@ -21,6 +34,10 @@ class TrafficResponse(BaseModel):
     buckets: list[TrafficBucket]
     total_entries: int
     total_exits: int
+    comparison: ComparisonInfo | None = None
+    prior_buckets: list[TrafficBucket] = Field(default_factory=list)
+    prior_total_entries: int | None = None
+    prior_total_exits: int | None = None
 
 
 class OccupancyPoint(BaseModel):
@@ -33,6 +50,11 @@ class OccupancyResponse(BaseModel):
     scope_id: str
     current: int = Field(description="Most recent occupancy value")
     trend: list[OccupancyPoint] = Field(description="Time-series occupancy readings")
+    from_: str | None = Field(default=None, alias="from", serialization_alias="from")
+    to: str | None = None
+    comparison: ComparisonInfo | None = None
+    prior_trend: list[OccupancyPoint] = Field(default_factory=list)
+    prior_current: int | None = None
 
 
 class ZoneMetricBucket(BaseModel):
@@ -52,6 +74,8 @@ class ZoneAnalyticsResponse(BaseModel):
     from_: str = Field(alias="from", serialization_alias="from")
     to: str
     buckets: list[ZoneMetricBucket]
+    comparison: ComparisonInfo | None = None
+    prior_buckets: list[ZoneMetricBucket] = Field(default_factory=list)
 
 
 class DwellSession(BaseModel):
@@ -72,6 +96,10 @@ class DwellResponse(BaseModel):
     sessions: list[DwellSession]
     count: int
     avg_dwell_seconds: float | None
+    comparison: ComparisonInfo | None = None
+    prior_sessions: list[DwellSession] = Field(default_factory=list)
+    prior_count: int | None = None
+    prior_avg_dwell_seconds: float | None = None
 
 
 class HeatmapSpec(BaseModel):
@@ -106,3 +134,7 @@ class QueueAnalyticsResponse(BaseModel):
     samples: list[QueueSample]
     avg_queue_length: float | None
     max_queue_length: int | None
+    comparison: ComparisonInfo | None = None
+    prior_samples: list[QueueSample] = Field(default_factory=list)
+    prior_avg_queue_length: float | None = None
+    prior_max_queue_length: int | None = None

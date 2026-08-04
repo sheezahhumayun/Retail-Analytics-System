@@ -45,7 +45,7 @@ export default function LiveCamerasPage() {
   const onlineCount = cameras.filter((c) => c.status === 'online').length;
 
   return (
-    <DashboardShell>
+    <DashboardShell scopeBarConfig={{ showCamera: true, showZone: false }}>
       <div className="mx-auto w-full max-w-7xl space-y-6">
         <div className="flex flex-wrap items-end justify-between gap-2">
           <div>

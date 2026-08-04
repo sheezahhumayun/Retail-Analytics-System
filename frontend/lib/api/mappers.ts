@@ -1,8 +1,10 @@
 import type {
   AdminCamera,
   Alert,
+  AnalyticsModule,
   Camera,
   CameraStatus,
+  ComparisonInfo,
   DataRow,
   LineShape,
   LiveCameraStatus,
@@ -69,6 +71,7 @@ export interface BackendCamera {
   resolution?: string | null;
   fps?: number | null;
   status: string;
+  analytics_modules?: string[];
 }
 
 export interface BackendCameraStatus {
@@ -97,6 +100,17 @@ export interface BackendTrafficResponse {
   buckets: BackendTrafficBucket[];
   total_entries: number;
   total_exits: number;
+  comparison?: BackendComparisonInfo | null;
+  prior_buckets?: BackendTrafficBucket[];
+  prior_total_entries?: number | null;
+  prior_total_exits?: number | null;
+}
+
+export interface BackendComparisonInfo {
+  status: "ok" | "module_disabled" | "insufficient_history";
+  from: string;
+  to: string;
+  message?: string | null;
 }
 
 export interface BackendOccupancyPoint {
@@ -109,6 +123,11 @@ export interface BackendOccupancyResponse {
   scope_id: string;
   current: number;
   trend: BackendOccupancyPoint[];
+  from?: string | null;
+  to?: string | null;
+  comparison?: BackendComparisonInfo | null;
+  prior_trend?: BackendOccupancyPoint[];
+  prior_current?: number | null;
 }
 
 export interface BackendZoneBucket {
@@ -126,6 +145,8 @@ export interface BackendZoneAnalyticsResponse {
   from: string;
   to: string;
   buckets: BackendZoneBucket[];
+  comparison?: BackendComparisonInfo | null;
+  prior_buckets?: BackendZoneBucket[];
 }
 
 export interface BackendDwellSession {
@@ -144,6 +165,10 @@ export interface BackendDwellResponse {
   sessions: BackendDwellSession[];
   count: number;
   avg_dwell_seconds: number | null;
+  comparison?: BackendComparisonInfo | null;
+  prior_sessions?: BackendDwellSession[];
+  prior_count?: number | null;
+  prior_avg_dwell_seconds?: number | null;
 }
 
 export interface BackendHeatmapResponse {
@@ -170,6 +195,10 @@ export interface BackendQueueResponse {
   samples: BackendQueueSample[];
   avg_queue_length: number | null;
   max_queue_length: number | null;
+  comparison?: BackendComparisonInfo | null;
+  prior_samples?: BackendQueueSample[];
+  prior_avg_queue_length?: number | null;
+  prior_max_queue_length?: number | null;
 }
 
 export interface BackendAlert {
@@ -195,10 +224,27 @@ export interface BackendReportPayload {
     from: string;
     to: string;
     generated_at: string;
+    camera_id?: string | null;
+    coverage?: {
+      module: string;
+      cameras_in_scope: number;
+      cameras_eligible: number;
+      zones_in_scope: number;
+      zones_eligible: number;
+    } | null;
   };
-  kpis: { key: string; label: string; value: number }[];
+  kpis: { key: string; label: string; value: number | string }[];
   series: { name: string; points: Record<string, unknown>[] }[];
   table: { columns: Record<string, unknown> }[];
+  footnotes?: string[];
+  exclusions?: Array<{
+    kind: string;
+    id: string;
+    name: string;
+    module: string;
+    reason: string;
+  }>;
+  comparison?: BackendComparisonInfo | null;
 }
 
 export interface BackendZoneShape {
@@ -269,16 +315,42 @@ function bucketKey(date: string, hour: number): string {
   return `${date}T${String(hour).padStart(2, "0")}`;
 }
 
+export function mapComparisonInfo(
+  comparison?: BackendComparisonInfo | null,
+): ComparisonInfo | null {
+  if (!comparison) return null;
+  return {
+    status: comparison.status,
+    from: comparison.from,
+    to: comparison.to,
+    message: comparison.message,
+  };
+}
+
+function priorValuesByIndex<T>(
+  current: T[],
+  prior: T[],
+  pick: (item: T) => number,
+): Array<number | undefined> {
+  return current.map((_, index) => {
+    const priorItem = prior[index];
+    return priorItem !== undefined ? pick(priorItem) : undefined;
+  });
+}
+
+export function pctTrend(current: number, prior?: number | null): number | undefined {
+  if (prior == null || prior === 0) return undefined;
+  return Math.round(((current - prior) / prior) * 100 * 10) / 10;
+}
+
 export function mapTrafficBuckets(
   buckets: BackendTrafficBucket[],
   priorBuckets: BackendTrafficBucket[] = [],
 ): DataRow[] {
-  const priorMap = new Map(
-    priorBuckets.map((b) => [bucketKey(b.metric_date, b.hour), b.entries]),
-  );
+  const priorByIndex = priorValuesByIndex(buckets, priorBuckets, (b) => b.entries);
   const multiDay = new Set(buckets.map((b) => b.metric_date)).size > 1;
 
-  return buckets.map((bucket) => {
+  return buckets.map((bucket, index) => {
     const id = bucketKey(bucket.metric_date, bucket.hour);
     return {
       id,
@@ -286,7 +358,7 @@ export function mapTrafficBuckets(
         ? `${bucket.metric_date} ${formatHourLabel(bucket.hour)}`
         : formatHourLabel(bucket.hour),
       current: bucket.entries,
-      prior: priorMap.get(id),
+      prior: priorByIndex[index],
     };
   });
 }
@@ -313,20 +385,38 @@ export function mapOccupancyTrend(
   trend: BackendOccupancyPoint[],
   priorTrend: BackendOccupancyPoint[] = [],
 ): DataRow[] {
-  const priorMap = new Map(priorTrend.map((p, index) => [index, p.current_occupancy]));
+  // Deduplicate trend by unique timestamp (take only first occurrence)
+  // This handles cases where trend contains both current and prior data flattened
+  const seenTimestamps = new Set<string>();
+  const uniqueTrend: BackendOccupancyPoint[] = [];
+  
+  for (const point of trend) {
+    if (!seenTimestamps.has(point.timestamp)) {
+      seenTimestamps.add(point.timestamp);
+      uniqueTrend.push(point);
+    }
+  }
+  
+  const priorByIndex = priorValuesByIndex(
+    uniqueTrend,
+    priorTrend,
+    (p) => p.current_occupancy,
+  );
   const multiDay =
-    new Set(trend.map((p) => p.timestamp.slice(0, 10))).size > 1;
+    new Set(uniqueTrend.map((p) => p.timestamp.slice(0, 10))).size > 1;
 
-  return trend.map((point, index) => {
+  const result = uniqueTrend.map((point, index) => {
     const datePart = point.timestamp.slice(0, 10);
     const timePart = point.timestamp.slice(11, 16) || "00:00";
     return {
       id: point.timestamp,
       label: multiDay ? `${datePart} ${timePart}` : timePart,
       current: point.current_occupancy,
-      prior: priorMap.get(index),
+      prior: priorByIndex[index],
     };
   });
+  
+  return result;
 }
 
 export function occupancyStatsFromRows(rows: DataRow[]): StatSummary[] {
@@ -351,12 +441,10 @@ export function mapZoneBuckets(
   buckets: BackendZoneBucket[],
   priorBuckets: BackendZoneBucket[] = [],
 ): DataRow[] {
-  const priorMap = new Map(
-    priorBuckets.map((b) => [bucketKey(b.metric_date, b.hour), b.visitors]),
-  );
+  const priorByIndex = priorValuesByIndex(buckets, priorBuckets, (b) => b.visitors);
   const multiDay = new Set(buckets.map((b) => b.metric_date)).size > 1;
 
-  return buckets.map((bucket) => {
+  return buckets.map((bucket, index) => {
     const id = bucketKey(bucket.metric_date, bucket.hour);
     return {
       id,
@@ -364,7 +452,7 @@ export function mapZoneBuckets(
         ? `${bucket.metric_date} ${formatHourLabel(bucket.hour)}`
         : formatHourLabel(bucket.hour),
       current: bucket.visitors,
-      prior: priorMap.get(id),
+      prior: priorByIndex[index],
     };
   });
 }
@@ -395,7 +483,23 @@ function dwellBucketLabel(seconds: number): string {
   return "10+ min";
 }
 
-export function mapDwellSessions(sessions: BackendDwellSession[]): DataRow[] {
+export function mapDwellSessions(
+  sessions: BackendDwellSession[],
+  priorSessions: BackendDwellSession[] = [],
+): DataRow[] {
+  const currentRows = mapDwellSessionsForPeriod(sessions);
+  if (priorSessions.length === 0) {
+    return currentRows;
+  }
+  const priorRows = mapDwellSessionsForPeriod(priorSessions);
+  const priorMap = new Map(priorRows.map((row) => [row.label, row.current]));
+  return currentRows.map((row) => ({
+    ...row,
+    prior: priorMap.get(row.label),
+  }));
+}
+
+function mapDwellSessionsForPeriod(sessions: BackendDwellSession[]): DataRow[] {
   const buckets = new Map<string, number>();
   for (const session of sessions) {
     const label = dwellBucketLabel(session.dwell_seconds);
@@ -440,8 +544,10 @@ export function mapQueueSamples(
   samples: BackendQueueSample[],
   priorSamples: BackendQueueSample[] = [],
 ): DataRow[] {
-  const priorMap = new Map(
-    priorSamples.map((sample, index) => [index, sample.queue_length]),
+  const priorByIndex = priorValuesByIndex(
+    samples,
+    priorSamples,
+    (sample) => sample.queue_length,
   );
   const multiDay =
     new Set(samples.map((s) => s.timestamp.slice(0, 10))).size > 1;
@@ -453,7 +559,7 @@ export function mapQueueSamples(
       id: sample.timestamp || `queue-${index}`,
       label: multiDay && datePart ? `${datePart} ${timePart}` : timePart,
       current: sample.queue_length,
-      prior: priorMap.get(index),
+      prior: priorByIndex[index],
     };
   });
 }
@@ -581,6 +687,34 @@ export function mapReportPayload(
     chartData,
     tableData,
     tableColumns,
+    footnotes: payload.footnotes ?? [],
+    exclusions: payload.exclusions ?? [],
+    comparison: payload.comparison
+      ? {
+          status: payload.comparison.status,
+          from: payload.comparison.from,
+          to: payload.comparison.to,
+          message: payload.comparison.message,
+        }
+      : null,
+  };
+}
+
+export function zoneRowNotTracked(
+  zoneId: string,
+  zoneName: string,
+  note: string,
+): ZoneRow {
+  return {
+    id: zoneId,
+    zone: zoneName,
+    visits: 0,
+    dwellSec: 0,
+    occupancy: 0,
+    trend: "flat",
+    trendPct: 0,
+    trackingStatus: "not_tracked",
+    trackingNote: note,
   };
 }
 
@@ -631,6 +765,39 @@ export function resolutionFromBackend(value?: string | null): Resolution {
   return RESOLUTION_FROM_BACKEND[value] ?? "1080p";
 }
 
+const BACKEND_ANALYTICS_MODULE: Record<string, AnalyticsModule> = {
+  entry_exit: "entry-exit",
+  occupancy: "occupancy",
+  zones: "zones",
+  dwell: "dwell",
+  heatmap: "heatmap",
+  queues: "queue",
+};
+
+const FRONTEND_ANALYTICS_MODULE: Record<AnalyticsModule, string> = {
+  "entry-exit": "entry_exit",
+  occupancy: "occupancy",
+  zones: "zones",
+  dwell: "dwell",
+  heatmap: "heatmap",
+  queue: "queues",
+};
+
+export function analyticsModulesFromBackend(
+  modules?: string[] | null,
+): AnalyticsModule[] {
+  if (!modules?.length) return [];
+  return modules
+    .map((module) => BACKEND_ANALYTICS_MODULE[module])
+    .filter((module): module is AnalyticsModule => module !== undefined);
+}
+
+export function analyticsModulesToBackend(
+  modules: AnalyticsModule[],
+): string[] {
+  return modules.map((module) => FRONTEND_ANALYTICS_MODULE[module]);
+}
+
 export function mapAdminCamera(
   camera: BackendCamera,
   storeName: string,
@@ -648,7 +815,7 @@ export function mapAdminCamera(
     fps: camera.fps ?? 30,
     rtspUrl: camera.rtsp_url ?? "",
     cameraType: camera.camera_type === "ptz" ? "ptz" : "fixed",
-    analyticsModules: ["entry-exit", "occupancy", "zones", "dwell", "heatmap", "queue"],
+    analyticsModules: analyticsModulesFromBackend(camera.analytics_modules),
     enabled: camera.status !== "disabled",
   };
 }
@@ -771,6 +938,7 @@ export function zoneRowFromAnalytics(
   zoneId: string,
   zoneName: string,
   buckets: BackendZoneBucket[],
+  priorBuckets: BackendZoneBucket[] = [],
 ): ZoneRow {
   const visitors = buckets.reduce((sum, bucket) => sum + bucket.visitors, 0);
   const dwellWeighted = buckets.reduce(
@@ -783,6 +951,10 @@ export function zoneRowFromAnalytics(
     (max, bucket) => Math.max(max, bucket.visitors),
     0,
   );
+  const priorVisitors = priorBuckets.reduce((sum, bucket) => sum + bucket.visitors, 0);
+  const trendPct = pctTrend(visitors, priorVisitors) ?? 0;
+  const trend: ZoneRow["trend"] =
+    trendPct > 0 ? "up" : trendPct < 0 ? "down" : "flat";
 
   return {
     id: zoneId,
@@ -790,8 +962,8 @@ export function zoneRowFromAnalytics(
     visits: visitors,
     dwellSec: avgDwell,
     occupancy: Math.min(100, peakVisitors),
-    trend: "flat",
-    trendPct: 0,
+    trend,
+    trendPct: Math.abs(trendPct),
   };
 }
 
@@ -813,6 +985,7 @@ export async function buildOrganizationFromBackend(
       zones: (zonesByCamera.get(camera.id) ?? []).map((zone) => ({
         id: zone.id,
         name: zone.name,
+        type: zone.type,
       })),
     })),
   }));

@@ -15,6 +15,15 @@ from sqlmodel import select
 
 from analytics.counting import CountingLine, LineCounter
 from analytics.events import AnalyticsEngine, AnalyticsEngineConfig, EventBus
+from analytics.heatmaps import HeatmapEngine, HeatmapStore
+from analytics.modules import (
+    MODULE_ENTRY_EXIT,
+    MODULE_HEATMAP,
+    MODULE_OCCUPANCY,
+    module_enabled,
+    normalize_modules,
+    zones_for_enabled_modules,
+)
 from analytics.zones import Zone, ZoneDetector
 from database import AnalyticsDbWriter, DbWriterConfig, session_scope
 from database.models import Camera, CountingLine as DbCountingLine, Zone as DbZone
@@ -80,22 +89,32 @@ def process_recorded_camera(
 
         video_path = _resolve_video_path(camera.rtsp_url)
         store_id = camera.store_id
+        enabled = frozenset(normalize_modules(camera.analytics_modules))
 
         db_zones = list(
             session.exec(select(DbZone).where(DbZone.camera_id == camera_id)).all()
         )
-        zones = [_zone_from_db(z) for z in db_zones if z.analytics_enabled]
+        all_zones = [_zone_from_db(z) for z in db_zones if z.analytics_enabled]
+        pipeline_zones = zones_for_enabled_modules(all_zones, enabled)
 
         db_line = session.exec(
             select(DbCountingLine).where(DbCountingLine.camera_id == camera_id)
         ).first()
+
+    needs_counting = (
+        module_enabled(enabled, MODULE_ENTRY_EXIT)
+        or module_enabled(enabled, MODULE_OCCUPANCY)
+    )
+    needs_zone_detector = bool(pipeline_zones)
+    needs_heatmap = module_enabled(enabled, MODULE_HEATMAP)
 
     bus = EventBus()
     db_writer = AnalyticsDbWriter(
         DbWriterConfig(
             store_id=store_id,
             camera_store_map={camera_id: store_id},
-            zones=zones,
+            zones=pipeline_zones,
+            enabled_modules=enabled,
         )
     )
     db_writer.subscribe(bus)
@@ -104,19 +123,25 @@ def process_recorded_camera(
         bus,
         AnalyticsEngineConfig(
             camera_ids=[camera_id],
-            zones=zones,
+            zones=pipeline_zones,
             store_id=store_id,
             db_writer=db_writer,
+            enabled_modules=enabled,
         ),
     )
 
     counter = None
-    if db_line is not None:
+    if db_line is not None and needs_counting:
         line = _line_from_db(db_line)
         counter = LineCounter(line, event_bus=bus)
 
-    zone_detector = ZoneDetector(zones) if zones else None
+    zone_detector = ZoneDetector(pipeline_zones) if needs_zone_detector else None
     tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
+
+    heatmap_engine: HeatmapEngine | None = None
+    heatmap_store: HeatmapStore | None = None
+    if needs_heatmap:
+        heatmap_store = HeatmapStore(str(REPO_ROOT / "data" / "heatmaps"), timezone="UTC")
 
     frames_processed = 0
     events_published = 0
@@ -130,6 +155,18 @@ def process_recorded_camera(
         )
         try:
             for frame, ts in iter_frames(src, duration=None, preview=False):
+                if heatmap_engine is None and heatmap_store is not None:
+                    h, w = frame.shape[:2]
+                    heatmap_engine = HeatmapEngine(
+                        camera_id,
+                        w,
+                        h,
+                        grid_scale=4,
+                        store=heatmap_store,
+                        timezone="UTC",
+                    )
+                    heatmap_engine.set_reference_frame(frame)
+
                 dets = detector.detect(frame, camera_id=camera_id, timestamp=ts)
                 tracks = tracker.update(dets)
                 if counter is not None:
@@ -137,9 +174,13 @@ def process_recorded_camera(
                 if zone_detector is not None:
                     for ze in zone_detector.update(tracks):
                         engine.process_zone_event(ze)
+                if heatmap_engine is not None:
+                    heatmap_engine.update(tracks, ts)
                 engine.close_stale_dwell_sessions(ts)
                 frames_processed += 1
         finally:
+            if heatmap_engine is not None:
+                heatmap_engine.flush()
             src.release()
 
     events_published = len(bus.event_log)

@@ -8,7 +8,7 @@ export default function DwellTimePage() {
   const config = useDwellAnalyticsConfig();
 
   return (
-    <DashboardShell>
+    <DashboardShell scopeBarConfig={{ showCamera: true, showZone: true, excludeQueueZones: true }}>
       <AnalyticsPageLayout config={config} />
     </DashboardShell>
   );

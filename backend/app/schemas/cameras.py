@@ -1,22 +1,14 @@
 """Camera schemas."""
 
-
-
 from __future__ import annotations
-
-
 
 import re
 
 from typing import Literal
 
-
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
-
-
+from analytics.modules import ALL_ANALYTICS_MODULES, normalize_modules
 
 RTSP_PATTERN = re.compile(r"^(rtsp|rtmp|http|https|file)://", re.IGNORECASE)
 
@@ -58,9 +50,10 @@ class CameraResponse(BaseModel):
 
     status: str = "offline"
 
-
-
-
+    analytics_modules: list[str] = Field(
+        default_factory=list,
+        description="Enabled analytics modules for this camera",
+    )
 
 class CameraCreate(BaseModel):
 
@@ -98,12 +91,24 @@ class CameraCreate(BaseModel):
 
     fps: float | None = Field(default=None, gt=0, le=120)
 
+    analytics_modules: list[str] = Field(
+        default_factory=lambda: sorted(ALL_ANALYTICS_MODULES),
+        description="Assigned analytics modules (defaults to all supported modules)",
+    )
 
+    @field_validator("analytics_modules")
+    @classmethod
+    def validate_analytics_modules(cls, value: list[str]) -> list[str]:
+        unknown = sorted({m for m in value if m not in ALL_ANALYTICS_MODULES})
+        if unknown:
+            raise ValueError(
+                f"Unknown analytics module(s): {', '.join(unknown)}. "
+                f"Allowed: {', '.join(sorted(ALL_ANALYTICS_MODULES))}"
+            )
+        return normalize_modules(value)
 
     @field_validator("rtsp_url")
-
     @classmethod
-
     def validate_rtsp_url(cls, value: str | None) -> str | None:
 
         if value is None or value == "":

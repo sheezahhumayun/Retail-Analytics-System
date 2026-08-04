@@ -33,12 +33,22 @@ def get_report(
     _user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
+    camera_id: Annotated[str | None, Query(description="Optional camera filter")] = None,
+    compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
     format: Annotated[Literal["json"], Query(description="Response format")] = "json",
 ) -> ReportPayload:
     if report_type not in _VALID_TYPES:
         raise ApiError(400, "invalid_report_type", f"Unknown report type: {report_type}")
     start, end = date_range
-    return build_report(session, report_type, store_id=store_id, start=start, end=end)  # type: ignore[arg-type]
+    return build_report(
+        session,
+        report_type,
+        store_id=store_id,
+        start=start,
+        end=end,
+        camera_id=camera_id,
+        compare=compare,
+    )  # type: ignore[arg-type]
 
 
 @router.get(
@@ -53,11 +63,21 @@ def export_report(
     store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
     format: Annotated[Literal["csv", "pdf"], Query(description="Export format")],
+    camera_id: Annotated[str | None, Query(description="Optional camera filter")] = None,
+    compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> Response:
     if report_type not in _VALID_TYPES:
         raise ApiError(400, "invalid_report_type", f"Unknown report type: {report_type}")
     start, end = date_range
-    payload = build_report(session, report_type, store_id=store_id, start=start, end=end)  # type: ignore[arg-type]
+    payload = build_report(
+        session,
+        report_type,
+        store_id=store_id,
+        start=start,
+        end=end,
+        camera_id=camera_id,
+        compare=compare,
+    )  # type: ignore[arg-type]
 
     if format == "csv":
         content = report_to_csv(payload)

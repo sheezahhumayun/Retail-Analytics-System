@@ -8,7 +8,13 @@ export default function ZonesPage() {
   const config = useZonesAnalyticsConfig();
 
   return (
-    <DashboardShell>
+    <DashboardShell
+      scopeBarConfig={{
+        showCamera: true,
+        showZone: true,
+        excludeQueueZones: true,
+      }}
+    >
       <AnalyticsPageLayout config={config} />
     </DashboardShell>
   );

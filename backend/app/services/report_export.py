@@ -45,6 +45,8 @@ FLOAT_COLUMNS = frozenset(
         "session_count",
         "avg_dwell_seconds",
         "total_visitors",
+        "coverage_cameras",
+        "coverage_zones",
     }
 )
 
@@ -58,6 +60,8 @@ COLOR_BORDER = "#cbd5e1"
 def _format_value(key: str, value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, str):
+        return value
     if key in INTEGER_COLUMNS or isinstance(value, bool):
         return str(int(value))
     if isinstance(value, float):
@@ -84,6 +88,21 @@ def report_to_csv(payload: ReportPayload) -> str:
     writer.writerow([f"# from={header.from_}"])
     writer.writerow([f"# to={header.to}"])
     writer.writerow([f"# generated_at={header.generated_at}"])
+    if header.camera_id:
+        writer.writerow([f"# camera_id={header.camera_id}"])
+    if header.coverage:
+        writer.writerow(
+            [
+                f"# coverage_cameras={header.coverage.cameras_eligible}/"
+                f"{header.coverage.cameras_in_scope}"
+            ]
+        )
+        writer.writerow(
+            [
+                f"# coverage_zones={header.coverage.zones_eligible}/"
+                f"{header.coverage.zones_in_scope}"
+            ]
+        )
     writer.writerow([])
 
     writer.writerow(["# KPI summary"])
@@ -91,6 +110,19 @@ def report_to_csv(payload: ReportPayload) -> str:
     for kpi in payload.kpis:
         writer.writerow([kpi.key, _format_value(kpi.key, kpi.value)])
     writer.writerow([])
+
+    if payload.footnotes:
+        writer.writerow(["# Notes"])
+        for note in payload.footnotes:
+            writer.writerow([f"# {note}"])
+        writer.writerow([])
+
+    if payload.exclusions:
+        writer.writerow(["# Exclusions"])
+        writer.writerow(["kind", "id", "name", "module", "reason"])
+        for item in payload.exclusions:
+            writer.writerow([item.kind, item.id, item.name, item.module, item.reason])
+        writer.writerow([])
 
     if payload.table:
         columns = list(payload.table[0].columns.keys())
@@ -239,6 +271,33 @@ def report_to_pdf(payload: ReportPayload) -> bytes:
         spaceBefore=4,
     )
     story: list[Any] = [Spacer(1, 0.35 * inch)]
+
+    if payload.footnotes:
+        story.append(Paragraph("Notes", section_style))
+        for note in payload.footnotes:
+            story.append(Paragraph(note, styles["Normal"]))
+        story.append(Spacer(1, 0.12 * inch))
+
+    if payload.exclusions:
+        story.append(Paragraph("Excluded from this report", section_style))
+        excl_rows = [["Kind", "Name", "Reason"]]
+        for item in payload.exclusions:
+            excl_rows.append([item.kind, item.name, item.reason])
+        excl_table = Table(excl_rows, colWidths=[0.9 * inch, 2.2 * inch, 3.1 * inch], hAlign="LEFT")
+        excl_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(COLOR_HEADER_BG)),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(COLOR_BORDER)),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor(COLOR_BORDER)),
+                ]
+            )
+        )
+        story.append(excl_table)
+        story.append(Spacer(1, 0.12 * inch))
 
     # KPI summary cards (bordered table)
     if payload.kpis:

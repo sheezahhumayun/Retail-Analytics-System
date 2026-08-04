@@ -15,6 +15,7 @@ interface KPICardProps {
   unit?: string;
   subtext?: string;
   trend?: number;
+  trendUnavailable?: string;
   icon: "users" | "activity" | "zap" | "clock" | "list" | "camera";
   isLoading?: boolean;
 }
@@ -34,11 +35,13 @@ export function KPICard({
   unit,
   subtext,
   trend,
+  trendUnavailable,
   icon,
   isLoading,
 }: KPICardProps) {
   const IconComponent = iconMap[icon];
-  const isTrendPositive = trend ? trend > 0 : false;
+  const showTrend = trend !== undefined && !subtext && !trendUnavailable;
+  const isTrendPositive = showTrend ? trend > 0 : false;
 
   if (isLoading) {
     return (
@@ -74,7 +77,10 @@ export function KPICard({
           {subtext && (
             <p className="mt-1 text-xs text-muted-foreground">{subtext}</p>
           )}
-          {trend !== undefined && !subtext && (
+          {trendUnavailable && !subtext && (
+            <p className="mt-2 text-xs text-muted-foreground">{trendUnavailable}</p>
+          )}
+          {showTrend && (
             <div className="mt-2 flex items-center gap-1">
               {isTrendPositive ? (
                 <TrendingUp className="h-4 w-4 text-green-600" />

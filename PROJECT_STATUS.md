@@ -1,7 +1,85 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-08-03 (Camera status + scope filter fixes)
+**Last updated:** 2026-08-03 (Camera disable/delete bug fixes + full mutating-endpoint audit)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
+
+---
+
+## 2026-08-03 — Camera disable/delete bugs + API-correctness audit
+
+### Bug 1 — Disabling a camera worked inconsistently
+
+**Diagnosed cause: (c)/(d) — not the race condition, not a request-ordering race.**
+The toggle-enable/disable button (`camera-table.tsx` → `handleToggleEnabled`) called
+`updateCamera(id, { enabled })`, but `updateCamera` (`frontend/lib/api/cameras.ts`) had no
+mapping from `enabled` to any PUT body field, and the backend `CameraUpdate` schema had no
+`status`/`enabled` field at all. Every toggle click sent `PUT /api/cameras/{id}` with an
+**empty body** — a real request, that got a real 200 response, that changed nothing. It
+looked inconsistent because the *only* code path that actually changed `status` was the trash
+"Delete" button (`DELETE /api/cameras/{id}` → soft `disabled`) — so disabling "worked" only
+when the user happened to use delete instead of the toggle.
+
+Race condition (a) was a real *latent* gap once the toggle was fixed (a manual disable
+landing mid-probe could be clobbered by a slower in-flight health check), so it was fixed too,
+even though it wasn't the original reported symptom. In-flight-request ordering (b) and a
+silent validation rejection (d) were not present as separate bugs — no other disable entry
+point exists (no camera detail page action, no bulk actions).
+
+**Fix:**
+- `CameraUpdate` (`backend/app/schemas/extended/cameras.py`) now accepts `status: "offline" | "disabled"` — a manual admin enable/disable switch. `online`/`error` stay probe-only (rejected with 422 if sent).
+- `PUT /api/cameras/{id}` (`backend/app/routers/cameras_extended.py`) applies `body.status` when present.
+- **Decision (race condition, item a):** manual admin status writes are authoritative. `camera_health.refresh_camera_status()` and the `POST /.../test` probe now re-read the camera row (`session.refresh`) immediately before persisting a probe result, and skip the write if the camera became `disabled` while the probe's network I/O was in flight. A disabled camera stays disabled until the *next* explicit re-enable — an automatic health-check poll can never silently re-enable or re-disable it.
+- Frontend `updateCamera` now maps `enabled: false/true` → `status: "disabled"/"offline"`.
+
+### Bug 2 — Deleted camera reappeared after reload
+
+**Diagnosed cause: (a), exactly as predicted.** `DELETE /api/cameras/{id}` was already a
+correct soft delete (`status="disabled"`, per the original Module 12.5 spec — historical
+analytics data is preserved). The bug was that `GET /api/cameras` (list) returned **every**
+camera regardless of status, so a reload always brought the "deleted" camera straight back.
+Compounding it, the admin page's delete handler removed the row from local state with a plain
+`filter()`, which is exactly the "reappears after reload" pattern — nothing was actually wrong
+server-side, the UI was just lying about what a reload would show.
+
+**Decision:** kept soft delete (recoverable, preserves history) rather than switching to a hard
+delete — hard-deleting would either orphan or cascade-delete historical events/metrics tied to
+`camera_id`, which the original spec explicitly did not want. "Disable" (Bug 1's toggle) and
+"Delete" (trash button) now both funnel into the same underlying `status="disabled"` state
+(there's no meaningful third state to distinguish them without adding a new column), so a
+deleted camera is really just a disabled one that can be brought back via the enable toggle.
+
+**Fix:**
+- `GET /api/cameras` now excludes `status="disabled"` cameras **by default**, with an opt-in `include_disabled=true` query param.
+- Every non-admin consumer (`getLiveCameras`, zone/line camera pickers, report camera filter, analytics scope, org/store camera mapping) uses the new default and now correctly excludes disabled cameras — previously they didn't filter at all.
+- The admin cameras page passes `include_disabled=true` (it needs to show disabled cameras so they can be re-enabled) and now updates the row **in place** to the real `disabled` camera returned by `DELETE`, instead of removing it from local state — the UI now shows exactly what a reload will show.
+
+Regression tests: `tests/test_api.py::TestCameras::test_delete_camera_is_soft_delete_excluded_from_default_list`, `test_put_status_disable_and_reenable_camera`, `test_put_status_rejects_probe_derived_values`.
+
+### General API-correctness audit
+
+Pattern used for every row: perform the action → hard-reload / re-fetch from the raw API →
+compare to actual DB/API state, not the UI's optimistic state.
+
+| Endpoint(s) | Result | Discrepancy found | Fix |
+|---|---|---|---|
+| `PUT /api/cameras/{id}` (disable/enable) | ❌→✅ Fixed | Bug 1 — no-op PUT body (see above) | Added `status` field end-to-end |
+| `DELETE /api/cameras/{id}` | ❌→✅ Fixed | Bug 2 — list endpoint didn't exclude disabled cameras; UI removed row optimistically | `include_disabled` filter + in-place UI update |
+| `POST /api/cameras` (create) | ✅ Pass | — | — |
+| `POST /api/cameras/{id}/test` | ⚠️→✅ Fixed | Same TOCTOU probe-vs-manual-disable race as Bug 1(a) | Re-check status via `session.refresh` before persisting probe result |
+| `POST/PUT/DELETE /api/zones`, `/api/lines` | ⚠️→✅ Fixed | Create/update correctly persist and survive reload (confirmed still holding since the earlier fix). But `deleteZone`/`deleteCountingLine` caught their own errors and returned `false`, and callers (`handleDeleteShape`, `syncCameraShapes`) never checked that return value — a failed `DELETE` (4xx/5xx) still removed the shape from local state, so it would silently reappear after reload exactly like Bug 2 | `deleteZone`/`deleteCountingLine` now throw on failure instead of swallowing it, so callers correctly keep the shape and surface an error instead of pretending it was deleted |
+| `PATCH /api/alerts/{id}` | ✅ Pass | Acknowledge/resolve already waits for the real response before updating state; `GET /api/alerts` correctly reflects it after reload. Minor: the nav alert-count badge fetches once per mount rather than after every PATCH, so it can be stale *within a session* until the next navigation/reload (not a persistence bug — full reload is correct) | Not changed — noted for a future pass, not a data-correctness bug |
+| `POST/PUT/DELETE /api/users`, `reset-password` | ❌→✅ Fixed | **Critical:** `authenticate_user` (`backend/app/auth.py`) ignored `password_hash` entirely and only checked the global `API_DEFAULT_PASSWORD` — every created user's password and every `reset-password` call was persisted correctly but had **zero effect on login**, since login never checked it. Separately, `get_current_user` only decoded the JWT and never re-checked the DB, so a deleted user's outstanding token kept working until it naturally expired | `authenticate_user` now verifies `password_hash` when a user has one (seed/demo users with no hash still fall back to the shared default password); `get_current_user` now re-reads the user row on every request and rejects the token immediately if the user no longer exists (also refreshes role/org_id from the DB instead of trusting stale JWT claims) |
+| `DELETE /api/users/{id}` | ✅ Pass (by design) | Hard delete, not soft — no `status`/`deleted_at` column exists. A fresh login after delete already correctly fails (see above fix for the *existing-token* half of this) | — |
+| `POST /api/cameras/{id}/process` (recorded video) | ⚠️ Documented, not fixed this pass | Job status is in-memory only (`camera_process.py`'s `_jobs` dict) — a backend restart mid-run loses the job state and `GET /process-status` reports `idle` even if the subprocess is still running or already finished. Also a TOCTOU race lets two concurrent `POST /process` calls both spawn a subprocess for the same camera. Normal (no-restart) success/failure reporting is correct — `last_processed_at` is set only on real success, and failures correctly report `failed` rather than getting stuck on `running` | Not fixed — would need job state persisted in Postgres (a real schema change) rather than an in-process dict; flagged for a follow-up pass rather than folded into this one |
+| `PUT /api/cameras/{id}` `analytics_modules` | ❌→✅ Fixed | Edits persist and reload shows the real saved list (backend `PUT` does a correct full replace). But new cameras were created with an empty module list on the frontend (`camera-modal.tsx`'s `buildEmptyForm`) even though the backend's own default for an omitted field is "all modules" — so a freshly created camera silently had every analytics module disabled until an admin manually checked all the boxes | New-camera form now defaults to all modules, matching the backend's actual default |
+| `GET /api/reports/{type}`, `/export` | ✅ Pass | Backend is fully stateless/DB-driven — same params always return the same aggregate data on re-request, no server-side session/cache to go stale. Minor: the frontend always requests `compare=true` (no UI toggle exists for it) while the backend's own default is `false` when the param is omitted — deterministic either way, just worth deciding intentionally in a future pass | Not changed — no reload-inconsistency, just a product question about whether a compare toggle should exist |
+
+**Pre-existing, unrelated:** `tests/test_api.py::TestAnalytics::test_traffic` and `test_queues_empty`
+were already failing before this pass (confirmed via `git stash`) — they come from the
+in-progress, uncommitted analytics-comparison/report-module-scope work already in the tree
+before this session started, not from anything touched here. Left alone since they're outside
+this task's scope, but flagging so they aren't mistaken for a regression introduced by these
+fixes.
 
 ---
 
@@ -1526,9 +1604,9 @@ These are shape / semantics mismatches between mock return types and Module 12 +
 
 3. **ID namespace** — Frontend seed IDs (`org-northwind`, `cam-entrance`) ≠ backend seed (`org_demo`, `store_main`, `entrance`). Scope selector and forms will show empty/wrong data until IDs align or mappers translate.
 
-4. **Analytics page data model** — UI expects `DataRow { label, current, prior? }` with `DateRangeKey` presets + comparison mode. Backend returns raw buckets (`metric_date`, `hour`, `entries`, …) with explicit `from`/`to` query params — mappers must compute prior-period series client-side or drop comparison until supported.
+4. **Analytics page data model** — ~~mappers must compute prior-period series client-side~~ **Done (2026-08-03):** `compare=true` on analytics endpoints returns `prior_*` series + `comparison` metadata; frontend maps index-aligned `DataRow.prior` and wires comparison toggle to refetch.
 
-5. **Occupancy params** — `getOccupancy()` mock ignores date range; backend `OccupancyResponse` uses `scope` + `scope_id` + `trend[]` with `current_occupancy` ints, not percentages.
+5. **Occupancy params** — ~~`getOccupancy()` mock ignores date range~~ **Partially done:** occupancy endpoint accepts optional `from`/`to` + `compare=true`; still returns `current_occupancy` ints, not percentages.
 
 6. **Heatmap** — Mock returns `HeatBlob[]` + `FloorZone[]` (SVG-friendly percentages). Backend returns `density[][]` float grid + `trajectory[][]` + `spec` — rendering layer must convert grid → blobs or redraw canvas from grid.
 
@@ -1538,7 +1616,7 @@ These are shape / semantics mismatches between mock return types and Module 12 +
 
 9. **Reports** — Frontend `ReportType` includes `"dwell-time"`; backend path uses `dwell`. Mock `ReportData` has formatted KPI strings + `change` %; backend `ReportPayload.kpis[]` has `{ key, label, value: number }`. Export buttons not connected to `GET /api/reports/{type}/export`.
 
-10. **Admin cameras** — Frontend `AdminCamera` has `store` (name), `analyticsModules[]`, `enabled`, `resolution: "1080p"\|"2k"\|"4k"`, `rtspUrl` camelCase. Backend `CameraResponse` has `store_id`, `rtsp_url`, `resolution: "WxH"`, `status` string — no modules list, no separate `enabled` flag.
+10. **Admin cameras** — Frontend `AdminCamera` has `store` (name), `analyticsModules[]`, `enabled`, `resolution: "1080p"\|"2k"\|"4k"`, `rtspUrl` camelCase. Backend `CameraResponse` includes `analytics_modules[]` (snake_case API: `entry_exit`, `occupancy`, `zones`, `dwell`, `heatmap`, `queues`). Camera `enabled` toggle still maps to `status=disabled` via soft-delete endpoint only — no `enabled` field on PUT.
 
 11. **Zone shapes** — Frontend zone `type: "checkout"`; backend `ZoneShapeType` uses `"checkout_queue"`. Line `insideSide: "left"\|"right"` ↔ backend `direction: "left_is_inside"\|"right_is_inside"`. Polygon coords: frontend `Point {x,y}` 0–100 % vs backend `polygon_points: [[x,y],…]` (verify coordinate space in seed).
 
@@ -1561,7 +1639,7 @@ These are shape / semantics mismatches between mock return types and Module 12 +
 | Overview KPI single call | Must compose multiple analytics endpoints |
 | List analytics zones (inference `zones` table) | Only `zone_shapes` geometry at `GET /api/zones`; analytics `zone_id` values come from seed/DB, not a list endpoint |
 | Nav open-alert count | Use `GET /api/alerts` filtered client-side (no `/count` shortcut) |
-| `analyticsModules` / camera `enabled` toggle | Not in camera schema — UI fields have no backend counterpart |
+| Camera `enabled` toggle | Not a separate schema field — disable via `DELETE /api/cameras/{id}` (`status=disabled`); re-enable needs explicit status PUT (not yet exposed) |
 
 ### Architecture decisions worth preserving
 
@@ -1646,8 +1724,7 @@ Login with any seed user email + password `demo`. Admin routes require **System 
 | Customer Flow page | No path/trajectory analytics API | “Not available yet” empty state |
 | Heatmap floor plan labels | `FLOOR_ZONES` in `lib/heatmap-data.ts` | **UI layout constants only** — heatmap density from `GET /api/analytics/heatmap` |
 | Zone performance rollup | No single-store multi-zone endpoint | Fans out `GET /api/analytics/zones` per zone |
-| Overview KPI trends | No prior-period comparison on overview cards | `trend: 0` (comparison exists on analytics pages) |
-| Camera `enabled` / `analyticsModules` | Not in camera schema | Admin form fields have no backend counterpart |
+| Camera `enabled` toggle | Not a separate schema field | Disable via `DELETE /api/cameras/{id}`; `analytics_modules` wired on POST/PUT and drives pipeline gating |
 | `fetchIntervalLabel` | Client-only date-range axis labels | `lib/analytics-data.ts` — not business data |
 
 **Dev startup:**
@@ -1696,6 +1773,97 @@ Distinguishes **live stream** cameras from **recorded video** sources so file-ba
 - **Analytics pages** — no special-casing; processed recorded cameras write to the same metric tables as live cameras.
 
 ---
+
+## Per-camera analytics modules (PRD §8) — wired (2026-08-03)
+
+Admin **Assigned analytics modules** now controls which analytics run per camera end-to-end.
+
+### Module identifiers (`cameras.analytics_modules` JSONB)
+
+| Module id | Pipeline feature | API surface |
+|-----------|------------------|-------------|
+| `entry_exit` | Counting-line crossings → visitor/traffic metrics | `GET /api/analytics/traffic` (store must have ≥1 camera with module) |
+| `occupancy` | Occupancy tracker + `occupancy_metrics` | `GET /api/analytics/occupancy` |
+| `zones` | Zone enter metrics + `zone_metrics` visitors | `GET /api/analytics/zones` |
+| `dwell` | Dwell tracker + `dwell_events` | `GET /api/analytics/dwell` |
+| `heatmap` | `HeatmapEngine` foot-point accumulation (NPZ files) | `GET /api/analytics/heatmap` |
+| `queues` | Queue tracker + `queue_metrics` | `GET /api/analytics/queues` |
+
+Frontend labels map `entry-exit` ↔ `entry_exit`, `queue` ↔ `queues`.
+
+### Migration default logic (`005_camera_analytics_modules`)
+
+For each existing camera, inferred from geometry (not “all on” / “all off”):
+
+- **Counting line present** → `entry_exit` + `occupancy`
+- **Any analytics-enabled zone** → `zones` + `dwell` + `heatmap`
+- **Queue-type zone** (`queue`, `checkout`, `waiting`) → `queues`
+
+### Pipeline gating (compute skipped, not just hidden)
+
+| Location | What it does |
+|----------|----------------|
+| `inference/pipeline/process_recorded.py` | Skips `LineCounter`, `ZoneDetector`, and `HeatmapEngine` when the corresponding modules are disabled; passes `enabled_modules` into engine + DB writer |
+| `analytics/events/engine.py` | `AnalyticsEngineConfig.enabled_modules` — skips occupancy / zone / dwell / queue aggregation inside `process_zone_event` and `_apply_crossing` |
+| `database/writer.py` | `DbWriterConfig.enabled_modules` — skips visitor and occupancy rollups when `entry_exit` / `occupancy` disabled |
+
+Recorded video: `POST /api/cameras/{id}/process` → `camera_process` service → `process_recorded.py`.
+
+Live RTSP: no continuous inference worker in the API process yet; when added (or via `run-events-demo.py` with DB persistence), use the same `analytics.modules` helpers and `enabled_modules` on `AnalyticsEngine` / `AnalyticsDbWriter` as `process_recorded.py`.
+
+### API errors when module disabled
+
+`403` with `{ error: { code: "analytics_module_disabled", message, details } }` — not `not_found` and not an empty data payload.
+
+### Frontend
+
+- `createCamera` / `updateCamera` send `analytics_modules` (snake_case on wire)
+- `mapAdminCamera` reads `analytics_modules` from API
+- `AnalyticsPageLayout` shows “Module not enabled for this camera” when `analytics_module_disabled` is returned
+
+### Cross-camera / store-wide aggregation (2026-08-03)
+
+All multi-camera views filter by `analytics_modules` **before** querying aggregates, and disclose partial coverage:
+
+| Surface | Fix |
+|---------|-----|
+| `GET /api/reports/{type}` + `/export` | `report_eligibility.py` + `reports.py` — eligible cameras/zones only; `footnotes`, `exclusions`, `coverage` on payload; optional `camera_id` filter; single-camera without module → `403 analytics_module_disabled` |
+| `GET /api/analytics/traffic` | Aggregates `events` for cameras with `entry_exit` only (not whole-store `visitor_metrics` when some cameras excluded) |
+| `GET /api/analytics/occupancy` (store scope) | Sums per-camera `occupancy_metrics` for cameras with `occupancy` enabled |
+| Overview KPI cards (`getOverviewKpis`) | Skips dwell/queue API calls when zone camera lacks module; subtext e.g. “Queues tracked at 2 of 4 cameras” |
+| Overview charts (`getVisitorsByHour`, `getEntriesExits`) | Use filtered traffic endpoint |
+| Zone performance rollup (`getZonePerformance`) | Marks zones on cameras without `zones` as `not_tracked` with reason; dwell column “Not tracked” when `dwell` disabled |
+| Reports UI (`ReportForm`, reports page) | Optional “All cameras” vs single camera; inline module-disabled message; passes `camera_id` to API |
+
+Not changed (no cross-camera module aggregation): alerts list, admin camera totals, live camera grid overlays.
+
+### Period-over-period comparison (2026-08-03)
+
+**Approach:** **2a — `compare=true` query param** (not explicit `compare_from`/`compare_to`). Given `from`/`to`, the backend computes the equivalent prior span (same duration, immediately preceding) via `analytics_comparison.prior_period_bounds()` and returns current + prior series in one response. Chosen because endpoints already center on `from`/`to`, mappers already expected embedded prior buckets, and a single round-trip avoids the broken dual-fetch pattern.
+
+**Endpoints:** `GET /api/analytics/{traffic,occupancy,zones,dwell,queues}?from=&to=&compare=true` and `GET /api/reports/{type}?compare=true` (+ `/export`).
+
+**Response shape:** Each analytics response adds optional `comparison: { status, from, to, message? }` and prior series fields (`prior_buckets`, `prior_trend`, `prior_sessions`, `prior_samples`, …). Reports add prior KPIs / table columns (`prior_entries`, `prior_visitors`, …) and comparison footnotes.
+
+**Comparison edge states (not silent zero):**
+
+| `comparison.status` | When | UI behavior |
+|---------------------|------|-------------|
+| `ok` | Prior period is valid; prior series populated | Chart/table show `prior` column; overview KPIs show `% vs last period` |
+| `module_disabled` | Legacy/edge — module gating should surface as **HTTP 403** before data rows | Frontend throws `analytics_module_disabled`; chart cleared |
+| `insufficient_history` | Prior period starts before data collection began (`last_processed_at` / earliest metric) | Amber “Insufficient history” banner; no fake prior zeros |
+
+**Frontend:** `AnalyticsPageLayout` passes `comparison` + custom dates into `getData`; overview KPI cards use `compare=true` for today vs yesterday. **Out of scope:** cross-store “Store Comparison” (PRD §37, Phase 2) — not implemented.
+
+**Regression fix (2026-08-03) — module gating vs comparison:**
+
+| Diagnosis item | Verdict |
+|----------------|---------|
+| **(a)** Separate `compare=true` code path bypassing `analytics_modules` checks | **TRUE — root cause.** Prior-period reads used duplicate `_queue_samples` / `_zone_buckets` helpers instead of re-running the same gated `read_*` entry points as the current period. `build_comparison_info()` also duplicated eligibility as `comparison.status: module_disabled` inside **200 OK** responses. |
+| **(b)** Pipeline / `GET /api/cameras/{id}/process` write-path regression | **FALSE** — not touched by comparison work; `process_recorded.py` still gates on `camera.analytics_modules`. |
+| **(c)** Migration/seed reset `analytics_modules` | **FALSE** — no comparison-task migration/seed change. |
+
+**Fix:** Added `backend/app/services/analytics_read.py` with gated `read_store_traffic_period`, `read_queue_period`, etc. Analytics endpoints call the same reader for current **and** prior ranges (after `prior_period_comparison_info()` history check only). Frontend `rejectComparisonModuleDisabled()` treats any legacy `comparison.module_disabled` as `403 analytics_module_disabled` instead of rendering current-period rows. Test: `test_queues_disabled_with_compare_returns_403`.
 
 ---
 
@@ -1762,6 +1930,180 @@ Two data-flow bugs fixed after root-cause tracing (not UI-only patches).
 - Removed `scopeScaleFactor` / `scaleDataRows` / `scaleStatSummaries` from analytics config (leftover mock-era fake scaling)
 - `ScopeContextBanner` on all scope-aware pages; `storeOnly` on overview; `notScoped` on admin cameras
 - Scope selector: **All cameras** / **All zones** options; zones aggregate across store when no camera selected
+
+---
+
+## Analytics Multi-Granularity Aggregation Pattern (2026-08-04)
+
+**Reusable approach for Traffic, Zones, Dwell, and Zone Performance pages to support store/camera/zone drill-down.**
+
+### Backend Pattern — `read_traffic_for_scope()` in `analytics_read.py`
+
+Three-level scope resolution with module gating. **Single function handles all granularities:**
+
+```python
+def read_traffic_for_scope(
+    session: Session,
+    *,
+    store_id: str,           # Always required (root scope)
+    camera_id: str | None,   # Optional — drill down to single camera
+    zone_id: str | None,     # Optional — drill down to single zone
+    start: datetime,
+    end: datetime,
+) -> StoreTrafficPeriod:
+    """
+    Aggregation tiers (reusable for all metrics):
+    1. zone_id specified    → single zone, single camera (zone's parent)
+    2. camera_id specified  → all eligible zones in that camera
+    3. store_id only        → all eligible zones across all eligible cameras
+    
+    Module gating: exclude cameras lacking entry_exit at every tier.
+    Returns StoreTrafficPeriod with buckets + eligible camera list (for comparison).
+    """
+```
+
+**Decision:** Event-based querying (not metrics table aggregation):
+- Zone-level: filter `Event.zone_id = zone_id`
+- Camera-level: filter `Event.camera_id = camera_id`
+- Store-level: filter `Event.camera_id IN (eligible_camera_ids)` 
+
+Rationale: Cleaner module gating (eligible_cameras already filtered), single code path, same pattern works for all four pages.
+
+### API Endpoint — `GET /api/analytics/traffic`
+
+Now accepts optional `camera_id` and `zone_id` query params:
+
+```
+GET /api/analytics/traffic?store_id=store-1&from=2026-08-01&to=2026-08-04&compare=true
+→ store-level (all cameras, all zones)
+
+GET /api/analytics/traffic?store_id=store-1&camera_id=cam-A&from=...&to=...&compare=true
+→ camera-level (cam-A only, all zones)
+
+GET /api/analytics/traffic?store_id=store-1&camera_id=cam-A&zone_id=zone-1&from=...&to=...&compare=true
+→ zone-level (cam-A zone-1 only)
+```
+
+Module gating applied at the appropriate scope before aggregation. Prior-period comparison uses the same function with adjusted dates.
+
+### Frontend Pattern — Traffic Page Example
+
+1. **Local scope selection** (page-specific dropdowns, not global):
+   ```typescript
+   const { camera, zone, setCamera, setZone, selection } = useLocalScopeSelection(store, {
+     showZoneSelector: true,
+     excludeQueueZones: true,
+     showCameraAllOption: true,
+   });
+   ```
+
+2. **Config hook accepts selection**:
+   ```typescript
+   const config = useTrafficAnalyticsConfig(selection);
+   ```
+
+3. **API call passes all three params**:
+   ```typescript
+   return getTraffic({
+     store_id: selection.store_id,
+     camera_id: selection.camera_id === "all" ? undefined : selection.camera_id,
+     zone_id: selection.zone_id === "all" ? undefined : selection.zone_id,
+     from, to, compare,
+   });
+   ```
+
+4. **ScopeSelector component on page** (configurable per page):
+   ```tsx
+   <ScopeSelector
+     store={store}
+     selectedCamera={camera}
+     selectedZone={zone}
+     onCameraChange={setCamera}
+     onZoneChange={setZone}
+     config={{
+       showZoneSelector: true,
+       excludeQueueZones: true,
+       showCameraAllOption: true,
+     }}
+   />
+   ```
+
+### Reuse for Other Pages (Zones, Dwell, Zone Performance)
+
+Same backend function approach; frontend mirrors Traffic/Occupancy pattern.
+
+**CRITICAL for zone-aggregation endpoints:** When aggregating across multiple zones (camera-level or store-level "all zones"), **filter out queue-type zones at the SQL query level**, not in application code. 
+
+⚠️ **IMPORTANT:** The Zone model stores **raw zone_type values from the input JSON** ("queue", "checkout", "waiting"), NOT the frontend-mapped value ("checkout_queue"). The frontend mapping happens only in ZoneShape.shape_type. Therefore, SQL filters must check against the **original zone_type values** using `Zone.zone_type.in_(["queue", "checkout", "waiting"])`, not `Zone.zone_type == "checkout_queue"`.
+
+This ensures the aggregated totals never include queue zones, matching the frontend dropdown filtering (which also excludes queue zones). The frontend dropdown and backend aggregation are separate code paths — both must exclude queue zones independently.
+
+**For Zones page** (multi-granularity: zone → camera → store):
+```python
+# Backend: read_zones_for_scope() with queue exclusion in SQL queries
+# Frontend: ScopeSelector with { showCamera: true, showZone: true, excludeQueueZones: true }
+# API: GET /api/analytics/zones?store_id=X&camera_id=Y&zone_id=Z
+# Both camera-level and store-level "all zones" queries must filter:
+#   ~Zone.zone_type.in_(["queue", "checkout", "waiting"])
+# NOT zone_type == "checkout_queue" (that's ZoneShape.shape_type, not Zone.zone_type)
+```
+
+**For Dwell** (multi-granularity: zone → camera → store):
+```python
+# Backend: read_dwell_for_scope() with queue exclusion in SQL queries (same pattern as Zones)
+# Frontend: ScopeSelector with { showCamera: true, showZone: true, excludeQueueZones: true }
+# API: GET /api/analytics/dwell?store_id=X&camera_id=Y&zone_id=Z
+# Module gating: dwell module required
+```
+
+**For Queues** (multi-granularity: zone → camera → store, QUEUE ZONES ONLY):
+```python
+# Backend: read_queue_for_scope() selecting ONLY queue zones (inverted filter)
+#          read_dwell_for_queue_zones() for waiting time (aggregates ONLY queue zones' dwell sessions)
+# Frontend: ScopeSelector with { showCamera: true, showZone: true, onlyQueueZones: true }
+# API: GET /api/analytics/queues?store_id=X&camera_id=Y&zone_id=Z (queue samples, queues module)
+#      GET /api/analytics/dwell-queues?store_id=X&camera_id=Y&zone_id=Z (dwell sessions for queue zones, dwell module)
+# CRITICAL: filter for queue zones only: Zone.zone_type.in_(["queue", "checkout", "waiting"])
+# Module gating:
+#   - Queue metrics (queue length, max queue): require `queues` module
+#   - Average Waiting Time: requires `dwell` module (gated on dwell_events of queue zones only)
+# Display: "Average Waiting Time" card added below queue metrics; syncs with same date range/comparison as main chart
+```
+
+**For Zone Performance** (multi-granularity: zone → camera → store):
+```python
+# Backend: similar to Zones — read_zones_for_scope() or equivalent
+# Frontend: ScopeSelector with { showCamera: true, showZone: true, excludeQueueZones: true }
+# API: GET /api/analytics/... (same params as Zones)
+# CRITICAL: apply queue exclusion in SQL query for both camera-level and store-level aggregations
+# Filter: ~Zone.zone_type.in_(["queue", "checkout", "waiting"]) NOT zone_type == "checkout_queue"
+```
+
+### Heatmap Page Integration
+
+**Requirements:**
+- Top bar scope selector only (Store + Camera required, Zone hidden)
+- No "All Cameras" option - must select exactly one camera
+- Empty state if no camera selected
+- Heatmap visualization only (no zone performance table)
+
+**Implementation:**
+- Config: `{ showZone: false, showCameraAllOption: false }`
+- Page checks `!cameraId` early and shows empty state
+- Camera selection via global scope (top bar only)
+- Removed ZonePerformance component (see separate Zone Performance page)
+- Date/time/opacity controls in HeatmapControls component
+- Module gating: `heatmap` module required
+
+**Backend:**
+- GET `/api/analytics/heatmap` takes `camera_id` (required), no changes needed
+- Zone performance analytics moved to dedicated Zone Performance page (not yet built)
+
+### Module Gating Verification
+
+- `camera_id` required, no module disabled → include in aggregate
+- `camera_id` required, module disabled → 403 `analytics_module_disabled`
+- `store_id` only, some cameras disabled → include only enabled cameras; no 403 (partial coverage disclosed via eligible list or footnotes)
 
 ---
 

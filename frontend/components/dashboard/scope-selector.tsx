@@ -111,7 +111,35 @@ function ScopeSelect({
   )
 }
 
-export function ScopeSelector({ className }: { className?: string }) {
+export type ScopeBarConfig = {
+  /** Show Camera selector (default: true) */
+  showCamera?: boolean
+  /** Show Zone selector (default: true) */
+  showZone?: boolean
+  /** Exclude queue-type zones from the zone dropdown (default: false) */
+  excludeQueueZones?: boolean
+  /** Show ONLY queue-type zones in the zone dropdown (default: false) */
+  onlyQueueZones?: boolean
+  /** Show "All Cameras" option in camera dropdown (default: true) */
+  showCameraAllOption?: boolean
+}
+
+/**
+ * Determines if a zone type is a queue-type zone.
+ * Queue zones: "checkout_queue" (aggregated type for queue/checkout/waiting)
+ */
+function isQueueZoneType(zoneType: string | undefined): boolean {
+  if (!zoneType) return false
+  return zoneType.toLowerCase() === "checkout_queue"
+}
+
+export function ScopeSelector({
+  className,
+  config,
+}: {
+  className?: string
+  config?: ScopeBarConfig
+}) {
   const {
     isLoading,
     organization,
@@ -125,7 +153,15 @@ export function ScopeSelector({ className }: { className?: string }) {
     setZoneId,
   } = useScope()
 
-  const zoneOptions = zonesForScope(store, camera)
+  const allZoneOptions = zonesForScope(store, camera)
+  const zoneOptions = config?.excludeQueueZones
+    ? allZoneOptions.filter((z) => !isQueueZoneType(z.type))
+    : config?.onlyQueueZones
+      ? allZoneOptions.filter((z) => isQueueZoneType(z.type))
+      : allZoneOptions
+  const showCamera = config?.showCamera !== false
+  const showZone = config?.showZone !== false
+  const showCameraAllOption = config?.showCameraAllOption !== false
 
   if (isLoading || !organization) {
     return (
@@ -155,25 +191,29 @@ export function ScopeSelector({ className }: { className?: string }) {
         onChange={(id) => id && setStoreId(id)}
       />
 
-      <ScopeSelect
-        label="Camera"
-        options={store?.cameras ?? []}
-        value={cameraId}
-        disabled={!store}
-        allowAll
-        allLabel="All cameras"
-        onChange={setCameraId}
-      />
+      {showCamera && (
+        <ScopeSelect
+          label="Camera"
+          options={store?.cameras ?? []}
+          value={cameraId}
+          disabled={!store}
+          allowAll={showCameraAllOption}
+          allLabel="All cameras"
+          onChange={setCameraId}
+        />
+      )}
 
-      <ScopeSelect
-        label="Zone"
-        options={zoneOptions}
-        value={zoneId}
-        disabled={!store}
-        allowAll
-        allLabel="All zones"
-        onChange={setZoneId}
-      />
+      {showZone && (
+        <ScopeSelect
+          label="Zone"
+          options={zoneOptions}
+          value={zoneId}
+          disabled={!store || !cameraId}
+          allowAll
+          allLabel="All zones"
+          onChange={setZoneId}
+        />
+      )}
     </div>
   )
 }

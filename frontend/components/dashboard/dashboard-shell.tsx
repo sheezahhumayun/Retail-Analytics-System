@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation"
 
 import { ThemeProvider } from "@/components/theme-provider"
 import { TopNav } from "@/components/dashboard/top-nav"
-import { ScopeSelector } from "@/components/dashboard/scope-selector"
+import { ScopeSelector, type ScopeBarConfig } from "@/components/dashboard/scope-selector"
 
 /** Routes that use their own filters — global scope does not apply. */
 function isScopeSelectorDisabled(pathname: string): boolean {
@@ -16,11 +16,14 @@ export type DashboardShellProps = {
   children: ReactNode
   /** Override route-based scope visibility (e.g. force hide on a custom page). */
   hideScopeSelector?: boolean
+  /** Customize which scope selectors are shown in the global scope bar. */
+  scopeBarConfig?: ScopeBarConfig
 }
 
 export function DashboardShell({
   children,
   hideScopeSelector,
+  scopeBarConfig,
 }: DashboardShellProps) {
   const pathname = usePathname()
   const showScopeSelector =
@@ -36,7 +39,7 @@ export function DashboardShell({
         {showScopeSelector && (
           <div className="sticky top-14 z-40 border-b border-border bg-muted/40">
             <div className="px-4 py-2.5 sm:px-6">
-              <ScopeSelector />
+              <ScopeSelector config={scopeBarConfig} />
             </div>
           </div>
         )}

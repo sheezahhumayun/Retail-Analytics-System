@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
-import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { CustomerFlowControls } from '@/components/customer-flow/customer-flow-controls';
 import { CustomerFlowViz } from '@/components/customer-flow/customer-flow-viz';
 import { FutureFeatureCallout } from '@/components/customer-flow/future-feature-callout';
@@ -57,8 +56,6 @@ export default function CustomerFlowPage() {
             Visualize common walking patterns and movement routes through your store
           </p>
         </div>
-
-        <ScopeContextBanner />
 
         <CustomerFlowControls
           cameras={allowedCameras}

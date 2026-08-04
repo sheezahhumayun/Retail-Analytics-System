@@ -456,6 +456,114 @@ class TestUsersAdmin:
         delete = api_client.delete(f"/api/users/{user_id}", headers=admin_headers)
         assert delete.status_code == 204
 
+    def test_created_user_logs_in_with_own_password_not_default(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        user_id = f"user_{uuid.uuid4().hex[:8]}"
+        email = f"{user_id}@example.com"
+        create = api_client.post(
+            "/api/users",
+            headers=admin_headers,
+            json={
+                "id": user_id,
+                "email": email,
+                "name": "Own Password User",
+                "role": "user",
+                "org_id": ORG_ID,
+                "password": "correct-horse-battery-staple",
+            },
+        )
+        assert create.status_code == 201
+
+        # Regression: login previously ignored password_hash entirely and only
+        # accepted the shared API_DEFAULT_PASSWORD, making per-user passwords
+        # (and reset-password) functionally inert.
+        wrong = api_client.post(
+            "/api/auth/login", json={"email": email, "password": "demo"}
+        )
+        assert wrong.status_code == 401
+
+        right = api_client.post(
+            "/api/auth/login",
+            json={"email": email, "password": "correct-horse-battery-staple"},
+        )
+        assert right.status_code == 200, right.text
+
+        api_client.delete(f"/api/users/{user_id}", headers=admin_headers)
+
+    def test_reset_password_changes_login_credential(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        user_id = f"user_{uuid.uuid4().hex[:8]}"
+        email = f"{user_id}@example.com"
+        api_client.post(
+            "/api/users",
+            headers=admin_headers,
+            json={
+                "id": user_id,
+                "email": email,
+                "name": "Reset Target",
+                "role": "user",
+                "org_id": ORG_ID,
+                "password": "old-password",
+            },
+        )
+
+        reset = api_client.post(
+            f"/api/users/{user_id}/reset-password",
+            headers=admin_headers,
+            json={"new_password": "brand-new-password"},
+        )
+        assert reset.status_code == 204
+
+        stale = api_client.post(
+            "/api/auth/login", json={"email": email, "password": "old-password"}
+        )
+        assert stale.status_code == 401
+
+        fresh = api_client.post(
+            "/api/auth/login", json={"email": email, "password": "brand-new-password"}
+        )
+        assert fresh.status_code == 200, fresh.text
+
+        api_client.delete(f"/api/users/{user_id}", headers=admin_headers)
+
+    def test_deleted_user_token_immediately_rejected(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        user_id = f"user_{uuid.uuid4().hex[:8]}"
+        email = f"{user_id}@example.com"
+        api_client.post(
+            "/api/users",
+            headers=admin_headers,
+            json={
+                "id": user_id,
+                "email": email,
+                "name": "Revoke Target",
+                "role": "user",
+                "org_id": ORG_ID,
+                "password": "whatever-password",
+            },
+        )
+
+        login = api_client.post(
+            "/api/auth/login", json={"email": email, "password": "whatever-password"}
+        )
+        assert login.status_code == 200, login.text
+        token = login.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        assert api_client.get("/api/cameras", headers=headers).status_code == 200
+
+        delete = api_client.delete(f"/api/users/{user_id}", headers=admin_headers)
+        assert delete.status_code == 204
+
+        # Regression: get_current_user previously only decoded the JWT and
+        # never re-checked the DB, so a deleted user's existing token kept
+        # working until it naturally expired.
+        after_delete = api_client.get("/api/cameras", headers=headers)
+        assert after_delete.status_code == 401
+
     def test_forbidden_for_regular_user(self, api_client: TestClient, user_headers: dict):
         assert api_client.get("/api/users", headers=user_headers).status_code == 403
 

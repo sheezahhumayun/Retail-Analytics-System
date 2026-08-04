@@ -10,10 +10,18 @@ from zoneinfo import ZoneInfo
 from analytics.counting.types import CrossingEvent, EventType
 from analytics.dwell import DwellTracker
 from analytics.dwell.types import DwellAggregatesSnapshot
+from analytics.modules import (
+    ALL_ANALYTICS_MODULES,
+    MODULE_DWELL,
+    MODULE_OCCUPANCY,
+    MODULE_QUEUES,
+    MODULE_ZONES,
+    normalize_modules,
+)
 from analytics.occupancy import OccupancyScope, OccupancyTracker, StoreOccupancyAggregator
 from analytics.occupancy.types import OccupancySnapshot
 from analytics.occupancy.tracker import UTC, _normalize_timezone
-from analytics.queues import QueueTracker
+from analytics.queues import QueueTracker, is_queue_zone
 from analytics.queues.types import QueueMetricsSnapshot
 from analytics.zones import MultiZoneAnalytics, Zone, ZoneAnalyticsSnapshot
 from analytics.zones.types import ZoneEvent
@@ -45,6 +53,9 @@ class AnalyticsEngineConfig:
     lost_track_timeout_seconds: float = 5.0
     floor_at_zero: bool = True
     db_writer: AnalyticsDbWriter | None = None
+    enabled_modules: frozenset[str] = field(
+        default_factory=lambda: frozenset(ALL_ANALYTICS_MODULES)
+    )
 
 
 class AnalyticsEngine:
@@ -66,20 +77,28 @@ class AnalyticsEngine:
     ) -> None:
         self._bus = bus
         self._config = config
+        self._enabled_modules = frozenset(normalize_modules(config.enabled_modules))
         tz = _normalize_timezone(config.timezone)
 
-        self._camera_occupancy: dict[str, OccupancyTracker] = {
-            cid: OccupancyTracker(
-                cid,
-                scope_type=OccupancyScope.CAMERA,
-                floor_at_zero=config.floor_at_zero,
-                timezone=tz,
-            )
-            for cid in config.camera_ids
-        }
+        if MODULE_OCCUPANCY in self._enabled_modules:
+            self._camera_occupancy: dict[str, OccupancyTracker] = {
+                cid: OccupancyTracker(
+                    cid,
+                    scope_type=OccupancyScope.CAMERA,
+                    floor_at_zero=config.floor_at_zero,
+                    timezone=tz,
+                )
+                for cid in config.camera_ids
+            }
+        else:
+            self._camera_occupancy = {}
 
         self._store: StoreOccupancyAggregator | None = None
-        if config.store_id is not None and config.camera_ids:
+        if (
+            MODULE_OCCUPANCY in self._enabled_modules
+            and config.store_id is not None
+            and config.camera_ids
+        ):
             self._store = StoreOccupancyAggregator(
                 config.store_id,
                 config.camera_ids,
@@ -87,14 +106,24 @@ class AnalyticsEngine:
                 timezone=tz,
             )
 
-        self._zone_analytics = MultiZoneAnalytics(config.zones, timezone=tz)
+        zone_analytics_zones = (
+            config.zones if MODULE_ZONES in self._enabled_modules else []
+        )
+        dwell_zones = config.zones if MODULE_DWELL in self._enabled_modules else []
+        queue_zones = (
+            [z for z in config.zones if is_queue_zone(z)]
+            if MODULE_QUEUES in self._enabled_modules
+            else []
+        )
+
+        self._zone_analytics = MultiZoneAnalytics(zone_analytics_zones, timezone=tz)
         self._dwell = DwellTracker(
-            config.zones,
+            dwell_zones,
             dwell_thresholds=config.dwell_thresholds,
             lost_track_timeout_seconds=config.lost_track_timeout_seconds,
         )
         self._queues = QueueTracker(
-            config.zones,
+            queue_zones,
             length_thresholds=config.queue_length_thresholds,
             duration_thresholds=config.queue_duration_thresholds,
         )
@@ -123,6 +152,8 @@ class AnalyticsEngine:
             self._apply_crossing(event, EventType.EXIT)
 
     def _apply_crossing(self, event: AnalyticsEvent, event_type: EventType) -> None:
+        if MODULE_OCCUPANCY not in self._enabled_modules:
+            return
         if event.track_id is None:
             return
         crossing = CrossingEvent(
@@ -140,35 +171,39 @@ class AnalyticsEngine:
 
     def process_zone_event(self, event: ZoneEvent) -> None:
         """Apply a zone event and publish bus events for transitions / thresholds."""
-        analytics_event = zone_to_analytics(event)
-        if analytics_event is not None:
-            self._bus.publish(analytics_event)
+        if MODULE_ZONES in self._enabled_modules:
+            analytics_event = zone_to_analytics(event)
+            if analytics_event is not None:
+                self._bus.publish(analytics_event)
+            self._zone_analytics.process(event)
 
-        self._zone_analytics.process(event)
-
-        dwell_result = self._dwell.process(event)
-        if dwell_result.threshold_event is not None:
-            self._bus.publish(
-                dwell_threshold_to_analytics(dwell_result.threshold_event)
-            )
-        if dwell_result.dwell_event is not None and self._db_writer is not None:
-            self._db_writer.on_dwell_event(dwell_result.dwell_event)
-
-        queue_result = self._queues.process(event)
-        for threshold in queue_result.threshold_events:
-            self._bus.publish(queue_threshold_to_analytics(threshold))
-        if self._db_writer is not None:
-            snap = self._queues.snapshot(event.zone_id)
-            if snap is not None:
-                self._db_writer.on_queue_sample(
-                    zone_id=event.zone_id,
-                    timestamp=event.timestamp,
-                    queue_length=snap.current_queue_length,
-                    estimated_wait=snap.estimated_wait_seconds,
+        if MODULE_DWELL in self._enabled_modules:
+            dwell_result = self._dwell.process(event)
+            if dwell_result.threshold_event is not None:
+                self._bus.publish(
+                    dwell_threshold_to_analytics(dwell_result.threshold_event)
                 )
+            if dwell_result.dwell_event is not None and self._db_writer is not None:
+                self._db_writer.on_dwell_event(dwell_result.dwell_event)
+
+        if MODULE_QUEUES in self._enabled_modules:
+            queue_result = self._queues.process(event)
+            for threshold in queue_result.threshold_events:
+                self._bus.publish(queue_threshold_to_analytics(threshold))
+            if self._db_writer is not None:
+                snap = self._queues.snapshot(event.zone_id)
+                if snap is not None:
+                    self._db_writer.on_queue_sample(
+                        zone_id=event.zone_id,
+                        timestamp=event.timestamp,
+                        queue_length=snap.current_queue_length,
+                        estimated_wait=snap.estimated_wait_seconds,
+                    )
 
     def close_stale_dwell_sessions(self, current_timestamp: float) -> None:
         """Close dwell sessions whose tracks were lost (call once per frame)."""
+        if MODULE_DWELL not in self._enabled_modules:
+            return
         for dwell_event in self._dwell.close_stale_sessions(current_timestamp):
             if self._db_writer is not None:
                 self._db_writer.on_dwell_event(dwell_event)

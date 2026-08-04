@@ -43,11 +43,24 @@ def apply_probe_to_camera(camera: Camera, result: CameraTestResponse) -> CameraC
 
 
 def refresh_camera_status(session: Session, camera: Camera) -> CameraConnectivityStatus:
-    """Probe a live camera and persist the resulting status."""
+    """Probe a live camera and persist the resulting status.
+
+    The probe itself (network I/O) can take a while, during which an admin
+    may have manually disabled the camera via ``PUT /api/cameras/{id}``. To
+    keep that manual change authoritative, re-read the row's current status
+    right before writing the probe result and bail out if it changed to
+    ``disabled`` while we were probing — the manual write wins and this
+    probe's result is discarded rather than clobbering it.
+    """
     if camera.status == "disabled" or camera.source_type == "recorded":
         return camera.status  # type: ignore[return-value]
 
     result = probe_camera(camera)
+
+    session.refresh(camera)
+    if camera.status == "disabled":
+        return camera.status  # type: ignore[return-value]
+
     status = apply_probe_to_camera(camera, result)
     session.add(camera)
     session.flush()

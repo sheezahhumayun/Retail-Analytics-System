@@ -33,12 +33,24 @@ def list_cameras(
     session: DbSession,
     _user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str | None, Query(description="Filter by store id")] = None,
+    include_disabled: Annotated[
+        bool,
+        Query(
+            description=(
+                "Include soft-deleted/disabled cameras in the response. "
+                "Defaults to False so disabled cameras don't reappear in normal "
+                "camera pickers/lists after being disabled or deleted."
+            )
+        ),
+    ] = False,
 ) -> list[CameraResponse]:
     stmt = select(Camera).order_by(Camera.name)
     if store_id is not None:
         if session.get(Store, store_id) is None:
             raise ApiError(404, "store_not_found", f"Store '{store_id}' not found")
         stmt = stmt.where(Camera.store_id == store_id)
+    if not include_disabled:
+        stmt = stmt.where(Camera.status != "disabled")
     cameras = list(session.exec(stmt).all())
     return [_camera_response(camera) for camera in cameras]
 
@@ -84,6 +96,7 @@ def _camera_response(camera: Camera) -> CameraResponse:
         resolution=camera.resolution,
         fps=camera.fps,
         status=camera.status,
+        analytics_modules=camera.analytics_modules or [],
     )
 
 

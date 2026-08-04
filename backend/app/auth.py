@@ -14,7 +14,9 @@ from sqlmodel import Session, select
 from database.models import User
 
 from .config import get_settings
+from .deps import DbSession
 from .exceptions import ApiError
+from .services.passwords import verify_password
 
 security = HTTPBearer(auto_error=False)
 
@@ -79,6 +81,16 @@ def authenticate_user(session: Session, email: str, password: str) -> User | Non
     user = session.exec(select(User).where(User.email == email)).first()
     if user is None:
         return None
+    if user.password_hash:
+        # Real per-user password (set via POST /api/users or
+        # POST /api/users/{id}/reset-password) — check against its hash.
+        if not verify_password(password, user.password_hash):
+            return None
+        return user
+    # Seed/demo users are created without an individual password_hash and
+    # fall back to the shared API_DEFAULT_PASSWORD. Once a user has a hash
+    # (created or reset through the admin API), that hash is authoritative
+    # and the shared default no longer applies to them.
     if password != settings.api_default_password:
         return None
     return user
@@ -96,10 +108,27 @@ def decode_token(token: str) -> TokenPayload:
 
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+    session: DbSession,
 ) -> TokenPayload:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise ApiError(401, "not_authenticated", "Missing or invalid Authorization header")
-    return decode_token(credentials.credentials)
+    payload = decode_token(credentials.credentials)
+
+    # A previously issued JWT stays cryptographically valid until it expires,
+    # but the user it names may have been deleted (or had their role changed)
+    # since it was issued. Re-checking against the DB on every request means
+    # a deleted user loses access immediately rather than being able to keep
+    # using the API until the token's natural expiry.
+    user = session.get(User, payload.sub)
+    if user is None:
+        raise ApiError(401, "invalid_token", "User no longer exists")
+    return TokenPayload(
+        sub=user.id,
+        email=user.email,
+        role=normalize_role(user.role),
+        org_id=user.org_id,
+        exp=payload.exp,
+    )
 
 
 async def require_admin(

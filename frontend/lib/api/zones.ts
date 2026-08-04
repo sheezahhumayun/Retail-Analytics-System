@@ -138,13 +138,14 @@ export async function updateZone(
   return mapZoneShape(updated);
 }
 
-export async function deleteZone(id: string): Promise<boolean> {
-  try {
-    await apiRequest<void>(`/api/zones/${id}`, { method: "DELETE" });
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * Throws on failure rather than swallowing errors — callers (`handleDeleteShape`,
+ * `syncCameraShapes`) must not remove the shape from local state unless this
+ * actually persisted, otherwise a failed DELETE looks like a successful one
+ * until the next reload/refetch brings the shape back.
+ */
+export async function deleteZone(id: string): Promise<void> {
+  await apiRequest<void>(`/api/zones/${id}`, { method: "DELETE" });
 }
 
 // Backwards compatibility for lines.ts during migration — no shared in-memory store.

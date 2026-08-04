@@ -24,7 +24,10 @@ router = APIRouter(prefix="/cameras", tags=["Cameras"])
     "/{camera_id}",
     response_model=CameraResponse,
     summary="Update camera",
-    description="Update camera configuration. Admin only. Same fields as POST /api/cameras.",
+    description=(
+        "Update camera configuration. Admin only. Same fields as POST /api/cameras, "
+        "plus `status` (`offline` | `disabled`) as the manual enable/disable switch."
+    ),
 )
 def update_camera(
     camera_id: str,
@@ -54,6 +57,15 @@ def update_camera(
         camera.resolution = body.resolution
     if body.fps is not None:
         camera.fps = body.fps
+    if body.analytics_modules is not None:
+        camera.analytics_modules = body.analytics_modules
+    if body.status is not None:
+        # Manual admin enable/disable is authoritative: it wins over whatever a
+        # concurrently in-flight health probe was about to write, because this
+        # write lands within its own transaction and probes re-check the live
+        # DB value (see camera_health.refresh_camera_status) before persisting
+        # their own result.
+        camera.status = body.status
 
     session.add(camera)
     session.flush()
@@ -102,10 +114,15 @@ def test_camera(
 
     result = probe_camera(camera)
     camera_status = None
-    if camera.source_type == "live" and camera.status != "disabled":
-        camera_status = apply_probe_to_camera(camera, result)
-        session.add(camera)
-        session.flush()
+    if camera.source_type == "live":
+        # Re-check the live row (see camera_health.refresh_camera_status) so a
+        # manual disable that landed while this probe's network I/O was in
+        # flight isn't clobbered by the probe result below.
+        session.refresh(camera)
+        if camera.status != "disabled":
+            camera_status = apply_probe_to_camera(camera, result)
+            session.add(camera)
+            session.flush()
 
     return CameraTestResponse(
         status=result.status,

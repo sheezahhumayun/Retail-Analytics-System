@@ -2,23 +2,19 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
-import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { HeatmapCanvas } from '@/components/heatmap/heatmap-canvas';
 import { HeatmapControls } from '@/components/heatmap/heatmap-controls';
 import { HeatmapLegend } from '@/components/heatmap/heatmap-legend';
-import { ZonePerformance } from '@/components/heatmap/zone-performance';
 import {
   getHeatmap,
   getHeatmapCameras,
-  getZonePerformance,
 } from '@/lib/api/analytics';
 import { ApiClientError } from '@/lib/api/client';
 import {
   filterHeatmapCameras,
-  resolveEffectiveCameraId,
 } from '@/lib/scope/scope-filters';
 import { useScope } from '@/lib/scope/ScopeContext';
-import type { FloorZone, HeatBlob, HeatmapCamera, ZoneRow } from '@/lib/types';
+import type { FloorZone, HeatBlob, HeatmapCamera } from '@/lib/types';
 
 /** UTC calendar date matching demo seed end (`compute_demo_date_range().end`). */
 function mostRecentSeedDate(): string {
@@ -26,12 +22,10 @@ function mostRecentSeedDate(): string {
 }
 
 export default function HeatmapPage() {
-  const { storeId, cameraId, zoneId, storeCameraIds } = useScope();
+  const { storeId, cameraId, storeCameraIds } = useScope();
   const defaultDate = mostRecentSeedDate();
 
   const [allCameras, setAllCameras] = useState<HeatmapCamera[]>([]);
-  const [zoneRows, setZoneRows] = useState<ZoneRow[]>([]);
-  const [pageCamera, setPageCamera] = useState('');
   const [date, setDate] = useState(defaultDate);
   const [timeFrom, setTimeFrom] = useState('09:00');
   const [timeTo, setTimeTo] = useState('18:00');
@@ -51,36 +45,18 @@ export default function HeatmapPage() {
     [scopedCameras],
   );
 
-  const effectiveCamera = useMemo(
-    () =>
-      resolveEffectiveCameraId(
-        cameraId,
-        pageCamera || null,
-        allowedCameraIds,
-      ),
-    [cameraId, pageCamera, allowedCameraIds],
-  );
-
   useEffect(() => {
     let cancelled = false;
 
     async function loadMeta() {
       try {
-        const [cameraList, performance] = await Promise.all([
-          getHeatmapCameras(),
-          getZonePerformance({
-            store_id: storeId ?? undefined,
-            zone_id: zoneId ?? undefined,
-          }),
-        ]);
+        const cameraList = await getHeatmapCameras();
         if (!cancelled) {
           setAllCameras(cameraList);
-          setZoneRows(performance);
         }
       } catch {
         if (!cancelled) {
           setAllCameras([]);
-          setZoneRows([]);
         }
       }
     }
@@ -89,10 +65,10 @@ export default function HeatmapPage() {
     return () => {
       cancelled = true;
     };
-  }, [storeId, zoneId]);
+  }, [storeId]);
 
   useEffect(() => {
-    if (!effectiveCamera) {
+    if (!cameraId) {
       setLoading(false);
       setBlobs([]);
       setFloorZones([]);
@@ -107,7 +83,7 @@ export default function HeatmapPage() {
       setEmptyMessage(null);
       try {
         const result = await getHeatmap({
-          camera_id: effectiveCamera,
+          camera_id: cameraId!,
           date,
           from_time: timeFrom,
           to_time: timeTo,
@@ -117,7 +93,7 @@ export default function HeatmapPage() {
           setFloorZones(result.floor_zones);
           setEmptyMessage(
             result.blobs.length === 0
-              ? `No heatmap density for camera '${effectiveCamera}' on ${date}.`
+              ? `No heatmap density for camera '${cameraId!}' on ${date}.`
               : null,
           );
         }
@@ -128,7 +104,7 @@ export default function HeatmapPage() {
           if (err instanceof ApiClientError && err.status === 404) {
             setEmptyMessage(
               err.message ||
-                `No heatmap data for camera '${effectiveCamera}' on ${date}.`,
+                `No heatmap data for camera '${cameraId!}' on ${date}.`,
             );
           } else {
             setEmptyMessage(
@@ -149,10 +125,10 @@ export default function HeatmapPage() {
     return () => {
       cancelled = true;
     };
-  }, [effectiveCamera, date, timeFrom, timeTo]);
+  }, [cameraId, date, timeFrom, timeTo]);
 
   return (
-    <DashboardShell>
+    <DashboardShell scopeBarConfig={{ showZone: false, showCameraAllOption: false }}>
       <div className="flex flex-col gap-5">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -166,12 +142,13 @@ export default function HeatmapPage() {
           </div>
         </div>
 
-        <ScopeContextBanner />
-
         <HeatmapControls
           cameras={scopedCameras}
-          selectedCamera={effectiveCamera}
-          onCameraChange={setPageCamera}
+          selectedCamera={cameraId || ''}
+          onCameraChange={(newCamera) => {
+            // Note: This is for HeatmapControls backward compatibility
+            // Camera selection is now handled via the top bar scope selector
+          }}
           date={date}
           onDateChange={setDate}
           timeFrom={timeFrom}
@@ -206,8 +183,6 @@ export default function HeatmapPage() {
         )}
 
         <HeatmapLegend />
-
-        <ZonePerformance rows={zoneRows} />
       </div>
     </DashboardShell>
   );

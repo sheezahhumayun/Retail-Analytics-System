@@ -76,9 +76,14 @@ export default function AdminCamerasPage() {
 
   const handleDeleteCamera = async (cameraId: string) => {
     if (confirm('Are you sure you want to delete this camera?')) {
-      const removed = await deleteCamera(cameraId);
-      if (removed) {
-        setCameras((prev) => prev.filter((c) => c.id !== cameraId));
+      // Soft-delete: the backend sets status="disabled" and keeps the row
+      // (historical analytics data is preserved). Reflect that real state
+      // in place instead of removing the row from local state — removing it
+      // here was cosmetic-only and the camera would reappear (as disabled)
+      // on the next fetch/reload since it was never actually gone.
+      const disabled = await deleteCamera(cameraId);
+      if (disabled) {
+        setCameras((prev) => prev.map((c) => (c.id === cameraId ? disabled : c)));
       }
     }
   };

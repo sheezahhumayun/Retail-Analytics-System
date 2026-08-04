@@ -25,7 +25,15 @@ import {
   getTraffic,
   getZones,
 } from "@/lib/api/analytics";
-import type { AnalyticsPageConfig, DataRow, StatSummary } from "@/lib/types";
+import type {
+  AnalyticsDataResult,
+  AnalyticsFetchOptions,
+  AnalyticsPageConfig,
+  ComparisonKey,
+  DataRow,
+  DateRangeKey,
+  StatSummary,
+} from "@/lib/types";
 
 type ScopedAnalyticsKind = "traffic" | "occupancy" | "zones" | "dwell" | "queues";
 
@@ -55,6 +63,14 @@ function statsForKind(kind: ScopedAnalyticsKind, rows: DataRow[]): StatSummary[]
   }
 }
 
+function wantsComparison(comparison?: ComparisonKey): boolean {
+  return comparison != null && comparison !== "none";
+}
+
+function resolveRange(range: DateRangeKey, options?: AnalyticsFetchOptions) {
+  return dateRangeForKey(range, options?.customFrom, options?.customTo);
+}
+
 function useScopedAnalyticsConfig(
   kind: ScopedAnalyticsKind,
   base: ScopedAnalyticsBase,
@@ -66,43 +82,64 @@ function useScopedAnalyticsConfig(
   );
 
   return useMemo(() => {
-    const getData: AnalyticsPageConfig["getData"] = async (range) => {
-      const { from, to } = dateRangeForKey(range);
+    const getData: AnalyticsPageConfig["getData"] = async (range, options) => {
+      const { from, to } = resolveRange(range, options);
+      const compare = wantsComparison(options?.comparison);
 
       switch (kind) {
         case "traffic": {
-          if (!storeId) return fetchTrafficData(range);
-          return getTraffic({ store_id: storeId, from, to });
+          if (!storeId) return fetchTrafficData(range, options);
+          return getTraffic({
+            store_id: storeId,
+            camera_id: cameraId ?? undefined,
+            zone_id: zoneId ?? undefined,
+            from,
+            to,
+            compare,
+          });
         }
         case "occupancy": {
-          if (!storeId && !cameraId) return fetchOccupancyData(range);
+          if (!storeId && !cameraId) return fetchOccupancyData(range, options);
           return getOccupancy({
             store_id: storeId ?? undefined,
             camera_id: cameraId ?? undefined,
+            from,
+            to,
+            compare,
           });
         }
         case "zones": {
-          if (!zoneId && !storeId) return fetchZonesData(range);
-          return getZones({
-            zone_id: resolvedZoneId,
+          if (!storeId) return fetchZonesData(range, options);
+          const result = await getZones({
+            store_id: storeId,
+            camera_id: cameraId ?? undefined,
+            zone_id: zoneId ?? undefined,
             from,
             to,
-          }).then((result) => result.rows);
+            compare,
+          });
+          return { rows: result.rows, comparison: result.comparison };
         }
         case "dwell": {
-          if (!zoneId && !storeId) return fetchDwellTimeData(range);
+          if (!storeId) return fetchDwellTimeData(range, options);
           return getDwell({
-            zone_id: resolvedZoneId,
+            store_id: storeId,
+            camera_id: cameraId ?? undefined,
+            zone_id: zoneId ?? undefined,
             from,
             to,
+            compare,
           });
         }
         case "queues": {
-          if (!zoneId && !storeId) return fetchQueuesData(range);
+          if (!storeId) return fetchQueuesData(range, options);
           return getQueues({
-            zone_id: resolvedZoneId,
+            store_id: storeId,
+            camera_id: cameraId ?? undefined,
+            zone_id: zoneId ?? undefined,
             from,
             to,
+            compare,
           });
         }
         default: {
@@ -179,4 +216,13 @@ export function useQueuesAnalyticsConfig(): AnalyticsPageConfig {
     currentSeriesLabel: "Current period",
     priorSeriesLabel: "Prior period",
   });
+}
+
+export function unwrapAnalyticsRows(
+  result: AnalyticsDataResult | DataRow[],
+): AnalyticsDataResult {
+  if (Array.isArray(result)) {
+    return { rows: result };
+  }
+  return result;
 }

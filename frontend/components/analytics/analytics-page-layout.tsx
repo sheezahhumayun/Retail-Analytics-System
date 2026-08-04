@@ -3,23 +3,38 @@
 import { useEffect, useState } from 'react';
 import type {
   AnalyticsPageConfig,
+  ComparisonInfo,
   ComparisonKey,
   DataRow,
   DateRangeKey,
   StatSummary,
 } from '@/lib/types';
+import { ApiClientError } from '@/lib/api/client';
+import { unwrapAnalyticsRows } from '@/lib/scope/use-scoped-analytics-config';
 import { DateRangePicker }   from './date-range-picker';
 import { ComparisonToggle }  from './comparison-toggle';
 import { AnalyticsChart } from './analytics-chart';
 import { StatCard }          from './stat-card';
 import { DataTable }         from './data-table';
-import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { useScope } from '@/lib/scope/ScopeContext';
 
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function AnalyticsPageLayout({ config }: { config: AnalyticsPageConfig }) {
+export interface AnalyticsPageLayoutState {
+  range: DateRangeKey;
+  comparison: ComparisonKey;
+  customFrom: string;
+  customTo: string;
+}
+
+export function AnalyticsPageLayout({
+  config,
+  onStateChange,
+}: {
+  config: AnalyticsPageConfig;
+  onStateChange?: (state: AnalyticsPageLayoutState) => void;
+}) {
   const [range,      setRange]      = useState<DateRangeKey>('day');
   const [comparison, setComparison] = useState<ComparisonKey>('none');
   const [customFrom, setCustomFrom] = useState('');
@@ -27,29 +42,49 @@ export function AnalyticsPageLayout({ config }: { config: AnalyticsPageConfig })
   const [data,       setData]       = useState<DataRow[]>([]);
   const [stats,      setStats]      = useState<StatSummary[]>([]);
   const [loading,    setLoading]    = useState(true);
+  const [moduleDisabled, setModuleDisabled] = useState(false);
+  const [moduleDisabledMessage, setModuleDisabledMessage] = useState('');
+  const [comparisonInfo, setComparisonInfo] = useState<ComparisonInfo | null>(null);
   const { storeId, cameraId, zoneId } = useScope();
   const scopeKey = `${storeId ?? ''}:${cameraId ?? ''}:${zoneId ?? ''}`;
 
   const intervalLabel = config.getIntervalLabel(range);
   const currentLabel = config.currentSeriesLabel ?? 'Current period';
   const priorLabel   = config.priorSeriesLabel   ?? 'Prior period';
+  const showComparison = comparison !== 'none';
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
       setLoading(true);
+      setModuleDisabled(false);
+      setModuleDisabledMessage('');
+      setComparisonInfo(null);
       try {
-        // Single data fetch — stats are derived client-side (no duplicate HTTP).
-        const rows = await config.getData(range);
+        const result = await config.getData(range, {
+          comparison,
+          customFrom,
+          customTo,
+        });
+        const { rows, comparison: comparisonMeta } = unwrapAnalyticsRows(result);
         if (!cancelled) {
           setData(rows);
           setStats(config.getStats(rows));
+          setComparisonInfo(showComparison ? comparisonMeta ?? null : null);
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
+          if (
+            err instanceof ApiClientError &&
+            err.code === 'analytics_module_disabled'
+          ) {
+            setModuleDisabled(true);
+            setModuleDisabledMessage(err.message);
+          }
           setData([]);
           setStats([]);
+          setComparisonInfo(null);
         }
       } finally {
         if (!cancelled) {
@@ -62,7 +97,29 @@ export function AnalyticsPageLayout({ config }: { config: AnalyticsPageConfig })
     return () => {
       cancelled = true;
     };
-  }, [config, range, scopeKey]);
+  }, [config, range, comparison, customFrom, customTo, scopeKey, showComparison]);
+
+  // Notify parent component of state changes
+  useEffect(() => {
+    onStateChange?.({
+      range,
+      comparison,
+      customFrom,
+      customTo,
+    });
+  }, [range, comparison, customFrom, customTo, onStateChange]);
+
+  const comparisonBlocked =
+    showComparison &&
+    comparisonInfo != null &&
+    comparisonInfo.status === "insufficient_history";
+
+  const moduleDisabledFromComparison =
+    showComparison &&
+    comparisonInfo != null &&
+    comparisonInfo.status === "module_disabled";
+
+  const showModuleDisabled = moduleDisabled || moduleDisabledFromComparison;
 
   return (
     <div className="flex flex-col gap-6">
@@ -75,7 +132,30 @@ export function AnalyticsPageLayout({ config }: { config: AnalyticsPageConfig })
         )}
       </div>
 
-      <ScopeContextBanner />
+      {showModuleDisabled && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-200">
+          <p className="font-medium">Module not enabled for this camera</p>
+          <p className="mt-1 text-muted-foreground">
+            {moduleDisabledMessage ||
+              comparisonInfo?.message ||
+              "Analytics for this module is not enabled for the selected camera."}
+          </p>
+        </div>
+      )}
+
+      {comparisonBlocked && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-200">
+          <p className="font-medium">
+            {comparisonInfo.status === 'insufficient_history'
+              ? 'Insufficient history for comparison'
+              : 'Comparison unavailable'}
+          </p>
+          <p className="mt-1 text-muted-foreground">
+            {comparisonInfo.message ??
+              'Prior-period comparison is not available for this scope.'}
+          </p>
+        </div>
+      )}
 
       {/* Controls row */}
       <div className="flex flex-wrap items-center gap-4 rounded-lg border border-border bg-card px-4 py-3">
@@ -97,7 +177,7 @@ export function AnalyticsPageLayout({ config }: { config: AnalyticsPageConfig })
           <h2 className="text-sm font-semibold text-foreground">
             {config.title}
           </h2>
-          {comparison !== 'none' && (
+          {showComparison && !comparisonBlocked && (
             <div className="flex items-center gap-3 text-xs text-muted-foreground">
               <span className="flex items-center gap-1.5">
                 <span
@@ -125,12 +205,16 @@ export function AnalyticsPageLayout({ config }: { config: AnalyticsPageConfig })
               <p className="text-sm text-muted-foreground">Loading chart data…</p>
             </div>
           </div>
+        ) : showModuleDisabled ? (
+          <div className="flex h-[300px] items-center justify-center text-sm text-muted-foreground">
+            Analytics for this module is not enabled for the selected camera.
+          </div>
         ) : (
           <AnalyticsChart
             data={data}
             chartType={config.chartType}
             metricLabel={config.metricLabel}
-            comparison={comparison}
+            comparison={comparisonBlocked ? 'none' : comparison}
             currentLabel={currentLabel}
             priorLabel={priorLabel}
             unit={config.unit}
@@ -168,7 +252,7 @@ export function AnalyticsPageLayout({ config }: { config: AnalyticsPageConfig })
             data={data}
             intervalLabel={intervalLabel}
             metricLabel={config.metricLabel}
-            comparison={comparison}
+            comparison={comparisonBlocked ? 'none' : comparison}
             priorLabel={priorLabel}
           />
         )}

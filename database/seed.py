@@ -8,6 +8,8 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
+from analytics.modules import infer_default_modules
+
 from .models import (
     Camera,
     CountingLine,
@@ -158,6 +160,25 @@ def _seed_cameras_and_zones(session: Session) -> None:
                     analytics_enabled=z.get("analytics_enabled", True),
                 )
             )
+
+    for camera in session.exec(select(Camera)).all():
+        has_line = session.exec(
+            select(CountingLine).where(CountingLine.camera_id == camera.id)
+        ).first() is not None
+        zone_types = [
+            z.zone_type
+            for z in session.exec(
+                select(Zone).where(
+                    Zone.camera_id == camera.id,
+                    Zone.analytics_enabled == True,  # noqa: E712
+                )
+            ).all()
+        ]
+        camera.analytics_modules = infer_default_modules(
+            has_counting_line=has_line,
+            zone_types=zone_types,
+        )
+        session.add(camera)
 
 
 def _map_zone_shape_type(zone_type: str) -> str:

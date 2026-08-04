@@ -1,18 +1,20 @@
-import { apiRequest } from "@/lib/api/client";
+import { apiRequest, ApiClientError } from "@/lib/api/client";
 import {
   densityToHeatBlobs,
   dwellStatsFromSessions,
   FLOOR_ZONES,
+  mapComparisonInfo,
   mapDwellSessions,
   mapOccupancyTrend,
   mapQueueSamples,
   mapTrafficBuckets,
   mapZoneBuckets,
   occupancyStatsFromRows,
-  priorDateRange,
+  pctTrend,
   queueStatsFromRows,
   trafficStatsFromRows,
   zoneRowFromAnalytics,
+  zoneRowNotTracked,
   zoneStatsFromRows,
   type BackendCamera,
   type BackendDwellResponse,
@@ -26,6 +28,10 @@ import { getDefaultStoreId, getDefaultZoneId, getOrganization } from "@/lib/api/
 import { getIntervalLabel } from "@/lib/analytics-data";
 import { dateRangeForKey } from "@/lib/scope/date-range";
 import type {
+  AnalyticsDataResult,
+  AnalyticsFetchOptions,
+  ComparisonInfo,
+  ComparisonKey,
   DataRow,
   DateRangeKey,
   FloorZone,
@@ -36,8 +42,23 @@ import type {
 } from "@/lib/types";
 
 export type OverviewKpiData = {
-  visitorsToday: { value: number; label: string; trend: number; icon: string };
-  occupancy: { value: number; unit: string; label: string; trend: number; icon: string };
+  visitorsToday: {
+    value: number;
+    label: string;
+    trend?: number;
+    trendUnavailable?: string;
+    icon: string;
+    subtext?: string;
+  };
+  occupancy: {
+    value: number;
+    unit: string;
+    label: string;
+    trend?: number;
+    trendUnavailable?: string;
+    icon: string;
+    subtext?: string;
+  };
   peakOccupancy: {
     value: number;
     unit: string;
@@ -45,8 +66,23 @@ export type OverviewKpiData = {
     subtext: string;
     icon: string;
   };
-  dwellTime: { value: number; unit: string; label: string; trend: number; icon: string };
-  queueLength: { value: number; label: string; trend: number; icon: string };
+  dwellTime: {
+    value: number;
+    unit: string;
+    label: string;
+    trend?: number;
+    trendUnavailable?: string;
+    icon: string;
+    subtext?: string;
+  };
+  queueLength: {
+    value: number;
+    label: string;
+    trend?: number;
+    trendUnavailable?: string;
+    icon: string;
+    subtext?: string;
+  };
   activeCameras: { value: number; total: number; label: string; icon: string };
 };
 export type VisitorsByHourRow = { hour: string; visitors: number };
@@ -66,6 +102,8 @@ export interface DateRangeParams {
 
 export interface TrafficParams extends DateRangeParams {
   store_id: string;
+  camera_id?: string;
+  zone_id?: string;
 }
 
 export interface OccupancyParams {
@@ -74,11 +112,15 @@ export interface OccupancyParams {
 }
 
 export interface ZonesParams extends DateRangeParams {
-  zone_id: string;
+  store_id: string;
+  camera_id?: string;
+  zone_id?: string;
 }
 
 export interface DwellParams extends DateRangeParams {
-  zone_id: string;
+  store_id: string;
+  camera_id?: string;
+  zone_id?: string;
 }
 
 export interface HeatmapParams {
@@ -89,7 +131,9 @@ export interface HeatmapParams {
 }
 
 export interface QueuesParams extends DateRangeParams {
-  zone_id: string;
+  store_id: string;
+  camera_id?: string;
+  zone_id?: string;
 }
 
 export interface HeatmapResult {
@@ -127,83 +171,230 @@ async function findZoneName(zone_id: string): Promise<string> {
   return zone_id;
 }
 
+export interface ZonesResult {
+  zone_id: string;
+  from: string;
+  to: string;
+  rows: DataRow[];
+  performance: ZoneRow | undefined;
+  comparison?: AnalyticsDataResult["comparison"];
+}
+
+function wantsComparison(comparison?: ComparisonKey): boolean {
+  return comparison != null && comparison !== "none";
+}
+
+function rejectComparisonModuleDisabled(
+  comparison: ComparisonInfo | null | undefined,
+): void {
+  if (comparison?.status === "module_disabled") {
+    throw new ApiClientError(
+      comparison.message ?? "Analytics module is not enabled for this scope",
+      "analytics_module_disabled",
+      403,
+    );
+  }
+}
+
+function resolveRange(
+  range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
+): { from: string; to: string } {
+  return dateRangeForKey(range, options?.customFrom, options?.customTo);
+}
+
 async function fetchTrafficResponse(
   store_id: string,
   from: string,
   to: string,
+  compare = false,
 ): Promise<BackendTrafficResponse> {
-  return apiRequest<BackendTrafficResponse>("/api/analytics/traffic", {
-    query: { store_id, from, to },
-  });
+  const query: Record<string, string> = { store_id, from, to };
+  if (compare) query.compare = "true";
+  return apiRequest<BackendTrafficResponse>("/api/analytics/traffic", { query });
 }
 
-export async function getTraffic({
-  store_id,
-  from,
-  to,
-}: TrafficParams): Promise<DataRow[]> {
-  const prior = priorDateRange(from, to);
-  const [current, previous] = await Promise.all([
-    fetchTrafficResponse(store_id, from, to),
-    fetchTrafficResponse(store_id, prior.from, prior.to).catch(() => null),
-  ]);
-  return mapTrafficBuckets(current.buckets, previous?.buckets ?? []);
+function trafficResult(
+  response: BackendTrafficResponse,
+  compare: boolean,
+): AnalyticsDataResult {
+  const comparison = compare ? mapComparisonInfo(response.comparison) : null;
+  rejectComparisonModuleDisabled(comparison);
+  const priorBuckets =
+    compare && comparison?.status === "ok"
+      ? (response.prior_buckets ?? [])
+      : [];
+  return {
+    rows: mapTrafficBuckets(response.buckets, priorBuckets),
+    comparison,
+  };
 }
 
-export async function getOccupancy({
-  camera_id,
-  store_id,
-}: OccupancyParams = {}): Promise<DataRow[]> {
+export async function getTraffic(
+  params: TrafficParams & { compare?: boolean },
+): Promise<AnalyticsDataResult> {
+  const query: Record<string, string> = {
+    store_id: params.store_id,
+    from: params.from,
+    to: params.to,
+  };
+  if (params.camera_id) query.camera_id = params.camera_id;
+  if (params.zone_id) query.zone_id = params.zone_id;
+  if (params.compare) query.compare = "true";
+
+  const response = await apiRequest<BackendTrafficResponse>(
+    "/api/analytics/traffic",
+    { query },
+  );
+  const comparison = params.compare ? mapComparisonInfo(response.comparison) : null;
+  rejectComparisonModuleDisabled(comparison);
+  const priorBuckets =
+    params.compare && comparison?.status === "ok"
+      ? (response.prior_buckets ?? [])
+      : [];
+  return {
+    rows: mapTrafficBuckets(response.buckets, priorBuckets),
+    comparison,
+  };
+}
+
+export async function getOccupancy(
+  params: OccupancyParams & {
+    from?: string;
+    to?: string;
+    compare?: boolean;
+  } = {},
+): Promise<AnalyticsDataResult> {
   const query: Record<string, string> = {};
-  if (camera_id) query.camera_id = camera_id;
-  else if (store_id) query.store_id = store_id;
+  if (params.camera_id) query.camera_id = params.camera_id;
+  else if (params.store_id) query.store_id = params.store_id;
   else {
     query.store_id = await getDefaultStoreId();
   }
+  if (params.from && params.to) {
+    query.from = params.from;
+    query.to = params.to;
+  }
+  if (params.compare) query.compare = "true";
 
   const response = await apiRequest<BackendOccupancyResponse>(
     "/api/analytics/occupancy",
     { query },
   );
-  return mapOccupancyTrend(response.trend);
-}
-
-export async function getZones({
-  zone_id,
-  from,
-  to,
-}: ZonesParams): Promise<ZonesResult> {
-  const prior = priorDateRange(from, to);
-  const [current, previous] = await Promise.all([
-    apiRequest<BackendZoneAnalyticsResponse>("/api/analytics/zones", {
-      query: { zone_id, from, to },
-    }),
-    apiRequest<BackendZoneAnalyticsResponse>("/api/analytics/zones", {
-      query: { zone_id, from: prior.from, to: prior.to },
-    }).catch(() => null),
-  ]);
-
-  const rows = mapZoneBuckets(current.buckets, previous?.buckets ?? []);
-  const zoneName = await findZoneName(zone_id);
-
+  const comparison = params.compare ? mapComparisonInfo(response.comparison) : null;
+  rejectComparisonModuleDisabled(comparison);
+  const priorTrend =
+    params.compare && comparison?.status === "ok"
+      ? (response.prior_trend ?? [])
+      : [];
   return {
-    zone_id,
-    from,
-    to,
-    rows,
-    performance: zoneRowFromAnalytics(zone_id, zoneName, current.buckets),
+    rows: mapOccupancyTrend(response.trend, priorTrend),
+    comparison,
   };
 }
 
-export async function getDwell({
-  zone_id,
-  from,
-  to,
-}: DwellParams): Promise<DataRow[]> {
+export async function getZones(
+  params: ZonesParams & { compare?: boolean },
+): Promise<ZonesResult> {
+  const query: Record<string, string> = {
+    store_id: params.store_id,
+    from: params.from,
+    to: params.to,
+  };
+  if (params.camera_id) query.camera_id = params.camera_id;
+  if (params.zone_id) query.zone_id = params.zone_id;
+  if (params.compare) query.compare = "true";
+
+  const current = await apiRequest<BackendZoneAnalyticsResponse>(
+    "/api/analytics/zones",
+    { query },
+  );
+
+  const comparison = params.compare ? mapComparisonInfo(current.comparison) : null;
+  rejectComparisonModuleDisabled(comparison);
+  const priorBuckets =
+    params.compare && comparison?.status === "ok"
+      ? (current.prior_buckets ?? [])
+      : [];
+  const rows = mapZoneBuckets(current.buckets, priorBuckets);
+  const zoneName = params.zone_id ? await findZoneName(params.zone_id) : "All Zones";
+
+  return {
+    zone_id: params.zone_id || "all",
+    from: params.from,
+    to: params.to,
+    rows,
+    performance: params.zone_id 
+      ? zoneRowFromAnalytics(
+          params.zone_id,
+          zoneName,
+          current.buckets,
+          priorBuckets,
+        )
+      : undefined,
+    comparison,
+  };
+}
+
+export async function getDwell(
+  params: DwellParams & { compare?: boolean },
+): Promise<AnalyticsDataResult> {
+  const query: Record<string, string> = {
+    store_id: params.store_id,
+    from: params.from,
+    to: params.to,
+  };
+  if (params.camera_id) query.camera_id = params.camera_id;
+  if (params.zone_id) query.zone_id = params.zone_id;
+  if (params.compare) query.compare = "true";
+
   const response = await apiRequest<BackendDwellResponse>("/api/analytics/dwell", {
-    query: { zone_id, from, to },
+    query,
   });
-  return mapDwellSessions(response.sessions);
+  const comparison = params.compare ? mapComparisonInfo(response.comparison) : null;
+  rejectComparisonModuleDisabled(comparison);
+  const priorSessions =
+    params.compare && comparison?.status === "ok"
+      ? (response.prior_sessions ?? [])
+      : [];
+  return {
+    rows: mapDwellSessions(response.sessions, priorSessions),
+    comparison,
+  };
+}
+
+export async function getDwellAverageSeconds(
+  params: DwellParams,
+): Promise<number | null> {
+  const query: Record<string, string> = {
+    store_id: params.store_id,
+    from: params.from,
+    to: params.to,
+  };
+  if (params.camera_id) query.camera_id = params.camera_id;
+  if (params.zone_id) query.zone_id = params.zone_id;
+
+  const response = await apiRequest<BackendDwellResponse>("/api/analytics/dwell", {
+    query,
+  });
+  return response.avg_dwell_seconds ?? null;
+}
+
+export async function getQueueZoneDwellAverageSeconds(
+  params: DwellParams,
+): Promise<number | null> {
+  const query: Record<string, string> = {
+    store_id: params.store_id,
+    from: params.from,
+    to: params.to,
+  };
+  if (params.camera_id) query.camera_id = params.camera_id;
+  if (params.zone_id) query.zone_id = params.zone_id;
+
+  const response = await apiRequest<BackendDwellResponse>("/api/analytics/dwell-queues", {
+    query,
+  });
+  return response.avg_dwell_seconds ?? null;
 }
 
 export async function getHeatmap({
@@ -234,21 +425,56 @@ export async function getHeatmap({
   };
 }
 
-export async function getQueues({
-  zone_id,
-  from,
-  to,
-}: QueuesParams): Promise<DataRow[]> {
-  const prior = priorDateRange(from, to);
-  const [current, previous] = await Promise.all([
-    apiRequest<BackendQueueResponse>("/api/analytics/queues", {
-      query: { zone_id, from, to },
-    }),
-    apiRequest<BackendQueueResponse>("/api/analytics/queues", {
-      query: { zone_id, from: prior.from, to: prior.to },
-    }).catch(() => null),
-  ]);
-  return mapQueueSamples(current.samples, previous?.samples ?? []);
+export async function getQueues(
+  params: QueuesParams & { compare?: boolean },
+): Promise<AnalyticsDataResult> {
+  const query: Record<string, string> = {
+    store_id: params.store_id,
+    from: params.from,
+    to: params.to,
+  };
+  if (params.camera_id) query.camera_id = params.camera_id;
+  if (params.zone_id) query.zone_id = params.zone_id;
+  if (params.compare) query.compare = "true";
+
+  const current = await apiRequest<BackendQueueResponse>("/api/analytics/queues", {
+    query,
+  });
+  const comparison = params.compare ? mapComparisonInfo(current.comparison) : null;
+  rejectComparisonModuleDisabled(comparison);
+  const priorSamples =
+    params.compare && comparison?.status === "ok"
+      ? (current.prior_samples ?? [])
+      : [];
+  return {
+    rows: mapQueueSamples(current.samples, priorSamples),
+    comparison,
+  };
+}
+
+function cameraHasModule(camera: BackendCamera, module: string): boolean {
+  return camera.analytics_modules?.includes(module) ?? false;
+}
+
+function coverageSubtext(eligible: number, total: number, label: string): string | undefined {
+  if (total === 0 || eligible >= total) return undefined;
+  return `${label} tracked at ${eligible} of ${total} cameras`;
+}
+
+async function findCameraIdForZone(zoneId: string): Promise<string | null> {
+  try {
+    const org = await getOrganization();
+    for (const store of org.stores) {
+      for (const camera of store.cameras) {
+        for (const zone of camera.zones) {
+          if (zone.id === zoneId) return camera.id;
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export async function getOverviewKpis(
@@ -258,34 +484,74 @@ export async function getOverviewKpis(
   const today = new Date().toISOString().slice(0, 10);
   const zone_id = params.zone_id ?? (await getDefaultZoneId());
 
-  const occupancyQuery: Record<string, string> = { store_id };
-  if (params.camera_id) {
-    delete occupancyQuery.store_id;
-    occupancyQuery.camera_id = params.camera_id;
+  const cameras = await apiRequest<BackendCamera[]>("/api/cameras", {
+    query: { store_id },
+  }).catch(() => []);
+
+  const scopedCameras = params.camera_id
+    ? cameras.filter((camera) => camera.id === params.camera_id)
+    : cameras;
+
+  const entryExitCameras = scopedCameras.filter((camera) =>
+    cameraHasModule(camera, "entry_exit"),
+  );
+  const occupancyCameras = scopedCameras.filter((camera) =>
+    cameraHasModule(camera, "occupancy"),
+  );
+  const dwellCameras = scopedCameras.filter((camera) =>
+    cameraHasModule(camera, "dwell"),
+  );
+  const queueCameras = scopedCameras.filter((camera) =>
+    cameraHasModule(camera, "queues"),
+  );
+
+  const zoneCameraId = await findCameraIdForZone(zone_id);
+
+  let traffic: BackendTrafficResponse | null = null;
+  if (entryExitCameras.length > 0) {
+    traffic = await fetchTrafficResponse(store_id, today, today, true).catch(() => null);
   }
 
-  const [traffic, occupancy, cameras, dwell, queues] = await Promise.all([
-    fetchTrafficResponse(store_id, today, today).catch(() => null),
-    apiRequest<BackendOccupancyResponse>("/api/analytics/occupancy", {
-      query: occupancyQuery,
-    }).catch(() => null),
-    apiRequest<BackendCamera[]>("/api/cameras", {
-      query: { store_id },
-    }).catch(() => []),
-    apiRequest<BackendDwellResponse>("/api/analytics/dwell", {
-      query: { zone_id, from: today, to: today },
-    }).catch(() => null),
-    apiRequest<BackendQueueResponse>("/api/analytics/queues", {
-      query: { zone_id, from: today, to: today },
-    }).catch(() => null),
-  ]);
+  let occupancy: BackendOccupancyResponse | null = null;
+  if (params.camera_id && occupancyCameras.length > 0) {
+    occupancy = await apiRequest<BackendOccupancyResponse>("/api/analytics/occupancy", {
+      query: { camera_id: params.camera_id, from: today, to: today, compare: "true" },
+    }).catch(() => null);
+  } else if (!params.camera_id && occupancyCameras.length > 0) {
+    occupancy = await apiRequest<BackendOccupancyResponse>("/api/analytics/occupancy", {
+      query: { store_id, from: today, to: today, compare: "true" },
+    }).catch(() => null);
+  }
+
+  let dwell: BackendDwellResponse | null = null;
+  if (zoneCameraId && dwellCameras.some((camera) => camera.id === zoneCameraId)) {
+    dwell = await apiRequest<BackendDwellResponse>("/api/analytics/dwell", {
+      query: { store_id, zone_id, from: today, to: today, compare: "true" },
+    }).catch(() => null);
+  }
+
+  let queues: BackendQueueResponse | null = null;
+  if (zoneCameraId && queueCameras.some((camera) => camera.id === zoneCameraId)) {
+    queues = await apiRequest<BackendQueueResponse>("/api/analytics/queues", {
+      query: { store_id, zone_id, from: today, to: today, compare: "true" },
+    }).catch(() => null);
+  }
 
   const visitorsToday = traffic?.total_entries ?? 0;
+  const visitorsTrend =
+    traffic?.comparison?.status === "ok"
+      ? pctTrend(visitorsToday, traffic.prior_total_entries ?? null)
+      : undefined;
+  const visitorsTrendUnavailable =
+    traffic?.comparison && traffic.comparison.status !== "ok"
+      ? traffic.comparison.message ?? "Comparison unavailable"
+      : undefined;
   const currentOcc = occupancy?.current ?? 0;
-  const peakOcc = occupancy?.trend.reduce(
-    (max, point) => Math.max(max, point.current_occupancy),
-    0,
-  ) ?? currentOcc;
+  const peakOcc =
+    occupancy?.trend.reduce(
+      (max, point) => Math.max(max, point.current_occupancy),
+      0,
+    ) ?? currentOcc;
   const peakPoint =
     occupancy?.trend && occupancy.trend.length > 0
       ? occupancy.trend.reduce(
@@ -299,21 +565,53 @@ export async function getOverviewKpis(
     ? Math.round(dwell.avg_dwell_seconds / 60)
     : 0;
   const latestQueueSample = queues?.samples?.[queues.samples.length - 1];
-  const queueLength = latestQueueSample?.queue_length ?? queues?.avg_queue_length ?? 0;
+  const queueLength =
+    latestQueueSample?.queue_length ?? queues?.avg_queue_length ?? 0;
+
+  const occupancyTrend =
+    occupancy?.comparison?.status === "ok"
+      ? pctTrend(currentOcc, occupancy.prior_current ?? null)
+      : undefined;
+  const occupancyTrendUnavailable =
+    occupancy?.comparison && occupancy.comparison.status !== "ok"
+      ? occupancy.comparison.message ?? "Comparison unavailable"
+      : undefined;
+
+  const dwellTrend =
+    dwell?.comparison?.status === "ok"
+      ? pctTrend(avgDwellMinutes * 60, dwell.prior_avg_dwell_seconds ?? null)
+      : undefined;
+  const dwellTrendUnavailable =
+    dwell?.comparison && dwell.comparison.status !== "ok"
+      ? dwell.comparison.message ?? "Comparison unavailable"
+      : undefined;
+
+  const queueTrend =
+    queues?.comparison?.status === "ok"
+      ? pctTrend(queueLength, queues.prior_avg_queue_length ?? null)
+      : undefined;
+  const queueTrendUnavailable =
+    queues?.comparison && queues.comparison.status !== "ok"
+      ? queues.comparison.message ?? "Comparison unavailable"
+      : undefined;
 
   return {
     visitorsToday: {
       value: visitorsToday,
       label: "Visitors Today",
-      trend: 0,
+      trend: visitorsTrend,
+      trendUnavailable: visitorsTrendUnavailable,
       icon: "users",
+      subtext: coverageSubtext(entryExitCameras.length, scopedCameras.length, "Traffic"),
     },
     occupancy: {
       value: currentOcc,
       unit: "",
       label: "Current Occupancy",
-      trend: 0,
+      trend: occupancyTrend,
+      trendUnavailable: occupancyTrendUnavailable,
       icon: "activity",
+      subtext: coverageSubtext(occupancyCameras.length, scopedCameras.length, "Occupancy"),
     },
     peakOccupancy: {
       value: peakOcc,
@@ -326,14 +624,24 @@ export async function getOverviewKpis(
       value: avgDwellMinutes,
       unit: "min",
       label: "Average Dwell Time",
-      trend: 0,
+      trend: dwellTrend,
+      trendUnavailable: dwellTrendUnavailable,
       icon: "clock",
+      subtext:
+        zoneCameraId && !dwellCameras.some((camera) => camera.id === zoneCameraId)
+          ? "Dwell not enabled for selected zone camera"
+          : coverageSubtext(dwellCameras.length, scopedCameras.length, "Dwell"),
     },
     queueLength: {
       value: Math.round(queueLength),
       label: "Current Queue Length",
-      trend: 0,
+      trend: queueTrend,
+      trendUnavailable: queueTrendUnavailable,
       icon: "list",
+      subtext:
+        zoneCameraId && !queueCameras.some((camera) => camera.id === zoneCameraId)
+          ? "Queues not enabled for selected zone camera"
+          : coverageSubtext(queueCameras.length, scopedCameras.length, "Queues"),
     },
     activeCameras: {
       value: activeCameras,
@@ -397,67 +705,126 @@ export async function getOccupancyTrend(
   }));
 }
 
-export async function fetchTrafficData(range: DateRangeKey): Promise<DataRow[]> {
-  const { from, to } = dateRangeForKey(range);
+export async function fetchTrafficData(
+  range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
+): Promise<AnalyticsDataResult> {
+  const { from, to } = resolveRange(range, options);
   const store_id = await getDefaultStoreId();
-  return getTraffic({ store_id, from, to });
+  return getTraffic({
+    store_id,
+    from,
+    to,
+    compare: wantsComparison(options?.comparison),
+  });
 }
 
-export async function fetchTrafficStats(range: DateRangeKey): Promise<StatSummary[]> {
-  const rows = await fetchTrafficData(range);
-  return trafficStatsFromRows(rows);
+export async function fetchTrafficStats(
+  range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
+): Promise<StatSummary[]> {
+  const result = await fetchTrafficData(range, options);
+  return trafficStatsFromRows(result.rows);
 }
 
-export async function fetchOccupancyData(range: DateRangeKey): Promise<DataRow[]> {
+export async function fetchOccupancyData(
+  range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
+): Promise<AnalyticsDataResult> {
+  const { from, to } = resolveRange(range, options);
   const store_id = await getDefaultStoreId();
-  return getOccupancy({ store_id });
+  return getOccupancy({
+    store_id,
+    from,
+    to,
+    compare: wantsComparison(options?.comparison),
+  });
 }
 
 export async function fetchOccupancyStats(
   range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
 ): Promise<StatSummary[]> {
-  const rows = await fetchOccupancyData(range);
-  return occupancyStatsFromRows(rows);
+  const result = await fetchOccupancyData(range, options);
+  return occupancyStatsFromRows(result.rows);
 }
 
-export async function fetchZonesData(range: DateRangeKey): Promise<DataRow[]> {
-  const { from, to } = dateRangeForKey(range);
+export async function fetchZonesData(
+  range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
+): Promise<AnalyticsDataResult> {
+  const { from, to } = resolveRange(range, options);
+  const store_id = await getDefaultStoreId();
   const zone_id = await getDefaultZoneId();
-  const result = await getZones({ zone_id, from, to });
-  return result.rows;
+  const result = await getZones({
+    store_id,
+    zone_id,
+    from,
+    to,
+    compare: wantsComparison(options?.comparison),
+  });
+  return { rows: result.rows, comparison: result.comparison };
 }
 
-export async function fetchZonesStats(range: DateRangeKey): Promise<StatSummary[]> {
-  const rows = await fetchZonesData(range);
-  return zoneStatsFromRows(rows);
+export async function fetchZonesStats(
+  range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
+): Promise<StatSummary[]> {
+  const result = await fetchZonesData(range, options);
+  return zoneStatsFromRows(result.rows);
 }
 
-export async function fetchDwellTimeData(range: DateRangeKey): Promise<DataRow[]> {
-  const { from, to } = dateRangeForKey(range);
+export async function fetchDwellTimeData(
+  range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
+): Promise<AnalyticsDataResult> {
+  const { from, to } = resolveRange(range, options);
+  const store_id = await (await import("@/lib/api/stores")).getDefaultStoreId();
   const zone_id = await getDefaultZoneId();
-  return getDwell({ zone_id, from, to });
+  return getDwell({
+    store_id,
+    zone_id,
+    from,
+    to,
+    compare: wantsComparison(options?.comparison),
+  });
 }
 
 export async function fetchDwellTimeStats(
   range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
 ): Promise<StatSummary[]> {
-  const { from, to } = dateRangeForKey(range);
+  const { from, to } = resolveRange(range, options);
+  const store_id = await (await import("@/lib/api/stores")).getDefaultStoreId();
   const zone_id = await getDefaultZoneId();
   const response = await apiRequest<BackendDwellResponse>("/api/analytics/dwell", {
-    query: { zone_id, from, to },
+    query: { store_id, zone_id, from, to },
   });
   return dwellStatsFromSessions(response.sessions, response.avg_dwell_seconds);
 }
 
-export async function fetchQueuesData(range: DateRangeKey): Promise<DataRow[]> {
-  const { from, to } = dateRangeForKey(range);
+export async function fetchQueuesData(
+  range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
+): Promise<AnalyticsDataResult> {
+  const { from, to } = resolveRange(range, options);
+  const store_id = await (await import("@/lib/api/stores")).getDefaultStoreId();
   const zone_id = await getDefaultZoneId();
-  return getQueues({ zone_id, from, to });
+  return getQueues({
+    store_id,
+    zone_id,
+    from,
+    to,
+    compare: wantsComparison(options?.comparison),
+  });
 }
 
-export async function fetchQueuesStats(range: DateRangeKey): Promise<StatSummary[]> {
-  const rows = await fetchQueuesData(range);
-  return queueStatsFromRows(rows);
+export async function fetchQueuesStats(
+  range: DateRangeKey,
+  options?: AnalyticsFetchOptions,
+): Promise<StatSummary[]> {
+  const result = await fetchQueuesData(range, options);
+  return queueStatsFromRows(result.rows);
 }
 
 export function fetchIntervalLabel(range: DateRangeKey): string {
@@ -477,8 +844,12 @@ export async function getZonePerformance(
   params: { store_id?: string; zone_id?: string } = {},
 ): Promise<ZoneRow[]> {
   const { from, to } = dateRangeForKey("week");
+  const store_id = params.store_id ?? (await getDefaultStoreId());
 
-  const zoneShapes: Array<{ id: string; name: string }> = [];
+  const cameras = await apiRequest<BackendCamera[]>("/api/cameras").catch(() => []);
+  const cameraById = new Map(cameras.map((camera) => [camera.id, camera]));
+
+  const zoneShapes: Array<{ id: string; name: string; cameraId: string }> = [];
   try {
     const org = await getOrganization();
     for (const store of org.stores) {
@@ -490,7 +861,11 @@ export async function getZonePerformance(
           if (params.zone_id && zone.id !== params.zone_id) {
             continue;
           }
-          zoneShapes.push({ id: zone.id, name: zone.name });
+          // Exclude queue-type zones (frontend ZoneShape.type already mapped to "checkout_queue")
+          if (zone.type === "checkout_queue") {
+            continue;
+          }
+          zoneShapes.push({ id: zone.id, name: zone.name, cameraId: camera.id });
         }
       }
     }
@@ -498,24 +873,53 @@ export async function getZonePerformance(
     return [];
   }
 
-  const uniqueZones = new Map<string, { id: string; name: string }>();
+  const uniqueZones = new Map<string, { id: string; name: string; cameraId: string }>();
   for (const shape of zoneShapes) {
     uniqueZones.set(shape.id, shape);
   }
 
-  // Backend has no store-level zone analytics aggregate yet (PROJECT_STATUS gap).
-  // Fetch sequentially instead of Promise.all so we never open N concurrent
-  // DB sessions from one page load.
   const rows: ZoneRow[] = [];
   for (const shape of uniqueZones.values()) {
+    const camera = cameraById.get(shape.cameraId);
+    if (!camera || !cameraHasModule(camera, "zones")) {
+      rows.push(
+        zoneRowNotTracked(
+          shape.id,
+          shape.name,
+          "Zone analytics not enabled for this camera",
+        ),
+      );
+      continue;
+    }
+
     try {
       const analytics = await apiRequest<BackendZoneAnalyticsResponse>(
         "/api/analytics/zones",
-        { query: { zone_id: shape.id, from, to } },
+        { query: { store_id, zone_id: shape.id, from, to, compare: "true" } },
       );
-      rows.push(zoneRowFromAnalytics(shape.id, shape.name, analytics.buckets));
-    } catch {
-      rows.push(zoneRowFromAnalytics(shape.id, shape.name, []));
+      const priorBuckets =
+        analytics.comparison?.status === "ok" ? (analytics.prior_buckets ?? []) : [];
+      const row = zoneRowFromAnalytics(
+        shape.id,
+        shape.name,
+        analytics.buckets,
+        priorBuckets,
+      );
+      if (camera && !cameraHasModule(camera, "dwell")) {
+        row.dwellSec = 0;
+        row.trackingNote = "Dwell not enabled for this camera";
+      }
+      rows.push(row);
+    } catch (err) {
+      if (err instanceof ApiClientError && err.code === "analytics_module_disabled") {
+        rows.push(
+          zoneRowNotTracked(shape.id, shape.name, err.message),
+        );
+      } else {
+        rows.push(
+          zoneRowNotTracked(shape.id, shape.name, "Unable to load zone analytics"),
+        );
+      }
     }
   }
 

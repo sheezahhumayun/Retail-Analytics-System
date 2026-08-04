@@ -76,13 +76,9 @@ export async function updateCountingLine(
   }
 }
 
-export async function deleteCountingLine(id: string): Promise<boolean> {
-  try {
-    await apiRequest<void>(`/api/lines/${id}`, { method: "DELETE" });
-    return true;
-  } catch {
-    return false;
-  }
+/** Throws on failure — see `deleteZone` in `zones.ts` for why this must not swallow errors. */
+export async function deleteCountingLine(id: string): Promise<void> {
+  await apiRequest<void>(`/api/lines/${id}`, { method: "DELETE" });
 }
 
 export { SHAPE_COLORS };

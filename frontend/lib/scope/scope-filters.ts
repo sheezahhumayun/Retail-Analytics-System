@@ -123,10 +123,10 @@ export function resolveCustomerFlowCameraId(
 export function zonesForScope(
   store: Store | null,
   camera: ScopeCamera | null,
-): { id: string; name: string }[] {
+): Array<{ id: string; name: string; type?: string }> {
   if (camera) return camera.zones;
   if (!store) return [];
-  const seen = new Map<string, { id: string; name: string }>();
+  const seen = new Map<string, { id: string; name: string; type?: string }>();
   for (const storeCamera of store.cameras) {
     for (const zone of storeCamera.zones) {
       seen.set(zone.id, zone);

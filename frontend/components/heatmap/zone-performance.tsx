@@ -143,13 +143,14 @@ function MiniBar({
 export function ZonePerformance({ rows }: ZonePerformanceProps) {
   const [activeMetric, setActiveMetric] = useState<MetricKey>('visits');
 
-  const maxVisits = Math.max(...rows.map((r) => r.visits));
-  const maxDwell  = Math.max(...rows.map((r) => r.dwellSec));
+  const trackedRows = rows.filter((row) => row.trackingStatus !== 'not_tracked');
+  const maxVisits = Math.max(...trackedRows.map((r) => r.visits), 1);
+  const maxDwell = Math.max(...trackedRows.map((r) => r.dwellSec), 1);
 
   const metric = METRICS.find((m) => m.key === activeMetric)!;
 
-  // Build chart data
-  const chartData = rows.map((r) => ({
+  // Build chart data (tracked zones only)
+  const chartData = trackedRows.map((r) => ({
     name: r.zone,
     id:   r.id,
     value:
@@ -183,10 +184,10 @@ export function ZonePerformance({ rows }: ZonePerformanceProps) {
         </div>
         <div className="flex items-center gap-2">
           <span className="rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">
-            {rows.length} zones monitored
+            {trackedRows.length} of {rows.length} zones tracked
           </span>
           <span className="rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">
-            {rows.reduce((s, r) => s + r.visits, 0).toLocaleString()} total visits
+            {trackedRows.reduce((s, r) => s + r.visits, 0).toLocaleString()} total visits
           </span>
         </div>
       </div>
@@ -303,12 +304,17 @@ export function ZonePerformance({ rows }: ZonePerformanceProps) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, i) => (
+            {rows.map((row, i) => {
+              const isNotTracked = row.trackingStatus === 'not_tracked';
+              const dwellNotTracked =
+                row.trackingNote?.toLowerCase().includes('dwell') ?? false;
+
+              return (
               <tr
                 key={row.id}
                 className={`transition-colors hover:bg-muted/30 ${
                   i < rows.length - 1 ? 'border-b border-border/50' : ''
-                }`}
+                } ${isNotTracked ? 'bg-amber-500/5' : ''}`}
               >
                 {/* Zone name */}
                 <td className="px-5 py-4">
@@ -317,46 +323,70 @@ export function ZonePerformance({ rows }: ZonePerformanceProps) {
                       className="h-2.5 w-2.5 shrink-0 rounded-full"
                       style={{ background: ZONE_COLORS[row.id] ?? SEVERITY_COLORS.info.hex }}
                     />
-                    <span className="font-medium text-foreground whitespace-nowrap">{row.zone}</span>
+                    <div>
+                      <span className="font-medium text-foreground whitespace-nowrap">{row.zone}</span>
+                      {row.trackingNote && (
+                        <p className="text-xs text-amber-700 dark:text-amber-300 mt-0.5">
+                          {row.trackingNote}
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </td>
 
                 {/* Visits */}
                 <td className="px-5 py-4">
-                  <MiniBar
-                    value={row.visits}
-                    max={maxVisits}
-                    color={getRatioThresholdColor(row.visits / maxVisits)}
-                    display={row.visits.toLocaleString()}
-                  />
+                  {isNotTracked ? (
+                    <span className="text-xs text-muted-foreground">Not tracked</span>
+                  ) : (
+                    <MiniBar
+                      value={row.visits}
+                      max={maxVisits}
+                      color={getRatioThresholdColor(row.visits / maxVisits)}
+                      display={row.visits.toLocaleString()}
+                    />
+                  )}
                 </td>
 
                 {/* Avg dwell */}
                 <td className="px-5 py-4">
-                  <MiniBar
-                    value={row.dwellSec}
-                    max={maxDwell}
-                    color="#8b5cf6"
-                    display={formatDwell(row.dwellSec)}
-                  />
+                  {isNotTracked || dwellNotTracked ? (
+                    <span className="text-xs text-muted-foreground">Not tracked</span>
+                  ) : (
+                    <MiniBar
+                      value={row.dwellSec}
+                      max={maxDwell}
+                      color="#8b5cf6"
+                      display={formatDwell(row.dwellSec)}
+                    />
+                  )}
                 </td>
 
                 {/* Occupancy */}
                 <td className="px-5 py-4">
-                  <MiniBar
-                    value={row.occupancy}
-                    max={100}
-                    color={getOccupancyThresholdColor(row.occupancy)}
-                    display={`${row.occupancy}%`}
-                  />
+                  {isNotTracked ? (
+                    <span className="text-xs text-muted-foreground">Not tracked</span>
+                  ) : (
+                    <MiniBar
+                      value={row.occupancy}
+                      max={100}
+                      color={getOccupancyThresholdColor(row.occupancy)}
+                      display={`${row.occupancy}%`}
+                    />
+                  )}
                 </td>
 
                 {/* Trend */}
                 <td className="px-5 py-4">
-                  <TrendBadge trend={row.trend} pct={row.trendPct} />
+                  {isNotTracked ? (
+                    <span className="text-xs text-muted-foreground">—</span>
+                  ) : (
+                    <TrendBadge trend={row.trend} pct={row.trendPct} />
+                  )}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

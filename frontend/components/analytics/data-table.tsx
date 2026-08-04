@@ -89,31 +89,31 @@ export function DataTable({
               const isPos  = change != null && change >= 0;
               return (
                 <tr key={row.id ?? `${row.label}-${index}`} className="hover:bg-muted/30">
-                  <td className="py-2.5 pl-4 pr-3 font-medium text-foreground">
-                    {row.label}
-                  </td>
-                  <td className="py-2.5 pl-4 pr-3 tabular-nums text-foreground">
-                    {row.current.toLocaleString()}
-                  </td>
-                  {showComparison && (
-                    <td className="py-2.5 pl-4 pr-3 tabular-nums text-muted-foreground">
-                      {row.prior?.toLocaleString() ?? '—'}
+                    <td className="py-2.5 pl-4 pr-3 font-medium text-foreground">
+                      {row.label}
                     </td>
-                  )}
-                  {showComparison && (
-                    <td className="py-2.5 pl-4 pr-3 tabular-nums">
-                      {change == null ? (
-                        <span className="text-muted-foreground">—</span>
-                      ) : (
-                        <span className={isPos ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
-                          {isPos ? '+' : ''}{change}%
-                        </span>
-                      )}
+                    <td className="py-2.5 pl-4 pr-3 tabular-nums text-foreground">
+                      {row.current.toLocaleString()}
                     </td>
-                  )}
-                </tr>
-              );
-            })}
+                    {showComparison && (
+                      <td className="py-2.5 pl-4 pr-3 tabular-nums text-muted-foreground">
+                        {row.prior?.toLocaleString() ?? '—'}
+                      </td>
+                    )}
+                    {showComparison && (
+                      <td className="py-2.5 pl-4 pr-3 tabular-nums">
+                        {change == null ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          <span className={isPos ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
+                            {isPos ? '+' : ''}{change}%
+                          </span>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
           </tbody>
         </table>
       </div>

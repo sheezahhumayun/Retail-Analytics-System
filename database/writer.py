@@ -13,6 +13,13 @@ from sqlmodel import Session, col, select
 from analytics.dwell.types import DwellEvent
 from analytics.occupancy.tracker import _normalize_timezone
 from analytics.events.types import AnalyticsEvent, AnalyticsEventType
+from analytics.modules import (
+    ALL_ANALYTICS_MODULES,
+    MODULE_ENTRY_EXIT,
+    MODULE_OCCUPANCY,
+    MODULE_ZONES,
+    normalize_modules,
+)
 from analytics.queues.types import is_queue_zone
 from analytics.zones.types import Zone, ZoneEvent, ZoneEventType
 
@@ -49,6 +56,9 @@ class DbWriterConfig:
     zones: list[Zone] = field(default_factory=list)
     timezone: str = "UTC"
     persist_person_detected: bool = False
+    enabled_modules: frozenset[str] = field(
+        default_factory=lambda: frozenset(ALL_ANALYTICS_MODULES)
+    )
 
 
 class AnalyticsDbWriter:
@@ -61,6 +71,7 @@ class AnalyticsDbWriter:
     def __init__(self, config: DbWriterConfig) -> None:
         self._config = config
         self._tz = _normalize_timezone(config.timezone)
+        self._enabled_modules = frozenset(normalize_modules(config.enabled_modules))
         self._queue_zone_ids = {
             z.zone_id for z in config.zones if is_queue_zone(z)
         }
@@ -191,14 +202,17 @@ class AnalyticsDbWriter:
         ts = _utc_from_datetime(event.timestamp)
 
         if et in (AnalyticsEventType.ENTRY.value, AnalyticsEventType.EXIT.value):
-            self._update_visitor_metrics(session, event, ts)
-            self._update_occupancy_metrics(session, event, ts)
+            if MODULE_ENTRY_EXIT in self._enabled_modules:
+                self._update_visitor_metrics(session, event, ts)
+            if MODULE_OCCUPANCY in self._enabled_modules:
+                self._update_occupancy_metrics(session, event, ts)
 
         if et == AnalyticsEventType.ZONE_ENTER.value and event.zone_id is not None:
-            metric_date, hour = _local_parts(ts, self._tz)
-            zm = self._get_or_create_zone_metric(session, event.zone_id, metric_date, hour)
-            zm.visitors += 1
-            session.add(zm)
+            if MODULE_ZONES in self._enabled_modules:
+                metric_date, hour = _local_parts(ts, self._tz)
+                zm = self._get_or_create_zone_metric(session, event.zone_id, metric_date, hour)
+                zm.visitors += 1
+                session.add(zm)
 
         if et in (
             AnalyticsEventType.DWELL_THRESHOLD.value,

@@ -5,7 +5,7 @@ import { DashboardShell } from '@/components/dashboard/dashboard-shell';
 import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { ReportForm } from '@/components/reports/report-form';
 import { ReportPreview } from '@/components/reports/report-preview';
-import { fetchReportPdfBlob } from '@/lib/api/reports';
+import { fetchReportPdfBlob, isReportModuleDisabledError } from '@/lib/api/reports';
 import type { ReportFormData } from '@/lib/types';
 
 export default function ReportsPage() {
@@ -29,6 +29,7 @@ export default function ReportsPage() {
         from: formData.dateFrom,
         to: formData.dateTo,
         store_id: formData.store,
+        camera_id: formData.camera || undefined,
       });
       const nextUrl = URL.createObjectURL(blob);
       setPdfUrl((prev) => {
@@ -43,7 +44,11 @@ export default function ReportsPage() {
         if (prev) URL.revokeObjectURL(prev);
         return null;
       });
-      setError(err instanceof Error ? err.message : 'Failed to generate report preview');
+      if (isReportModuleDisabledError(err)) {
+        setError(err instanceof Error ? err.message : 'Analytics module not enabled for this camera');
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to generate report preview');
+      }
     } finally {
       setIsLoading(false);
     }

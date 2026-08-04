@@ -6,6 +6,7 @@ import {
 import type { AdminCamera, Camera, CameraStatus, Resolution } from "@/lib/types";
 import type { BackendCamera, BackendCameraStatus } from "@/lib/api/mappers";
 import {
+  analyticsModulesToBackend,
   buildStoreNameMap,
   mapAdminCamera,
   mapLiveCamera,
@@ -75,8 +76,12 @@ async function resolveStoreId(storeName: string): Promise<string> {
 }
 
 export async function getCameras(): Promise<AdminCamera[]> {
+  // Admin management view needs to see disabled cameras too (so they can be
+  // re-enabled) — everywhere else (`getLiveCameras`, zone/report/analytics
+  // camera pickers) intentionally uses the backend's default, which excludes
+  // disabled/soft-deleted cameras.
   const [cameras, names] = await Promise.all([
-    apiRequest<BackendCamera[]>("/api/cameras"),
+    apiRequest<BackendCamera[]>("/api/cameras", { query: { include_disabled: true } }),
     loadStoreNames(),
   ]);
   return cameras.map((camera) =>
@@ -120,6 +125,7 @@ export async function createCamera(data: CreateCameraData): Promise<AdminCamera>
     camera_type: data.cameraType,
     resolution: resolutionToBackend(data.resolution),
     fps: data.fps,
+    analytics_modules: analyticsModulesToBackend(data.analyticsModules),
   };
   const created = await apiRequest<BackendCamera>("/api/cameras", {
     method: "POST",
@@ -142,6 +148,16 @@ export async function updateCamera(
   if (data.cameraType !== undefined) body.camera_type = data.cameraType;
   if (data.resolution !== undefined) body.resolution = resolutionToBackend(data.resolution);
   if (data.fps !== undefined) body.fps = data.fps;
+  if (data.analyticsModules !== undefined) {
+    body.analytics_modules = analyticsModulesToBackend(data.analyticsModules);
+  }
+  if (data.enabled !== undefined) {
+    // Manual admin enable/disable switch — see backend CameraUpdate.status.
+    // `online`/`error` are health-probe-derived and intentionally not settable
+    // here; re-enabling goes to `offline` and the next health check cycle
+    // resolves it to `online`/`error`.
+    body.status = data.enabled ? "offline" : "disabled";
+  }
 
   try {
     const updated = await apiRequest<BackendCamera>(`/api/cameras/${id}`, {
@@ -155,12 +171,21 @@ export async function updateCamera(
   }
 }
 
-export async function deleteCamera(id: string): Promise<boolean> {
+/**
+ * Soft-disables the camera (`DELETE /api/cameras/{id}` sets `status=disabled`
+ * server-side — historical analytics data is preserved, nothing is hard
+ * deleted). Returns the persisted camera (now `status: "disabled"`) so the
+ * caller can reflect *actual* server state rather than optimistically
+ * removing the row — a plain `filter()` removal previously caused the
+ * "reappears after reload" bug, since the row was never really gone.
+ */
+export async function deleteCamera(id: string): Promise<AdminCamera | null> {
   try {
-    await apiRequest<void>(`/api/cameras/${id}`, { method: "DELETE" });
-    return true;
+    const deleted = await apiRequest<BackendCamera>(`/api/cameras/${id}`, { method: "DELETE" });
+    const names = await loadStoreNames();
+    return mapAdminCamera(deleted, names.get(deleted.store_id) ?? deleted.store_id);
   } catch {
-    return false;
+    return null;
   }
 }
 

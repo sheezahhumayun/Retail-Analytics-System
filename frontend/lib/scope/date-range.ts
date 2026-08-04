@@ -1,7 +1,15 @@
 import type { DateRangeKey } from "@/lib/types";
 
 /** Maps an analytics DateRangeKey pill to ISO date strings for scoped API calls. */
-export function dateRangeForKey(range: DateRangeKey): { from: string; to: string } {
+export function dateRangeForKey(
+  range: DateRangeKey,
+  customFrom?: string,
+  customTo?: string,
+): { from: string; to: string } {
+  if (range === "custom" && customFrom && customTo) {
+    return { from: customFrom, to: customTo };
+  }
+
   const to = new Date();
   const from = new Date(to);
 

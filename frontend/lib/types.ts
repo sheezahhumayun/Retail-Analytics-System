@@ -25,6 +25,26 @@ export type ComparisonKey =
   | "month-last-month"
   | "none";
 
+export type ComparisonStatus = "ok" | "module_disabled" | "insufficient_history";
+
+export interface ComparisonInfo {
+  status: ComparisonStatus;
+  from: string;
+  to: string;
+  message?: string | null;
+}
+
+export interface AnalyticsFetchOptions {
+  comparison?: ComparisonKey;
+  customFrom?: string;
+  customTo?: string;
+}
+
+export interface AnalyticsDataResult {
+  rows: DataRow[];
+  comparison?: ComparisonInfo | null;
+}
+
 export type SortDirection = "asc" | "desc";
 
 export interface DataRow {
@@ -55,7 +75,10 @@ export interface AnalyticsPageConfig {
   /** Chart style */
   chartType: ChartType;
   /** Called whenever range/comparison changes — returns the rows to display */
-  getData: (range: DateRangeKey) => Promise<DataRow[]>;
+  getData: (
+    range: DateRangeKey,
+    options?: AnalyticsFetchOptions,
+  ) => Promise<AnalyticsDataResult | DataRow[]>;
   /** Derive the 3 stat summary cards from already-fetched rows (no extra HTTP) */
   getStats: (rows: DataRow[]) => StatSummary[];
   /** Column header for the interval column in the data table */
@@ -163,6 +186,8 @@ export type ZoneRow = {
   occupancy: number; // 0–100 %
   trend: "up" | "down" | "flat";
   trendPct: number;
+  trackingStatus?: "tracked" | "not_tracked";
+  trackingNote?: string;
 };
 
 // ─── Alerts ──────────────────────────────────────────────────────────────────
@@ -249,11 +274,20 @@ export interface ReportData {
   chartData: Array<{ [key: string]: any }>;
   tableData: Array<{ [key: string]: any }>;
   tableColumns: string[];
+  footnotes?: string[];
+  exclusions?: Array<{
+    kind: string;
+    id: string;
+    name: string;
+    module: string;
+    reason: string;
+  }>;
+  comparison?: ComparisonInfo | null;
 }
 
 // ─── Scope selector ──────────────────────────────────────────────────────────
 
-export type ScopeZone = { id: string; name: string };
+export type ScopeZone = { id: string; name: string; type?: string };
 export type ScopeCamera = { id: string; name: string; zones: ScopeZone[] };
 export type Store = { id: string; name: string; cameras: ScopeCamera[] };
 export type Organization = { id: string; name: string; stores: Store[] };

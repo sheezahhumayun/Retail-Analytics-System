@@ -2,39 +2,43 @@
 
 from __future__ import annotations
 
-from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from sqlmodel import col, select
 
-from database.models import (
-    DwellEventRow,
-    OccupancyMetric,
-    QueueMetric,
-    Store,
-    VisitorMetric,
-    Zone,
-    ZoneMetric,
-)
+from database.models import Camera
 
 from ..auth import TokenPayload, get_current_user
 from ..deps import DbSession, parse_date, parse_time, require_date_range
 from ..exceptions import ApiError
 from ..schemas.analytics import (
+    ComparisonInfo,
     DwellResponse,
-    DwellSession,
+    HeatmapResponse,
     OccupancyPoint,
     OccupancyResponse,
     QueueAnalyticsResponse,
     QueueSample,
-    TrafficBucket,
     TrafficResponse,
     ZoneAnalyticsResponse,
     ZoneMetricBucket,
 )
+from ..services.analytics_modules import MODULE_HEATMAP, require_camera_module
+from ..services.analytics_read import (
+    prior_period_bounds,
+    prior_period_comparison_info,
+    read_dwell_period,
+    read_dwell_for_scope,
+    read_dwell_for_queue_zones,
+    read_occupancy_period,
+    read_queue_period,
+    read_queue_for_scope,
+    read_store_traffic_period,
+    read_traffic_for_scope,
+    read_zone_analytics_period,
+    read_zones_for_scope,
+)
 from ..services.heatmap import fetch_heatmap
-from ..schemas.analytics import HeatmapResponse
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -44,8 +48,11 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
     response_model=TrafficResponse,
     summary="Visitor traffic by hour",
     description=(
-        "Hourly entry/exit counts for a store from `visitor_metrics`. "
-        "Query `from` and `to` as ISO dates or datetimes."
+        "Hourly entry/exit counts at store/camera/zone granularity. "
+        "Provide `store_id` (required). Optionally provide `camera_id` and/or `zone_id` "
+        "to scope the aggregation. Query `from` and `to` as ISO dates or datetimes. "
+        "Pass `compare=true` to include the equivalent prior period. "
+        "Module gating: entry_exit module must be enabled for all cameras in scope."
     ),
 )
 def traffic(
@@ -53,37 +60,57 @@ def traffic(
     _user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
+    camera_id: Annotated[str | None, Query(description="Camera id (optional)")] = None,
+    zone_id: Annotated[str | None, Query(description="Zone id (optional)")] = None,
+    compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> TrafficResponse:
     start, end = date_range
-    if session.get(Store, store_id) is None:
-        raise ApiError(404, "store_not_found", f"Store '{store_id}' not found")
+    current = read_traffic_for_scope(
+        session,
+        store_id=store_id,
+        camera_id=camera_id,
+        zone_id=zone_id,
+        start=start,
+        end=end,
+    )
 
-    rows = session.exec(
-        select(VisitorMetric)
-        .where(
-            VisitorMetric.store_id == store_id,
-            VisitorMetric.metric_date >= start.date(),
-            VisitorMetric.metric_date <= end.date(),
-        )
-        .order_by(VisitorMetric.metric_date, VisitorMetric.hour)
-    ).all()
+    comparison: ComparisonInfo | None = None
+    prior_buckets = []
+    prior_total_entries: int | None = None
+    prior_total_exits: int | None = None
 
-    buckets = [
-        TrafficBucket(
-            metric_date=r.metric_date.isoformat(),
-            hour=r.hour,
-            entries=r.entries,
-            exits=r.exits,
+    if compare:
+        prior_start, prior_end = prior_period_bounds(start, end)
+        comparison = prior_period_comparison_info(
+            session,
+            prior_start=prior_start,
+            prior_end=prior_end,
+            scope_cameras=current.eligible,
         )
-        for r in rows
-    ]
+        if comparison.status == "ok":
+            prior = read_traffic_for_scope(
+                session,
+                store_id=store_id,
+                camera_id=camera_id,
+                zone_id=zone_id,
+                start=prior_start,
+                end=prior_end,
+            )
+            prior_buckets = prior.buckets
+            prior_total_entries = sum(b.entries for b in prior_buckets)
+            prior_total_exits = sum(b.exits for b in prior_buckets)
+
     return TrafficResponse(
         store_id=store_id,
         from_=start.isoformat(),
         to=end.isoformat(),
-        buckets=buckets,
-        total_entries=sum(b.entries for b in buckets),
-        total_exits=sum(b.exits for b in buckets),
+        buckets=current.buckets,
+        total_entries=sum(b.entries for b in current.buckets),
+        total_exits=sum(b.exits for b in current.buckets),
+        comparison=comparison,
+        prior_buckets=prior_buckets,
+        prior_total_entries=prior_total_entries,
+        prior_total_exits=prior_total_exits,
     )
 
 
@@ -91,108 +118,160 @@ def traffic(
     "/occupancy",
     response_model=OccupancyResponse,
     summary="Current occupancy and trend",
-    description="Latest occupancy plus time-series. Provide `camera_id` or `store_id` (not both).",
+    description=(
+        "Occupancy time-series. Provide `camera_id` or `store_id` (not both). "
+        "Optional `from`/`to` filter the trend; `compare=true` adds the prior period."
+    ),
 )
 def occupancy(
     session: DbSession,
     _user: Annotated[TokenPayload, Depends(get_current_user)],
     camera_id: Annotated[str | None, Query()] = None,
     store_id: Annotated[str | None, Query()] = None,
+    from_: Annotated[str | None, Query(alias="from")] = None,
+    to: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500, description="Max trend points")] = 100,
+    compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> OccupancyResponse:
-    if (camera_id is None) == (store_id is None):
+    range_start = None
+    range_end = None
+    if from_ is not None and to is not None:
+        range_start, range_end = require_date_range(from_, to)
+    elif from_ is not None or to is not None:
         raise ApiError(
             400,
-            "invalid_scope",
-            "Provide exactly one of camera_id or store_id",
+            "invalid_date_range",
+            "Provide both from and to, or neither",
         )
 
-    if camera_id is not None:
-        from database.models import Camera
+    trend, eligible, scope, scope_id = read_occupancy_period(
+        session,
+        camera_id=camera_id,
+        store_id=store_id,
+        start=range_start,
+        end=range_end,
+        limit=limit,
+    )
+    if not trend:
+        empty = OccupancyResponse(scope=scope, scope_id=scope_id, current=0, trend=[])
+        if range_start and range_end:
+            empty.from_ = range_start.isoformat()
+            empty.to = range_end.isoformat()
+        return empty
 
-        if session.get(Camera, camera_id) is None:
-            raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
-        stmt = (
-            select(OccupancyMetric)
-            .where(OccupancyMetric.camera_id == camera_id)
-            .order_by(col(OccupancyMetric.timestamp).desc())
-            .limit(limit)
-        )
-        scope, scope_id = "camera", camera_id
-    else:
-        assert store_id is not None
-        if session.get(Store, store_id) is None:
-            raise ApiError(404, "store_not_found", f"Store '{store_id}' not found")
-        stmt = (
-            select(OccupancyMetric)
-            .where(OccupancyMetric.store_id == store_id)
-            .order_by(col(OccupancyMetric.timestamp).desc())
-            .limit(limit)
-        )
-        scope, scope_id = "store", store_id
+    comparison: ComparisonInfo | None = None
+    prior_trend: list[OccupancyPoint] = []
+    prior_current: int | None = None
 
-    rows = list(reversed(session.exec(stmt).all()))
-    if not rows:
-        return OccupancyResponse(scope=scope, scope_id=scope_id, current=0, trend=[])
-
-    trend = [
-        OccupancyPoint(
-            timestamp=r.timestamp.isoformat(),
-            current_occupancy=r.current_occupancy,
+    if compare and range_start is not None and range_end is not None:
+        prior_start, prior_end = prior_period_bounds(range_start, range_end)
+        comparison = prior_period_comparison_info(
+            session,
+            prior_start=prior_start,
+            prior_end=prior_end,
+            scope_cameras=eligible,
         )
-        for r in rows
-    ]
-    return OccupancyResponse(
+        if comparison.status == "ok":
+            prior_trend, _, _, _ = read_occupancy_period(
+                session,
+                camera_id=camera_id,
+                store_id=store_id,
+                start=prior_start,
+                end=prior_end,
+                limit=limit,
+            )
+            prior_current = prior_trend[-1].current_occupancy if prior_trend else 0
+
+    response = OccupancyResponse(
         scope=scope,
         scope_id=scope_id,
-        current=rows[-1].current_occupancy,
+        current=trend[-1].current_occupancy,
         trend=trend,
+        comparison=comparison,
+        prior_trend=prior_trend,
+        prior_current=prior_current,
     )
+    if range_start and range_end:
+        response.from_ = range_start.isoformat()
+        response.to = range_end.isoformat()
+    return response
 
 
 @router.get(
     "/zones",
     response_model=ZoneAnalyticsResponse,
     summary="Zone visitor and dwell metrics",
-    description="Hourly zone rollups from `zone_metrics`.",
+    description=(
+        "Zone metrics at store/camera/zone granularity. "
+        "Provide `store_id` (required). Optionally provide `camera_id` and/or `zone_id` "
+        "to scope the aggregation. Excludes queue-type zones (checkout_queue) from aggregation. "
+        "Query `from` and `to` as ISO dates or datetimes. "
+        "Pass `compare=true` to include the equivalent prior period. "
+        "Module gating: zones module must be enabled for all cameras in scope."
+    ),
 )
 def zone_analytics(
     session: DbSession,
     _user: Annotated[TokenPayload, Depends(get_current_user)],
-    zone_id: Annotated[str, Query(description="Zone id")],
+    store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
+    camera_id: Annotated[str | None, Query(description="Camera id (optional)")] = None,
+    zone_id: Annotated[str | None, Query(description="Zone id (optional)")] = None,
+    compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> ZoneAnalyticsResponse:
     start, end = date_range
-    if session.get(Zone, zone_id) is None:
-        raise ApiError(404, "zone_not_found", f"Zone '{zone_id}' not found")
-
-    rows = session.exec(
-        select(ZoneMetric)
-        .where(
-            ZoneMetric.zone_id == zone_id,
-            ZoneMetric.metric_date >= start.date(),
-            ZoneMetric.metric_date <= end.date(),
+    
+    # Single zone case - use original read_zone_analytics_period for backward compatibility
+    if zone_id is not None and camera_id is None:
+        buckets, ctx = read_zone_analytics_period(
+            session, zone_id=zone_id, start=start, end=end
         )
-        .order_by(ZoneMetric.metric_date, ZoneMetric.hour)
-    ).all()
-
-    buckets = [
-        ZoneMetricBucket(
-            metric_date=r.metric_date.isoformat(),
-            hour=r.hour,
-            visitors=r.visitors,
-            avg_dwell=r.avg_dwell,
-            max_dwell=r.max_dwell,
-            min_dwell=r.min_dwell,
-            dwell_count=r.dwell_count,
+        eligible_cameras = [ctx.camera]
+    else:
+        # Multi-zone aggregation (camera-level or store-level)
+        buckets, eligible_cameras = read_zones_for_scope(
+            session,
+            store_id=store_id,
+            camera_id=camera_id,
+            zone_id=zone_id,
+            start=start,
+            end=end,
         )
-        for r in rows
-    ]
+
+    comparison: ComparisonInfo | None = None
+    prior_buckets: list[ZoneMetricBucket] = []
+    if compare:
+        prior_start, prior_end = prior_period_bounds(start, end)
+        comparison = prior_period_comparison_info(
+            session,
+            prior_start=prior_start,
+            prior_end=prior_end,
+            scope_cameras=eligible_cameras,
+            zone_id=zone_id,
+            zone_camera=eligible_cameras[0] if eligible_cameras else None,
+        )
+        if comparison.status == "ok":
+            if zone_id is not None and camera_id is None:
+                prior_buckets, _ = read_zone_analytics_period(
+                    session, zone_id=zone_id, start=prior_start, end=prior_end
+                )
+            else:
+                prior_buckets, _ = read_zones_for_scope(
+                    session,
+                    store_id=store_id,
+                    camera_id=camera_id,
+                    zone_id=zone_id,
+                    start=prior_start,
+                    end=prior_end,
+                )
+
     return ZoneAnalyticsResponse(
-        zone_id=zone_id,
+        zone_id=zone_id or "all",
         from_=start.isoformat(),
         to=end.isoformat(),
         buckets=buckets,
+        comparison=comparison,
+        prior_buckets=prior_buckets,
     )
 
 
@@ -200,47 +279,177 @@ def zone_analytics(
     "/dwell",
     response_model=DwellResponse,
     summary="Completed dwell sessions",
-    description="Individual dwell events from `dwell_events` for a zone in the given range.",
+    description=(
+        "Dwell sessions at store/camera/zone granularity. "
+        "Provide `store_id` (required). Optionally provide `camera_id` and/or `zone_id` "
+        "to scope the aggregation. Excludes queue-type zones from aggregation. "
+        "Pass `compare=true` for the equivalent prior period."
+    ),
 )
 def dwell_analytics(
     session: DbSession,
     _user: Annotated[TokenPayload, Depends(get_current_user)],
-    zone_id: Annotated[str, Query(description="Zone id")],
+    store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
+    camera_id: Annotated[str | None, Query(description="Camera id (optional)")] = None,
+    zone_id: Annotated[str | None, Query(description="Zone id (optional)")] = None,
+    compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> DwellResponse:
     start, end = date_range
-    if session.get(Zone, zone_id) is None:
-        raise ApiError(404, "zone_not_found", f"Zone '{zone_id}' not found")
-
-    rows = session.exec(
-        select(DwellEventRow)
-        .where(
-            DwellEventRow.zone_id == zone_id,
-            DwellEventRow.enter_ts >= start,
-            DwellEventRow.enter_ts <= end,
+    
+    # Single zone case - use original read_dwell_period for backward compatibility
+    if zone_id is not None and camera_id is None:
+        sessions, ctx = read_dwell_period(session, zone_id=zone_id, start=start, end=end)
+        eligible_cameras = [ctx.camera]
+    else:
+        # Multi-zone aggregation (camera-level or store-level)
+        sessions, eligible_cameras = read_dwell_for_scope(
+            session,
+            store_id=store_id,
+            camera_id=camera_id,
+            zone_id=zone_id,
+            start=start,
+            end=end,
         )
-        .order_by(DwellEventRow.enter_ts)
-    ).all()
-
-    sessions = [
-        DwellSession(
-            id=r.id,  # type: ignore[arg-type]
-            zone_id=r.zone_id,
-            track_id=r.track_id,
-            enter_ts=r.enter_ts.isoformat(),
-            exit_ts=r.exit_ts.isoformat(),
-            dwell_seconds=r.dwell_seconds,
-        )
-        for r in rows
-    ]
+    
     avg = sum(s.dwell_seconds for s in sessions) / len(sessions) if sessions else None
+
+    comparison: ComparisonInfo | None = None
+    prior_sessions = []
+    prior_count: int | None = None
+    prior_avg: float | None = None
+
+    if compare:
+        prior_start, prior_end = prior_period_bounds(start, end)
+        comparison = prior_period_comparison_info(
+            session,
+            prior_start=prior_start,
+            prior_end=prior_end,
+            scope_cameras=eligible_cameras,
+            zone_id=zone_id,
+            zone_camera=eligible_cameras[0] if eligible_cameras else None,
+        )
+        if comparison.status == "ok":
+            if zone_id is not None and camera_id is None:
+                prior_sessions, _ = read_dwell_period(
+                    session, zone_id=zone_id, start=prior_start, end=prior_end
+                )
+            else:
+                prior_sessions, _ = read_dwell_for_scope(
+                    session,
+                    store_id=store_id,
+                    camera_id=camera_id,
+                    zone_id=zone_id,
+                    start=prior_start,
+                    end=prior_end,
+                )
+            prior_count = len(prior_sessions)
+            prior_avg = (
+                sum(s.dwell_seconds for s in prior_sessions) / len(prior_sessions)
+                if prior_sessions
+                else None
+            )
+
     return DwellResponse(
-        zone_id=zone_id,
+        zone_id=zone_id or "all",
         from_=start.isoformat(),
         to=end.isoformat(),
         sessions=sessions,
         count=len(sessions),
         avg_dwell_seconds=avg,
+        comparison=comparison,
+        prior_sessions=prior_sessions,
+        prior_count=prior_count,
+        prior_avg_dwell_seconds=prior_avg,
+    )
+
+
+@router.get(
+    "/dwell-queues",
+    response_model=DwellResponse,
+    summary="Dwell sessions in queue zones only (waiting time)",
+    description=(
+        "Dwell sessions for QUEUE ZONES ONLY at store/camera/zone granularity. "
+        "Used for calculating average waiting time in queue zones. "
+        "Provide `store_id` (required). Optionally provide `camera_id` and/or `zone_id` "
+        "to scope the aggregation. Pass `compare=true` for the equivalent prior period."
+    ),
+)
+def dwell_queues_analytics(
+    session: DbSession,
+    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    store_id: Annotated[str, Query(description="Store id")],
+    date_range: Annotated[tuple, Depends(require_date_range)],
+    camera_id: Annotated[str | None, Query(description="Camera id (optional)")] = None,
+    zone_id: Annotated[str | None, Query(description="Queue zone id (optional)")] = None,
+    compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
+) -> DwellResponse:
+    start, end = date_range
+    
+    # Single zone case - use original read_dwell_period for backward compatibility
+    if zone_id is not None and camera_id is None:
+        sessions, ctx = read_dwell_period(session, zone_id=zone_id, start=start, end=end)
+        eligible_cameras = [ctx.camera]
+    else:
+        # Multi-zone aggregation for QUEUE ZONES ONLY (camera-level or store-level)
+        sessions, eligible_cameras = read_dwell_for_queue_zones(
+            session,
+            store_id=store_id,
+            camera_id=camera_id,
+            zone_id=zone_id,
+            start=start,
+            end=end,
+        )
+    
+    avg = sum(s.dwell_seconds for s in sessions) / len(sessions) if sessions else None
+
+    comparison: ComparisonInfo | None = None
+    prior_sessions = []
+    prior_count: int | None = None
+    prior_avg: float | None = None
+
+    if compare:
+        prior_start, prior_end = prior_period_bounds(start, end)
+        comparison = prior_period_comparison_info(
+            session,
+            prior_start=prior_start,
+            prior_end=prior_end,
+            scope_cameras=eligible_cameras,
+            zone_id=zone_id,
+            zone_camera=eligible_cameras[0] if eligible_cameras else None,
+        )
+        if comparison.status == "ok":
+            if zone_id is not None and camera_id is None:
+                prior_sessions, _ = read_dwell_period(
+                    session, zone_id=zone_id, start=prior_start, end=prior_end
+                )
+            else:
+                prior_sessions, _ = read_dwell_for_queue_zones(
+                    session,
+                    store_id=store_id,
+                    camera_id=camera_id,
+                    zone_id=zone_id,
+                    start=prior_start,
+                    end=prior_end,
+                )
+            prior_count = len(prior_sessions)
+            prior_avg = (
+                sum(s.dwell_seconds for s in prior_sessions) / len(prior_sessions)
+                if prior_sessions
+                else None
+            )
+
+    return DwellResponse(
+        zone_id=zone_id or "all",
+        from_=start.isoformat(),
+        to=end.isoformat(),
+        sessions=sessions,
+        count=len(sessions),
+        avg_dwell_seconds=avg,
+        comparison=comparison,
+        prior_sessions=prior_sessions,
+        prior_count=prior_count,
+        prior_avg_dwell_seconds=prior_avg,
     )
 
 
@@ -254,12 +463,18 @@ def dwell_analytics(
     ),
 )
 def heatmap(
+    session: DbSession,
     _user: Annotated[TokenPayload, Depends(get_current_user)],
     camera_id: Annotated[str, Query(description="Camera id")],
     date: Annotated[str, Query(description="Date YYYY-MM-DD")],
     from_time: Annotated[str, Query(description="Start time HH:MM or HH:MM:SS")] = "00:00",
     to_time: Annotated[str, Query(description="End time HH:MM or HH:MM:SS")] = "23:59",
 ) -> HeatmapResponse:
+    camera = session.get(Camera, camera_id)
+    if camera is None:
+        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    require_camera_module(camera, MODULE_HEATMAP)
+
     metric_date = parse_date(date, param="date")
     start_t = parse_time(from_time, param="from_time")
     end_t = parse_time(to_time, param="to_time")
@@ -270,43 +485,86 @@ def heatmap(
     "/queues",
     response_model=QueueAnalyticsResponse,
     summary="Queue length and wait time",
-    description="Time-series queue samples from `queue_metrics`.",
+    description=(
+        "Queue samples at store/camera/zone granularity (queue zones only). "
+        "Provide `store_id` (required). Optionally provide `camera_id` and/or `zone_id` "
+        "to scope the aggregation. Pass `compare=true` for prior period."
+    ),
 )
 def queue_analytics(
     session: DbSession,
     _user: Annotated[TokenPayload, Depends(get_current_user)],
-    zone_id: Annotated[str, Query(description="Queue zone id")],
+    store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
+    camera_id: Annotated[str | None, Query(description="Camera id (optional)")] = None,
+    zone_id: Annotated[str | None, Query(description="Queue zone id (optional)")] = None,
+    compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> QueueAnalyticsResponse:
     start, end = date_range
-    if session.get(Zone, zone_id) is None:
-        raise ApiError(404, "zone_not_found", f"Zone '{zone_id}' not found")
-
-    rows = session.exec(
-        select(QueueMetric)
-        .where(
-            QueueMetric.zone_id == zone_id,
-            QueueMetric.timestamp >= start,
-            QueueMetric.timestamp <= end,
+    
+    # Single zone case - use original read_queue_period for backward compatibility
+    if zone_id is not None and camera_id is None:
+        samples, ctx = read_queue_period(session, zone_id=zone_id, start=start, end=end)
+        eligible_cameras = [ctx.camera]
+    else:
+        # Multi-zone aggregation (camera-level or store-level, queue zones only)
+        samples, eligible_cameras = read_queue_for_scope(
+            session,
+            store_id=store_id,
+            camera_id=camera_id,
+            zone_id=zone_id,
+            start=start,
+            end=end,
         )
-        .order_by(QueueMetric.timestamp)
-    ).all()
-
-    samples = [
-        QueueSample(
-            timestamp=r.timestamp.isoformat(),
-            queue_length=r.queue_length,
-            estimated_wait=r.estimated_wait,
-        )
-        for r in rows
-    ]
+    
     avg_len = sum(s.queue_length for s in samples) / len(samples) if samples else None
     max_len = max((s.queue_length for s in samples), default=None)
+
+    comparison: ComparisonInfo | None = None
+    prior_samples: list[QueueSample] = []
+    prior_avg: float | None = None
+    prior_max: int | None = None
+
+    if compare:
+        prior_start, prior_end = prior_period_bounds(start, end)
+        comparison = prior_period_comparison_info(
+            session,
+            prior_start=prior_start,
+            prior_end=prior_end,
+            scope_cameras=eligible_cameras,
+            zone_id=zone_id,
+            zone_camera=eligible_cameras[0] if eligible_cameras else None,
+        )
+        if comparison.status == "ok":
+            if zone_id is not None and camera_id is None:
+                prior_samples, _ = read_queue_period(
+                    session, zone_id=zone_id, start=prior_start, end=prior_end
+                )
+            else:
+                prior_samples, _ = read_queue_for_scope(
+                    session,
+                    store_id=store_id,
+                    camera_id=camera_id,
+                    zone_id=zone_id,
+                    start=prior_start,
+                    end=prior_end,
+                )
+            prior_avg = (
+                sum(s.queue_length for s in prior_samples) / len(prior_samples)
+                if prior_samples
+                else None
+            )
+            prior_max = max((s.queue_length for s in prior_samples), default=None)
+
     return QueueAnalyticsResponse(
-        zone_id=zone_id,
+        zone_id=zone_id or "all",
         from_=start.isoformat(),
         to=end.isoformat(),
         samples=samples,
         avg_queue_length=avg_len,
         max_queue_length=max_len,
+        comparison=comparison,
+        prior_samples=prior_samples,
+        prior_avg_queue_length=prior_avg,
+        prior_max_queue_length=prior_max,
     )

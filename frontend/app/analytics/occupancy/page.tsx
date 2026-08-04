@@ -8,7 +8,7 @@ export default function OccupancyPage() {
   const config = useOccupancyAnalyticsConfig();
 
   return (
-    <DashboardShell>
+    <DashboardShell scopeBarConfig={{ showCamera: true, showZone: false }}>
       <AnalyticsPageLayout config={config} />
     </DashboardShell>
   );

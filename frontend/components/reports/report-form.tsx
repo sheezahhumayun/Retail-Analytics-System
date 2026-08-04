@@ -1,7 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { ensureReportOptions, getReport, REPORT_TYPES, STORES, CAMERAS } from '@/lib/api/reports';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  ensureReportOptions,
+  getReport,
+  isReportModuleDisabledError,
+  reportModuleDisabledMessage,
+  REPORT_TYPES,
+  STORES,
+  CAMERAS,
+} from '@/lib/api/reports';
 import type { ReportFormData } from '@/lib/types';
 
 interface ReportFormProps {
@@ -32,7 +40,7 @@ export function ReportForm({ onSubmit, isLoading }: ReportFormProps) {
         setFormData((prev) => ({
           ...prev,
           store: prev.store || STORES[0]?.id || '',
-          camera: prev.camera || CAMERAS[0]?.id || '',
+          camera: prev.camera || '',
         }));
         setOptionsError('');
         setOptionsReady(true);
@@ -49,14 +57,22 @@ export function ReportForm({ onSubmit, isLoading }: ReportFormProps) {
     };
   }, []);
 
+  const moduleDisabledMessage = useMemo(
+    () =>
+      formData.camera
+        ? reportModuleDisabledMessage(formData.camera, formData.reportType)
+        : null,
+    [formData.camera, formData.reportType],
+  );
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.store) return;
+    if (!formData.store || moduleDisabledMessage) return;
     onSubmit(formData);
   };
 
   const handleExport = async (format: 'csv' | 'pdf') => {
-    if (!formData.store) return;
+    if (!formData.store || moduleDisabledMessage) return;
 
     setExporting(format);
     setExportError('');
@@ -67,15 +83,20 @@ export function ReportForm({ onSubmit, isLoading }: ReportFormProps) {
         from: formData.dateFrom,
         to: formData.dateTo,
         store_id: formData.store,
+        camera_id: formData.camera || undefined,
       });
     } catch (err) {
-      setExportError(err instanceof Error ? err.message : `Failed to export ${format.toUpperCase()}`);
+      if (isReportModuleDisabledError(err)) {
+        setExportError(err instanceof Error ? err.message : 'Analytics module not enabled for this camera');
+      } else {
+        setExportError(err instanceof Error ? err.message : `Failed to export ${format.toUpperCase()}`);
+      }
     } finally {
       setExporting(null);
     }
   };
 
-  const formDisabled = isLoading || !optionsReady || !formData.store;
+  const formDisabled = isLoading || !optionsReady || !formData.store || !!moduleDisabledMessage;
 
   return (
     <div className="bg-card border border-border rounded-lg p-6 space-y-6">
@@ -93,6 +114,12 @@ export function ReportForm({ onSubmit, isLoading }: ReportFormProps) {
         </div>
       )}
 
+      {moduleDisabledMessage && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-200">
+          {moduleDisabledMessage}
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="flex flex-col gap-2">
@@ -102,7 +129,7 @@ export function ReportForm({ onSubmit, isLoading }: ReportFormProps) {
               onChange={(e) =>
                 setFormData({ ...formData, reportType: e.target.value as ReportFormData['reportType'] })
               }
-              disabled={formDisabled}
+              disabled={!optionsReady || isLoading}
               className="px-3 py-2 bg-background border border-border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
             >
               {REPORT_TYPES.map((type) => (
@@ -121,7 +148,7 @@ export function ReportForm({ onSubmit, isLoading }: ReportFormProps) {
               onChange={(e) =>
                 setFormData({ ...formData, dateFrom: e.target.value })
               }
-              disabled={formDisabled}
+              disabled={!optionsReady || isLoading}
               className="px-3 py-2 bg-background border border-border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
             />
           </div>
@@ -134,7 +161,7 @@ export function ReportForm({ onSubmit, isLoading }: ReportFormProps) {
               onChange={(e) =>
                 setFormData({ ...formData, dateTo: e.target.value })
               }
-              disabled={formDisabled}
+              disabled={!optionsReady || isLoading}
               className="px-3 py-2 bg-background border border-border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
             />
           </div>
@@ -144,7 +171,7 @@ export function ReportForm({ onSubmit, isLoading }: ReportFormProps) {
             <select
               value={formData.store}
               onChange={(e) => setFormData({ ...formData, store: e.target.value })}
-              disabled={formDisabled || STORES.length === 0}
+              disabled={!optionsReady || isLoading || STORES.length === 0}
               className="px-3 py-2 bg-background border border-border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
             >
               {STORES.length === 0 ? (
@@ -161,23 +188,23 @@ export function ReportForm({ onSubmit, isLoading }: ReportFormProps) {
         </div>
 
         <div className="flex flex-col gap-2">
-          <label className="text-sm font-medium">Camera</label>
+          <label className="text-sm font-medium">Camera (optional)</label>
           <select
             value={formData.camera}
             onChange={(e) => setFormData({ ...formData, camera: e.target.value })}
-            disabled={formDisabled || CAMERAS.length === 0}
+            disabled={!optionsReady || isLoading || CAMERAS.length === 0}
             className="px-3 py-2 bg-background border border-border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
           >
-            {CAMERAS.length === 0 ? (
-              <option value="">No cameras available</option>
-            ) : (
-              CAMERAS.map((camera) => (
-                <option key={camera.id} value={camera.id}>
-                  {camera.name}
-                </option>
-              ))
-            )}
+            <option value="">All cameras (store-wide)</option>
+            {CAMERAS.map((camera) => (
+              <option key={camera.id} value={camera.id}>
+                {camera.name}
+              </option>
+            ))}
           </select>
+          <p className="text-xs text-muted-foreground">
+            Store-wide reports include only cameras/zones where the selected analytics module is enabled.
+          </p>
         </div>
 
         <div className="flex flex-col sm:flex-row gap-3 pt-4 border-t border-border">

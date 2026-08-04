@@ -57,7 +57,10 @@ function buildEmptyForm(storeName: string): CameraFormFields {
     fps: 30,
     rtspUrl: '',
     cameraType: 'fixed',
-    analyticsModules: [],
+    // Matches the backend's CameraCreate default (all supported modules) — a
+    // new camera previously defaulted to an empty module list here, silently
+    // disabling every analytics module until an admin manually checked every box.
+    analyticsModules: [...ANALYTICS_MODULES],
     enabled: true,
   };
 }
