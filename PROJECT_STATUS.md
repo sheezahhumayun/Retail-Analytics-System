@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-08-03 (Camera disable/delete bug fixes + full mutating-endpoint audit)
+**Last updated:** 2026-08-04 (Shared ScopeSelector built + integrated into all analytics pages; follow-up `store_id`/queue-zone bug fixes)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -1635,7 +1635,7 @@ These are shape / semantics mismatches between mock return types and Module 12 +
 | Live video stream URL (MJPEG/HLS/WebRTC) | No streaming endpoint; `frameUrl` stays `null` |
 | Real-time CV overlays (bounding boxes, track IDs) | No inference overlay API |
 | Customer flow trajectories | Placeholder only — no path analytics endpoint |
-| Zone performance rollup (all zones for a store) | Must fan out `GET /api/analytics/zones` per zone or add aggregate endpoint |
+| Zone performance rollup (all zones for a store) | Must fan out `GET /api/analytics/zones` per zone or add aggregate endpoint. **Resolved as intentional design** (2026-08-04): confirmed as the permanent approach, not a gap — see "Shared ScopeSelector Component" Bug 2b below. |
 | Overview KPI single call | Must compose multiple analytics endpoints |
 | List analytics zones (inference `zones` table) | Only `zone_shapes` geometry at `GET /api/zones`; analytics `zone_id` values come from seed/DB, not a list endpoint |
 | Nav open-alert count | Use `GET /api/alerts` filtered client-side (no `/count` shortcut) |
@@ -2030,7 +2030,7 @@ Module gating applied at the appropriate scope before aggregation. Prior-period 
 
 ### Reuse for Other Pages (Zones, Dwell, Zone Performance)
 
-Same backend function approach; frontend mirrors Traffic/Occupancy pattern.
+**Status: implemented.** Same backend function approach; frontend mirrors Traffic/Occupancy pattern. All pages below are integrated — see "Shared ScopeSelector Component" section for the actual component/hook that each page now uses.
 
 **CRITICAL for zone-aggregation endpoints:** When aggregating across multiple zones (camera-level or store-level "all zones"), **filter out queue-type zones at the SQL query level**, not in application code. 
 
@@ -2097,13 +2097,148 @@ This ensures the aggregated totals never include queue zones, matching the front
 
 **Backend:**
 - GET `/api/analytics/heatmap` takes `camera_id` (required), no changes needed
-- Zone performance analytics moved to dedicated Zone Performance page (not yet built)
+- Zone performance analytics moved to dedicated Zone Performance page (built and integrated — see "Shared ScopeSelector Component" section below)
 
 ### Module Gating Verification
 
 - `camera_id` required, no module disabled → include in aggregate
 - `camera_id` required, module disabled → 403 `analytics_module_disabled`
 - `store_id` only, some cameras disabled → include only enabled cameras; no 403 (partial coverage disclosed via eligible list or footnotes)
+
+---
+
+## Shared ScopeSelector Component — Built & Integrated (2026-08-04)
+
+Reusable Store → Camera → Zone cascade (component + hooks) implementing the pattern described
+above. Built as an independent presentation layer first, then wired into every analytics page
+in the same session (Traffic, Zones, Dwell, Queues, Occupancy, Heatmap, Zone Performance).
+
+### Files
+
+**New:**
+| File | Purpose |
+|---|---|
+| `frontend/lib/scope/use-scope-selector.ts` (~220 lines) | Core hook — validation, filtering, option generation. No React state beyond `useMemo`; reusable with or without a component. |
+| `frontend/lib/scope/use-local-scope-selection.ts` (~70 lines) | Convenience wrapper adding local `useState` for pages that don't need global `ScopeContext`. |
+| `frontend/components/analytics/scope-selector.tsx` (~150 lines) | Controlled presentation component — Store (read-only) + Camera dropdown + Zone dropdown. Tailwind-styled, accessible (labels/ids/disabled state). |
+| `frontend/lib/scope/index.ts` | Central re-exports: `useScopeSelector`, `useLocalScopeSelection`, `ScopeSelectorConfig`, `ScopeSelection`. |
+
+**Modified (additive, non-breaking):**
+| File | Change |
+|---|---|
+| `frontend/lib/types.ts` (line ~290) | `ScopeZone` extended: `{ id: string; name: string; type?: string }` — needed for queue-zone filtering. |
+| `frontend/lib/api/mappers.ts` (line ~971) | `buildOrganizationFromBackend()` now includes `zone.type` when building the org tree. |
+
+### API surface
+
+```typescript
+interface ScopeSelectorConfig {
+  excludeQueueZones?: boolean;    // hide queue/checkout/waiting zones
+  onlyQueueZones?: boolean;       // show ONLY queue/checkout/waiting zones
+  showZoneSelector?: boolean;     // default true — hide zone dropdown entirely (e.g. Occupancy)
+  showCameraAllOption?: boolean;  // default true — hide "All Cameras" (e.g. Heatmap)
+}
+
+interface ScopeSelection {
+  store_id: string;                      // always set
+  camera_id: string | "all";
+  zone_id: string | "all" | undefined;   // undefined when showZoneSelector is false
+}
+```
+
+`useScopeSelector(store, config)` returns `cameraOptions`, `getZoneOptions(cameraId)`,
+`getValidatedState(cameraId, zoneId)`, `buildSelection(...)`, `resolveCamera(...)`.
+`useLocalScopeSelection(store, config)` wraps it with local state: returns
+`{ camera, zone, setCamera, setZone, selection, cameraOptions, getZoneOptions }`.
+
+Frontend queue-zone detection (mirrors the backend `QUEUE_ZONE_TYPES` set in
+`analytics/queues/types.py`):
+```typescript
+function isQueueZoneType(zoneType: string | undefined): boolean {
+  if (!zoneType) return false;
+  return ["queue", "checkout", "waiting"].includes(zoneType.toLowerCase());
+}
+```
+Note the SQL-level filter used on the backend (see "Analytics Multi-Granularity Aggregation
+Pattern" above) checks the *raw* `Zone.zone_type` values (`"queue"`, `"checkout"`,
+`"waiting"`), not the frontend-mapped `ZoneShape.shape_type` (`"checkout_queue"`) — the two
+filters are independent code paths that must both stay in sync with the same three raw values.
+
+### Key behaviors
+
+- Zone dropdown is **disabled** (not just empty) when Camera = "All Cameras", and the zone
+  value is force-reset to `"all"` when camera changes.
+- Store is always required and is display-only — never a dropdown, no "all stores".
+- `getValidatedState()` never hands the parent an invalid combination (deleted camera, hidden
+  zone, etc.) — it falls back safely (first camera, or `"all"` if `showCameraAllOption` is
+  false and cameras exist).
+- Fully controlled: state lives in the parent (local `useState` via the convenience hook, or
+  global `ScopeContext`), not in the component itself.
+
+### Per-page integration (config actually used)
+
+| Page | Config | Notes |
+|---|---|---|
+| Traffic | `{ showZoneSelector: true, excludeQueueZones: true, showCameraAllOption: true }` | First page integrated; pattern for the rest. |
+| Zones | `{}` (defaults) | |
+| Dwell | `{}` (defaults) | |
+| Queues | `{ onlyQueueZones: true }` | Inverted filter — dropdown shows queue-type zones only. |
+| Occupancy | `{ showZoneSelector: false }` | No zone concept for this page. |
+| Heatmap | `{ showCameraAllOption: false, showZoneSelector: false }` | Must resolve to exactly one camera; page shows an empty state until one is picked. |
+| Zone Performance | `{}` (defaults) | Uses a custom per-zone query loop rather than `read_zones_for_scope()` — see queue-exclusion bug fix below. |
+
+### Status
+
+✅ Component/hooks built, typed, no breaking changes to `ScopeContext` or existing APIs.
+✅ Integrated into all seven pages above.
+The six standalone `SCOPE_SELECTOR_*.md` docs that walked through this build (README, SUMMARY,
+QUICK_REF, INTEGRATION, IMPLEMENTATION, FILES) are now superseded by this section — safe to
+delete from the project root, their content lives here.
+
+---
+
+## Bug Fixes — `store_id` validation + Zone Performance queue exclusion (2026-08-04, post-integration)
+
+Found via the same reload-and-compare-to-real-API-state audit method used in the 2026-08-03
+mutating-endpoint audit above. All three surfaced after the ScopeSelector integration started
+exercising these endpoints with real params.
+
+### Bug 1 — Missing `store_id` in Overview page dwell/queues calls (422)
+
+**Cause:** `getOverviewKpis()` (`frontend/lib/api/analytics.ts`) called `/api/analytics/dwell`
+and `/api/analytics/queues` with only `zone_id`, `from`, `to`, `compare` — both backend
+endpoints require `store_id` as non-optional, so every call 422'd.
+
+**Fix:** Lines 529 and 536 now include `store_id` in the query for both calls:
+`query: { store_id, zone_id, from, to, compare }`.
+
+**Impact:** Overview page no longer emits 422s for the dwell/queues widgets.
+
+### Bug 2a — Missing `store_id` in Zone Performance zones calls (422)
+
+**Cause:** Same shape as Bug 1 — `getZonePerformance()` called `/api/analytics/zones` without
+`store_id`.
+
+**Fix:** `getZonePerformance()` (`frontend/lib/api/analytics.ts`) — line 847 resolves `store_id`
+with a fallback to `getDefaultStoreId()` (same pattern as `getOverviewKpis()`); line 894 includes
+it in the query: `query: { store_id, zone_id, from, to, compare }`.
+
+### Bug 2b — Queue zones included in Zone Performance results
+
+**Cause:** `getZonePerformance()` builds its zone list from org data (including queue zones,
+`type: "checkout_queue"`) and queries each zone individually via `zone_id`. Single-zone queries
+route to `read_zone_analytics_period()`, which has no queue filtering by design — so queue
+zones leaked into results despite the correct `Zone.zone_type` filter existing elsewhere.
+
+**Fix:** Lines 863–866 of `getZonePerformance()` now skip queue zones before querying:
+`if (zone.type === "checkout_queue") continue;` — reuses the frontend `ZoneShape` mapping
+where `type` is already normalized to `"checkout_queue"`.
+
+**Note on architecture:** `getZonePerformance()` intentionally uses a custom frontend
+aggregation (builds a zone list from org data, queries per-zone) rather than
+`read_zones_for_scope()`'s multi-zone SQL aggregation — this is by original page design, not a
+bug. The queue exclusion above is applied at the frontend zone-list-building stage to match the
+backend's exclusion behavior on the SQL side.
 
 ---
 
