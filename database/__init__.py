@@ -4,6 +4,7 @@ from .cleanup import prune_raw_events, run_cleanup
 from .config import get_database_url, get_raw_event_retention_days
 from .models import (
     Alert,
+    AlertRule,
     Camera,
     CountingLine,
     DwellEventRow,
@@ -29,6 +30,7 @@ _LAZY_EXPORTS = {
 
 __all__ = [
     "Alert",
+    "AlertRule",
     "AnalyticsDbWriter",
     "Camera",
     "CountingLine",

@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 from analytics.modules import infer_default_modules
 
 from .models import (
+    AlertRule,
     Camera,
     CountingLine,
     Organization,
@@ -30,6 +31,8 @@ STORE_ID = "store_main"
 USER_ID = "user_admin"
 USER_REGULAR_ID = "user_demo"
 
+QUEUE_ZONE_TYPES = frozenset({"queue", "checkout", "waiting"})
+
 
 def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -42,6 +45,7 @@ def seed_reference_data(*, force: bool = False) -> None:
             return
         _seed_core(session)
         _seed_cameras_and_zones(session)
+        _seed_alert_rules(session)
         _seed_zone_shapes(session)
         _seed_historical_metrics(session)
         session.commit()
@@ -179,6 +183,89 @@ def _seed_cameras_and_zones(session: Session) -> None:
             zone_types=zone_types,
         )
         session.add(camera)
+
+
+def _upsert_alert_rule(
+    session: Session,
+    *,
+    rule_type: str,
+    threshold: float,
+    now: datetime,
+    store_id: str | None = None,
+    zone_id: str | None = None,
+    severity: str = "warning",
+    enabled: bool = True,
+) -> None:
+    """Insert or update one alert_rules row (idempotent on rule_type + store_id + zone_id)."""
+    stmt = select(AlertRule).where(AlertRule.rule_type == rule_type)
+    if store_id is None:
+        stmt = stmt.where(AlertRule.store_id.is_(None))  # type: ignore[union-attr]
+    else:
+        stmt = stmt.where(AlertRule.store_id == store_id)
+    if zone_id is None:
+        stmt = stmt.where(AlertRule.zone_id.is_(None))  # type: ignore[union-attr]
+    else:
+        stmt = stmt.where(AlertRule.zone_id == zone_id)
+
+    existing = session.exec(stmt).first()
+    if existing is None:
+        session.add(
+            AlertRule(
+                rule_type=rule_type,
+                store_id=store_id,
+                zone_id=zone_id,
+                threshold=threshold,
+                severity=severity,
+                enabled=enabled,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    else:
+        existing.threshold = threshold
+        existing.severity = severity
+        existing.enabled = enabled
+        existing.updated_at = now
+        session.add(existing)
+
+
+def _seed_alert_rules(session: Session) -> None:
+    """Seed alert_rules — mirrors migrations 006_alert_rules and 007_occupancy_alert."""
+    now = datetime.now(timezone.utc)
+
+    # Org-wide defaults (006 + 007)
+    for rule_type, threshold in (
+        ("DWELL_THRESHOLD", 60.0),
+        ("QUEUE_THRESHOLD", 5.0),
+        ("QUEUE_THRESHOLD_DURATION", 120.0),
+        ("OCCUPANCY_THRESHOLD", 30.0),
+    ):
+        _upsert_alert_rule(session, rule_type=rule_type, threshold=threshold, now=now)
+
+    zones = session.exec(select(Zone).where(Zone.analytics_enabled == True)).all()  # noqa: E712
+    for zone in zones:
+        _upsert_alert_rule(
+            session,
+            rule_type="DWELL_THRESHOLD",
+            threshold=60.0,
+            zone_id=zone.id,
+            now=now,
+        )
+        if zone.zone_type in QUEUE_ZONE_TYPES:
+            _upsert_alert_rule(
+                session,
+                rule_type="QUEUE_THRESHOLD",
+                threshold=5.0,
+                zone_id=zone.id,
+                now=now,
+            )
+            _upsert_alert_rule(
+                session,
+                rule_type="QUEUE_THRESHOLD_DURATION",
+                threshold=120.0,
+                zone_id=zone.id,
+                now=now,
+            )
 
 
 def _map_zone_shape_type(zone_type: str) -> str:

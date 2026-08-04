@@ -146,6 +146,102 @@ class TestZoneShapes:
         assert resp.status_code == 422
 
 
+class TestZoneAlertRuleProvisioning:
+    """Module 15 Phase 6 — alert_rules auto-provision on zone creation."""
+
+    def _org_default(
+        self, api_client: TestClient, admin_headers: dict, rule_type: str
+    ) -> dict:
+        listing = api_client.get("/api/admin/alert-rules", headers=admin_headers)
+        assert listing.status_code == 200
+        return next(
+            r
+            for r in listing.json()
+            if r["rule_type"] == rule_type and r["zone_id"] is None and r["store_id"] is None
+        )
+
+    def _zone_rules(
+        self, api_client: TestClient, admin_headers: dict, zone_id: str
+    ) -> list[dict]:
+        listing = api_client.get("/api/admin/alert-rules", headers=admin_headers)
+        assert listing.status_code == 200
+        return [r for r in listing.json() if r["zone_id"] == zone_id]
+
+    def _create_zone(
+        self,
+        api_client: TestClient,
+        admin_headers: dict,
+        zone_id: str,
+        zone_type: str,
+    ) -> None:
+        resp = api_client.post(
+            "/api/zones",
+            headers=admin_headers,
+            json={
+                "id": zone_id,
+                "camera_id": "town",
+                "name": "Provision Test Zone",
+                "type": zone_type,
+                "polygon_points": [[0, 0], [10, 0], [10, 10]],
+            },
+        )
+        assert resp.status_code == 201, resp.text
+
+    def test_create_general_zone_provisions_dwell_from_org_default(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        org_dwell = self._org_default(api_client, admin_headers, "DWELL_THRESHOLD")
+        zone_id = f"zone_{uuid.uuid4().hex[:8]}"
+        self._create_zone(api_client, admin_headers, zone_id, "general")
+
+        rules = self._zone_rules(api_client, admin_headers, zone_id)
+        dwell = next(r for r in rules if r["rule_type"] == "DWELL_THRESHOLD")
+        assert dwell["threshold"] == org_dwell["threshold"]
+        assert dwell["severity"] == org_dwell["severity"]
+        assert dwell["enabled"] == org_dwell["enabled"]
+        assert not any(r["rule_type"] == "OCCUPANCY_THRESHOLD" for r in rules)
+        assert not any(r["rule_type"] == "QUEUE_THRESHOLD" for r in rules)
+
+        api_client.delete(f"/api/zones/{zone_id}", headers=admin_headers)
+
+    def test_create_queue_zone_provisions_queue_rules_from_org_defaults(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        org_dwell = self._org_default(api_client, admin_headers, "DWELL_THRESHOLD")
+        org_queue = self._org_default(api_client, admin_headers, "QUEUE_THRESHOLD")
+        org_duration = self._org_default(
+            api_client, admin_headers, "QUEUE_THRESHOLD_DURATION"
+        )
+        zone_id = f"zone_{uuid.uuid4().hex[:8]}"
+        self._create_zone(api_client, admin_headers, zone_id, "checkout_queue")
+
+        rules = self._zone_rules(api_client, admin_headers, zone_id)
+        dwell = next(r for r in rules if r["rule_type"] == "DWELL_THRESHOLD")
+        queue = next(r for r in rules if r["rule_type"] == "QUEUE_THRESHOLD")
+        duration = next(r for r in rules if r["rule_type"] == "QUEUE_THRESHOLD_DURATION")
+
+        assert dwell["threshold"] == org_dwell["threshold"]
+        assert dwell["severity"] == org_dwell["severity"]
+        assert queue["threshold"] == org_queue["threshold"]
+        assert queue["severity"] == org_queue["severity"]
+        assert duration["threshold"] == org_duration["threshold"]
+        assert duration["severity"] == org_duration["severity"]
+        assert not any(r["rule_type"] == "OCCUPANCY_THRESHOLD" for r in rules)
+
+        api_client.delete(f"/api/zones/{zone_id}", headers=admin_headers)
+
+    def test_delete_zone_cascades_alert_rules(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        zone_id = f"zone_{uuid.uuid4().hex[:8]}"
+        self._create_zone(api_client, admin_headers, zone_id, "general")
+        assert len(self._zone_rules(api_client, admin_headers, zone_id)) >= 1
+
+        delete = api_client.delete(f"/api/zones/{zone_id}", headers=admin_headers)
+        assert delete.status_code == 204
+        assert len(self._zone_rules(api_client, admin_headers, zone_id)) == 0
+
+
 class TestCountingLines:
     def test_list_seeded(self, api_client: TestClient, user_headers: dict):
         resp = api_client.get("/api/lines?camera_id=entrance", headers=user_headers)
@@ -329,6 +425,66 @@ class TestAlertsExtended:
             json={"status": "resolved"},
         )
         assert resp.status_code == 404
+
+
+class TestAdminAlertRules:
+    def test_admin_can_list_alert_rules(self, api_client: TestClient, admin_headers: dict):
+        resp = api_client.get("/api/admin/alert-rules", headers=admin_headers)
+        assert resp.status_code == 200
+        rules = resp.json()
+        assert isinstance(rules, list)
+        assert len(rules) >= 1
+        assert any(r["rule_type"] == "OCCUPANCY_THRESHOLD" for r in rules)
+
+    def test_admin_can_update_threshold(self, api_client: TestClient, admin_headers: dict):
+        listing = api_client.get("/api/admin/alert-rules", headers=admin_headers)
+        assert listing.status_code == 200
+        rule = next(r for r in listing.json() if r["rule_type"] == "OCCUPANCY_THRESHOLD")
+        rule_id = rule["id"]
+        original_threshold = rule["threshold"]
+        new_threshold = original_threshold + 1
+
+        resp = api_client.put(
+            f"/api/admin/alert-rules/{rule_id}",
+            headers=admin_headers,
+            json={
+                "threshold": new_threshold,
+                "severity": rule["severity"],
+                "enabled": rule["enabled"],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["threshold"] == new_threshold
+
+        verify = api_client.get("/api/admin/alert-rules", headers=admin_headers)
+        updated = next(r for r in verify.json() if r["id"] == rule_id)
+        assert updated["threshold"] == new_threshold
+
+        api_client.put(
+            f"/api/admin/alert-rules/{rule_id}",
+            headers=admin_headers,
+            json={
+                "threshold": original_threshold,
+                "severity": rule["severity"],
+                "enabled": rule["enabled"],
+            },
+        )
+
+    def test_non_admin_forbidden(self, api_client: TestClient, user_headers: dict):
+        resp = api_client.get("/api/admin/alert-rules", headers=user_headers)
+        assert resp.status_code == 403
+
+    def test_put_invalid_threshold_returns_422(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        listing = api_client.get("/api/admin/alert-rules", headers=admin_headers)
+        rule_id = listing.json()[0]["id"]
+        resp = api_client.put(
+            f"/api/admin/alert-rules/{rule_id}",
+            headers=admin_headers,
+            json={"threshold": 0, "severity": "warning", "enabled": True},
+        )
+        assert resp.status_code == 422
 
 
 class TestReports:

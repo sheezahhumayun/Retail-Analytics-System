@@ -231,3 +231,53 @@ class Alert(SQLModel, table=True):
         default_factory=dict,
         sa_column=Column("metadata", JSONB, nullable=False, server_default="{}"),
     )
+
+
+class AlertRule(SQLModel, table=True):
+    """Configurable alert thresholds (Module 15, Phase 2).
+    
+    Stores per-zone and per-store alert rule configurations. Admin-editable.
+    
+    Lookup hierarchy (Phase 2):
+    1. zone_id=<specific_zone>, store_id=NULL — per-zone rule
+    2. zone_id=NULL, store_id=<store> — store-wide default (future)
+    3. zone_id=NULL, store_id=NULL — org-wide default (fallback for new zones)
+    
+    rule_type values: DWELL_THRESHOLD, QUEUE_THRESHOLD, QUEUE_THRESHOLD_DURATION 
+    (for now; high_occupancy coming in Phase 3).
+    """
+
+    __tablename__ = "alert_rules"
+    __table_args__ = (
+        Index("ix_alert_rules_rule_type", "rule_type"),
+        Index("ix_alert_rules_store_zone", "store_id", "zone_id", "rule_type"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    rule_type: str = Field(max_length=64, nullable=False, index=True)
+    store_id: str | None = Field(
+        default=None, foreign_key="stores.id", index=True,
+        description="Null = applies to all stores in the org"
+    )
+    zone_id: str | None = Field(
+        default=None, foreign_key="zones.id", index=True,
+        description="Per-zone thresholds for dwell/queue rules; null = store-wide (for occupancy rules)"
+    )
+    threshold: float = Field(
+        nullable=False,
+        description="Numeric threshold: seconds for dwell/queue duration, count for queue length, etc."
+    )
+    severity: str = Field(
+        default="warning", max_length=32, nullable=False,
+        description="Alert severity: critical, warning, or info"
+    )
+    enabled: bool = Field(default=True, nullable=False, index=True)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )

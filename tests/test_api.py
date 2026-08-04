@@ -288,7 +288,7 @@ class TestAnalytics:
         resp = api_client.get(
             "/api/analytics/zones",
             headers=auth_headers,
-            params={"zone_id": "store1", "from": yesterday, "to": yesterday},
+            params={"store_id": STORE_ID, "zone_id": "store1", "from": yesterday, "to": yesterday},
         )
         assert resp.status_code == 200
         assert resp.json()["zone_id"] == "store1"
@@ -298,6 +298,7 @@ class TestAnalytics:
             "/api/analytics/dwell",
             headers=auth_headers,
             params={
+                "store_id": STORE_ID,
                 "zone_id": "store1",
                 "from": "2020-01-01",
                 "to": "2099-12-31",
@@ -311,9 +312,10 @@ class TestAnalytics:
             "/api/analytics/queues",
             headers=auth_headers,
             params={
-                "zone_id": "store1",
-                "from": "2020-01-01",
-                "to": "2099-12-31",
+                "store_id": STORE_ID,
+                "zone_id": "queue_lane",
+                "from": "2099-01-01",
+                "to": "2099-01-02",
             },
         )
         assert resp.status_code == 200

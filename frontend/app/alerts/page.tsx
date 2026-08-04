@@ -5,17 +5,23 @@ import { DashboardShell } from '@/components/dashboard/dashboard-shell';
 import { ScopeContextBanner } from '@/components/dashboard/scope-context-banner';
 import { AlertFilters } from '@/components/alerts/alert-filters';
 import { AlertCard } from '@/components/alerts/alert-card';
+import { AlertThresholdsModal } from '@/components/alert-thresholds-modal';
 import { getAlerts, updateAlert } from '@/lib/api/alerts';
+import { useAuth } from '@/lib/auth/AuthContext';
 import { zonesForScope } from '@/lib/scope/scope-filters';
 import { useScope } from '@/lib/scope/ScopeContext';
 import { SEVERITY_COLORS } from '@/lib/constants';
 import type { Alert, AlertSeverity, AlertStatus } from '@/lib/types';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, Settings2 } from 'lucide-react';
+
+const ADMIN_ROLE = 'System Administrator' as const;
 
 export default function AlertsPage() {
+  const { user } = useAuth();
   const { store, cameraId, zoneId, storeCameraIds } = useScope();
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showThresholdsModal, setShowThresholdsModal] = useState(false);
   const [severity, setSeverity] = useState<AlertSeverity | 'all'>('all');
   const [status, setStatus] = useState<AlertStatus | 'all'>('all');
   const [camera, setCamera] = useState('all');
@@ -129,11 +135,23 @@ export default function AlertsPage() {
   return (
     <DashboardShell>
       <div className="space-y-6">
-        <div className="flex flex-col gap-2">
-          <h1 className="text-3xl font-bold text-foreground">Alerts</h1>
-          <p className="text-muted-foreground">
-            Monitor and manage store events in real-time
-          </p>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-foreground">Alerts</h1>
+            <p className="text-muted-foreground">
+              Monitor and manage store events in real-time
+            </p>
+          </div>
+          {user?.role === ADMIN_ROLE ? (
+            <button
+              type="button"
+              onClick={() => setShowThresholdsModal(true)}
+              className="inline-flex items-center gap-2 self-start rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+            >
+              <Settings2 className="h-4 w-4" />
+              Alert Thresholds
+            </button>
+          ) : null}
         </div>
 
         <ScopeContextBanner />
@@ -207,6 +225,11 @@ export default function AlertsPage() {
           </div>
         )}
       </div>
+
+      <AlertThresholdsModal
+        isOpen={showThresholdsModal}
+        onClose={() => setShowThresholdsModal(false)}
+      />
     </DashboardShell>
   );
 }

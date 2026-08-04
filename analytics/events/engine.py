@@ -26,9 +26,12 @@ from analytics.queues.types import QueueMetricsSnapshot
 from analytics.zones import MultiZoneAnalytics, Zone, ZoneAnalyticsSnapshot
 from analytics.zones.types import ZoneEvent
 
+from backend.app.services.alert_rules import get_occupancy_threshold
+
 from .adapters import (
     crossing_to_analytics,
     dwell_threshold_to_analytics,
+    occupancy_threshold_to_analytics,
     queue_threshold_to_analytics,
     zone_to_analytics,
 )
@@ -168,6 +171,20 @@ class AnalyticsEngine:
             tracker.process(crossing)
         if self._store is not None:
             self._store.process(crossing)
+            store_id = self._config.store_id
+            if store_id is not None:
+                threshold = get_occupancy_threshold(store_id)
+                if threshold is not None and self._store.check_threshold(threshold):
+                    snap = self._store.store_snapshot()
+                    self._bus.publish(
+                        occupancy_threshold_to_analytics(
+                            store_id=store_id,
+                            camera_id=event.camera_id,
+                            current_occupancy=snap.current_occupancy,
+                            threshold=threshold,
+                            timestamp=crossing.timestamp,
+                        )
+                    )
 
     def process_zone_event(self, event: ZoneEvent) -> None:
         """Apply a zone event and publish bus events for transitions / thresholds."""

@@ -23,6 +23,8 @@ from analytics.modules import (
 from analytics.queues.types import is_queue_zone
 from analytics.zones.types import Zone, ZoneEvent, ZoneEventType
 
+from backend.app.services.alert_rules import get_occupancy_severity
+
 from .models import (
     Alert,
     DwellEventRow,
@@ -217,6 +219,7 @@ class AnalyticsDbWriter:
         if et in (
             AnalyticsEventType.DWELL_THRESHOLD.value,
             AnalyticsEventType.QUEUE_THRESHOLD.value,
+            AnalyticsEventType.OCCUPANCY_THRESHOLD.value,
             AnalyticsEventType.CAMERA_OFFLINE.value,
         ):
             self._insert_alert(session, event, ts)
@@ -275,12 +278,26 @@ class AnalyticsDbWriter:
         )
 
     def _insert_alert(self, session: Session, event: AnalyticsEvent, ts: datetime) -> None:
-        severity = "critical" if event.event_type == AnalyticsEventType.CAMERA_OFFLINE.value else "warning"
+        if event.event_type == AnalyticsEventType.CAMERA_OFFLINE.value:
+            severity = "critical"
+            camera_id = event.camera_id
+            zone_id = event.zone_id
+        elif event.event_type == AnalyticsEventType.OCCUPANCY_THRESHOLD.value:
+            store_id = str(event.metadata.get("store_id", self._config.store_id))
+            severity = get_occupancy_severity(store_id)
+            camera_id = None
+            zone_id = None
+        else:
+            # DWELL_THRESHOLD / QUEUE_THRESHOLD: severity still hardcoded; loading
+            # from alert_rules would require a per-zone DB lookup here.
+            severity = "warning"
+            camera_id = event.camera_id
+            zone_id = event.zone_id
         session.add(
             Alert(
                 alert_type=event.event_type,
-                camera_id=event.camera_id,
-                zone_id=event.zone_id,
+                camera_id=camera_id,
+                zone_id=zone_id,
                 timestamp=ts,
                 severity=severity,
                 status="open",

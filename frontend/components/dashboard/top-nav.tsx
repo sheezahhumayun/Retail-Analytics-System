@@ -6,7 +6,7 @@ import { useEffect, useState } from "react"
 import { Activity, Menu, X } from "lucide-react"
 
 import { NAV_ITEMS } from "@/lib/nav-config"
-import { getOpenAlertCount } from "@/lib/api/alerts"
+import { getOpenAlertCount, subscribeOpenAlertCount } from "@/lib/api/alerts"
 import { cn } from "@/lib/utils"
 import { AlertBadge } from "@/components/dashboard/alert-badge"
 import { NavDropdown } from "@/components/dashboard/nav-dropdown"
@@ -134,8 +134,12 @@ function OpenAlertBadge() {
     }
 
     load()
+    const unsubscribe = subscribeOpenAlertCount(() => {
+      load()
+    })
     return () => {
       cancelled = true
+      unsubscribe()
     }
   }, [])
 

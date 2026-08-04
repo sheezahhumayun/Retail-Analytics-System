@@ -15,6 +15,7 @@ from database.models import (
     OccupancyMetric,
     QueueMetric,
     Store,
+    VisitorMetric,
     Zone,
     ZoneMetric,
 )
@@ -104,6 +105,44 @@ def _traffic_buckets(
         )
         for metric_date, hour in sorted_keys
     ]
+
+
+def _visitor_metric_buckets(
+    session: Session,
+    *,
+    store_id: str,
+    start: datetime,
+    end: datetime,
+) -> list[TrafficBucket]:
+    """Store traffic from VisitorMetric rollups — full 24 hours per day, zero-filled."""
+    settings = get_settings()
+    tz = _normalize_timezone(settings.store_timezone)
+    start_date = _local_parts(start, tz)[0]
+    end_date = _local_parts(end, tz)[0]
+    rows = session.exec(
+        select(VisitorMetric).where(
+            VisitorMetric.store_id == store_id,
+            VisitorMetric.metric_date >= start_date,
+            VisitorMetric.metric_date <= end_date,
+        )
+    ).all()
+    by_key = {(r.metric_date, r.hour): r for r in rows}
+
+    buckets: list[TrafficBucket] = []
+    current = start_date
+    while current <= end_date:
+        for hour in range(24):
+            row = by_key.get((current, hour))
+            buckets.append(
+                TrafficBucket(
+                    metric_date=current.isoformat(),
+                    hour=hour,
+                    entries=row.entries if row is not None else 0,
+                    exits=row.exits if row is not None else 0,
+                )
+            )
+        current = current.fromordinal(current.toordinal() + 1)
+    return buckets
 
 
 def _zone_buckets(
@@ -242,7 +281,7 @@ def read_store_traffic_period(
     require_store_module(session, store_id, MODULE_ENTRY_EXIT)
     eligible = eligible_cameras_for_store(session, store_id, MODULE_ENTRY_EXIT)
     camera_ids = [c.id for c in eligible]
-    buckets = _traffic_buckets(session, camera_ids=camera_ids, start=start, end=end)
+    buckets = _visitor_metric_buckets(session, store_id=store_id, start=start, end=end)
     return StoreTrafficPeriod(buckets=buckets, eligible=eligible, camera_ids=camera_ids)
 
 
@@ -329,11 +368,11 @@ def read_traffic_for_scope(
         camera_ids = [camera_id]
         buckets = _traffic_buckets(session, camera_ids=camera_ids, start=start, end=end)
     else:
-        # Store-level: all eligible cameras, all zones
+        # Store-level: VisitorMetric rollups (24 zero-filled hours per day).
         eligible = eligible_cameras_for_store(session, store_id, MODULE_ENTRY_EXIT)
         camera_ids = [c.id for c in eligible]
-        buckets = _traffic_buckets(session, camera_ids=camera_ids, start=start, end=end)
-    
+        buckets = _visitor_metric_buckets(session, store_id=store_id, start=start, end=end)
+
     return StoreTrafficPeriod(buckets=buckets, eligible=eligible, camera_ids=camera_ids)
 
 

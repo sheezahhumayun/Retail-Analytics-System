@@ -15,6 +15,7 @@ from .services.camera_health import refresh_all_live_camera_statuses
 from .config import get_settings
 from .exceptions import register_exception_handlers
 from .routers import (
+    alert_rules_admin,
     alerts,
     alerts_extended,
     analytics,
@@ -70,6 +71,7 @@ app.include_router(analytics.router, prefix=api)
 app.include_router(events.router, prefix=api)
 app.include_router(alerts.router, prefix=api)
 app.include_router(alerts_extended.router, prefix=api)
+app.include_router(alert_rules_admin.router, prefix=api)
 app.include_router(reports.router, prefix=api)
 app.include_router(users.router, prefix=api)
 

@@ -42,6 +42,7 @@ class StoreOccupancyAggregator:
         }
         self._store_peak = 0
         self._store_peak_time: float | None = None
+        self._threshold_breached = False
 
     @property
     def store_id(self) -> str:
@@ -57,6 +58,18 @@ class StoreOccupancyAggregator:
             tracker.reset()
         self._store_peak = 0
         self._store_peak_time = None
+        self._threshold_breached = False
+
+    def check_threshold(self, threshold: float) -> bool:
+        """Return True only on below-threshold → at-or-above-threshold transition."""
+        current = self.store_snapshot().current_occupancy
+        if current >= threshold:
+            if not self._threshold_breached:
+                self._threshold_breached = True
+                return True
+            return False
+        self._threshold_breached = False
+        return False
 
     def camera_tracker(self, camera_id: str) -> OccupancyTracker | None:
         return self._cameras.get(camera_id)

@@ -31,6 +31,23 @@ export type AlertPatch = Partial<
   Pick<Alert, "status" | "severity" | "message">
 >;
 
+type OpenAlertCountListener = () => void;
+const openAlertCountListeners = new Set<OpenAlertCountListener>();
+
+/** Subscribe to open-alert count changes (e.g. after PATCH on /api/alerts). */
+export function subscribeOpenAlertCount(listener: OpenAlertCountListener): () => void {
+  openAlertCountListeners.add(listener);
+  return () => {
+    openAlertCountListeners.delete(listener);
+  };
+}
+
+export function notifyOpenAlertCountChanged(): void {
+  for (const listener of openAlertCountListeners) {
+    listener();
+  }
+}
+
 /** Name lookups from the cached org tree — no per-camera zone fan-out. */
 async function buildNameLookups(): Promise<{
   cameras: Map<string, string>;
@@ -83,6 +100,8 @@ export async function updateAlert(
     method: "PATCH",
     body: { status: patch.status },
   });
+
+  notifyOpenAlertCountChanged();
 
   const lookups = await buildNameLookups();
   return mapAlert(updated, lookups.cameras, lookups.zones);

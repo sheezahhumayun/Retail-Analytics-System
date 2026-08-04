@@ -24,7 +24,13 @@ from analytics.modules import (
     normalize_modules,
     zones_for_enabled_modules,
 )
+from analytics.queues import is_queue_zone
 from analytics.zones import Zone, ZoneDetector
+from backend.app.services.alert_rules import (
+    get_dwell_thresholds,
+    get_queue_duration_thresholds,
+    get_queue_length_thresholds,
+)
 from database import AnalyticsDbWriter, DbWriterConfig, session_scope
 from database.models import Camera, CountingLine as DbCountingLine, Zone as DbZone
 from inference.detection import create_detector
@@ -108,6 +114,20 @@ def process_recorded_camera(
     needs_zone_detector = bool(pipeline_zones)
     needs_heatmap = module_enabled(enabled, MODULE_HEATMAP)
 
+    # Load alert thresholds from alert_rules table (Module 15, Phase 2).
+    # Falls back to org-wide defaults if no zone-specific rule exists.
+    all_zone_ids = [z.zone_id for z in pipeline_zones]
+    dwell_zones = [z.zone_id for z in pipeline_zones if not is_queue_zone(z)]
+    queue_zones = [z.zone_id for z in pipeline_zones if is_queue_zone(z)]
+
+    dwell_thresholds = get_dwell_thresholds(dwell_zones, store_id) if dwell_zones else None
+    queue_length_thresholds = (
+        get_queue_length_thresholds(queue_zones, store_id) if queue_zones else None
+    )
+    queue_duration_thresholds = (
+        get_queue_duration_thresholds(queue_zones, store_id) if queue_zones else None
+    )
+
     bus = EventBus()
     db_writer = AnalyticsDbWriter(
         DbWriterConfig(
@@ -127,6 +147,9 @@ def process_recorded_camera(
             store_id=store_id,
             db_writer=db_writer,
             enabled_modules=enabled,
+            dwell_thresholds=dwell_thresholds,
+            queue_length_thresholds=queue_length_thresholds,
+            queue_duration_thresholds=queue_duration_thresholds,
         ),
     )
 

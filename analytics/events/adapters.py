@@ -63,6 +63,26 @@ def dwell_threshold_to_analytics(event: DwellThresholdEvent) -> AnalyticsEvent:
     )
 
 
+def occupancy_threshold_to_analytics(
+    *,
+    store_id: str,
+    camera_id: str,
+    current_occupancy: int,
+    threshold: float,
+    timestamp: float,
+) -> AnalyticsEvent:
+    return AnalyticsEvent.from_epoch(
+        event_type=AnalyticsEventType.OCCUPANCY_THRESHOLD,
+        camera_id=camera_id,
+        timestamp=timestamp,
+        metadata={
+            "store_id": store_id,
+            "current_occupancy": current_occupancy,
+            "threshold": threshold,
+        },
+    )
+
+
 def queue_threshold_to_analytics(event: QueueThresholdEvent) -> AnalyticsEvent:
     metadata = {
         "zone_name": event.zone_name,

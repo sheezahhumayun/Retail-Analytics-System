@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-08-04 (Shared ScopeSelector built + integrated into all analytics pages; follow-up `store_id`/queue-zone bug fixes)
+**Last updated:** 2026-08-05 (Module 15 — Alerting System complete, Phases 1–6b + follow-ups)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -103,8 +103,8 @@ fixes.
 | 12.5 | Extended REST API (frontend seam) | ✅ Complete |
 | 13 | Frontend Web Dashboard | ✅ Complete (UI + live API via `lib/api/*`) |
 | 14 | Reports (CSV/PDF export) | ✅ Complete (frontend export wired in 13.5 pass 2) |
-| 15 | Alerting | ⬜ Not started |
-| 16 | System Administration | ⬜ Not started |
+| 15 | Alerting | ✅ Complete |
+| 16 | System Administration | ✅ Complete (camera thumbnail preview + role-gate mapping outstanding — see Known Limitations) |
 | 17 | Dockerization & Deployment | ⬜ Not started |
 | 18 | Testing, Evaluation & Accuracy Validation | ⬜ Not started |
 | 19 | Scalability & Path to Multi-Camera/Multi-Store | ⬜ Not started |
@@ -151,6 +151,8 @@ Base URL: `http://127.0.0.1:8000` · Swagger: **`/docs`** · OpenAPI: **`/openap
 | `GET` | `/api/events` | JWT | Raw events (`from`, `to`, `camera_id?`, `event_type?`) |
 | `GET` | `/api/alerts` | JWT | List alerts (`status?`, `severity?`) |
 | `PATCH` | `/api/alerts/{id}` | JWT | Acknowledge/resolve alert (`status`) |
+| `GET` | `/api/admin/alert-rules` | admin | List all `alert_rules` rows (thresholds/severity/enabled) |
+| `PUT` | `/api/admin/alert-rules/{id}` | admin | Update `threshold` (`>0`), `severity`, `enabled` |
 | `GET` | `/api/reports/{type}` | JWT | JSON report (`type`: traffic\|occupancy\|zones\|dwell\|queues) |
 | `GET` | `/api/reports/{type}/export` | JWT | CSV/PDF export (`format=csv\|pdf`) |
 | `GET` | `/api/users` | admin | List users |
@@ -159,7 +161,7 @@ Base URL: `http://127.0.0.1:8000` · Swagger: **`/docs`** · OpenAPI: **`/openap
 | `DELETE` | `/api/users/{id}` | admin | Delete user |
 | `POST` | `/api/users/{id}/reset-password` | admin | Reset user password |
 
-**38 endpoints total** (1 public health, 1 public login, 36 JWT-protected).
+**40 endpoints total** (1 public health, 1 public login, 38 JWT-protected, of which 2 — `/api/admin/alert-rules` GET/PUT — are admin-only).
 
 **RBAC (two tiers):** `admin` and `user`. All `POST`/`PUT`/`PATCH`/`DELETE` except `PATCH /api/alerts/{id}` require **admin**. All `GET` routes + alert status updates are open to any authenticated user.
 
@@ -1080,8 +1082,6 @@ length and deriving wait-time estimates from historical dwell.
       stand in zone (`run-queues-demo.py`).
 - [ ] `--length-threshold` / `--duration-threshold` fire `QUEUE_THRESHOLD` once
       per episode as expected.
-
----
 
 ---
 
@@ -2242,7 +2242,270 @@ backend's exclusion behavior on the SQL side.
 
 ---
 
-## Next Up: Module 15 — Alerting (backend delivery) / Module 16 — System Administration
+## ✅ Module 15 — Alerting System — DONE
+
+Configurable threshold-based alerting, built across 6 phases + follow-ups.
+
+### Baseline (Phase 0)
+
+Alerting infrastructure already existed — `alerts` table, `AnalyticsDbWriter` subscribed to
+`DWELL_THRESHOLD`/`QUEUE_THRESHOLD`/`OCCUPANCY_THRESHOLD`/`CAMERA_OFFLINE`, dwell/queue tracker
+threshold-firing logic, `GET`/`PATCH /api/alerts`, frontend Alerts page — but never fired in
+practice: `inference/pipeline/process_recorded.py` built `AnalyticsEngineConfig` with every
+threshold dict defaulting to `None`, so trackers skipped the check entirely. Root cause:
+alerting was wired end-to-end but never turned on — not dead code.
+
+**Decision:** add a configurable `alert_rules` table so admins can control thresholds without
+code changes; keep the existing tracker debounce/firing logic completely unchanged.
+
+### What was built
+
+**1. `alert_rules` table** (migration `006_alert_rules`, extended by `007_occupancy_alert`)
+- `AlertRule` model: `id`, `rule_type` (`DWELL_THRESHOLD` \| `QUEUE_THRESHOLD` \|
+  `QUEUE_THRESHOLD_DURATION` \| `OCCUPANCY_THRESHOLD`), `store_id` (nullable), `zone_id`
+  (nullable), `threshold`, `severity`, `enabled`, `created_at`, `updated_at`.
+- Fallback hierarchy: per-zone rule → store-specific rule (future) → org-wide default
+  (`store_id=NULL, zone_id=NULL`). A missing row never silently disables alerting — it falls
+  back to a hardcoded default.
+- Seeded values: `DWELL_THRESHOLD` 60s, `QUEUE_THRESHOLD` 5 persons, `QUEUE_THRESHOLD_DURATION`
+  120s (from `analytics/` module README examples), `OCCUPANCY_THRESHOLD` 30 persons
+  (placeholder, store-level, `zone_id` always `NULL`). All seeded `severity="warning"`,
+  `enabled=true`.
+- `database/seed.py` — `_upsert_alert_rule()` / `_seed_alert_rules()` mirror the migration
+  values idempotently on every reseed (migrations only run once; a truncate/reseed previously
+  left the table empty).
+
+**2. Threshold service** — `backend/app/services/alert_rules.py`
+- `get_dwell_thresholds(zone_ids, store_id)`, `get_queue_length_thresholds(...)`,
+  `get_queue_duration_thresholds(...)` → dicts keyed by `zone_id`, implementing the fallback
+  hierarchy.
+- `get_occupancy_threshold(store_id)` / `get_occupancy_severity(store_id)` — store-specific →
+  org-wide → hardcoded `30.0` fallback.
+- `provision_zone_alert_rules(zone_id, zone_type, store_id, session)` (Phase 6) — auto-creates
+  per-zone rules on zone creation, copying threshold/severity/enabled from the *current*
+  org-wide default (not hardcoded), so new zones stay consistent with any prior admin edits.
+
+**3. Pipeline wiring** — `inference/pipeline/process_recorded.py` now loads thresholds from the
+service before constructing `AnalyticsEngineConfig`, splitting zones into dwell vs. queue via
+`is_queue_zone()`. Tracker debounce logic ("fires once per visit" for dwell, "resets when queue
+clears" for queue) is untouched — only the threshold value source changed.
+(`tests/scripts/run-events-demo.py` is a separate CLI demo script with its own
+`--dwell-threshold` flag; intentionally left unwired to `alert_rules`.)
+
+**4. Occupancy alerting (Phase 3)** — new store-level rule type, since occupancy is a store
+rollup, not per-camera/zone:
+- `StoreOccupancyAggregator.check_threshold()` (`analytics/occupancy/aggregator.py`) fires once
+  on a below→at-or-above transition, re-arms on drop — same mental model as dwell's
+  `threshold_fired` flag.
+- Wired into `analytics/events/engine.py` after every ENTRY/EXIT; publishes
+  `OCCUPANCY_THRESHOLD` via `analytics/events/adapters.py`.
+- `database/writer.py` inserts the alert with `camera_id=NULL, zone_id=NULL`, severity read
+  from `alert_rules` via `get_occupancy_severity()`. (Dwell/queue writer severity is still
+  hardcoded `"warning"` — reading it from `alert_rules` per-zone was deferred, see Known
+  Limitations.)
+
+**5. Admin API + UI (Phase 4)** — `backend/app/routers/alert_rules_admin.py`, gated
+`require_admin`:
+- `GET /api/admin/alert-rules` — list all rows.
+- `PUT /api/admin/alert-rules/{id}` — update `threshold` (`>0`, else 422), `severity`,
+  `enabled`.
+- No POST/DELETE — rows are owned by migrations/seed/zone-provisioning, not the admin API.
+- Frontend: `frontend/lib/api/alert-rules.ts` + `alert-thresholds-modal.tsx` — reuses the
+  existing modal pattern (same as `user-modal.tsx`/`camera-modal.tsx`), diff-based `PUT` of only
+  changed rows, entry point is an **Alert Thresholds** button on `/alerts`, gated to
+  `System Administrator`.
+
+**6. Zone lifecycle integration (Phase 6/6b)**
+- `POST /api/zones` now also inserts a matching analytics `Zone` row (real polygon, mapped
+  `zone_type`) — required so `alert_rules.zone_id` has a real FK target — then calls
+  `provision_zone_alert_rules()` (non-fatal on failure; a missing row just degrades to the
+  org-default fallback).
+- `DELETE /api/zones/{id}` is a hard delete (no soft-delete flag, unlike cameras) and now
+  cascades in the same transaction: `alert_rules` rows for that zone → analytics `zones` row →
+  `zone_shapes` row (this order is required because `alert_rules.zone_id` has a real Postgres FK
+  to `zones.id`). Historical `alerts` rows are preserved, same "preserve history" pattern as
+  camera soft-delete.
+- Zone display names in the Alert Thresholds modal: `alert-thresholds-modal.tsx` loads zone
+  names via `getOrganization()` alongside `getAlertRules()`; `formatAlertRuleLabel()` resolves
+  `zone_id` → name (falls back to the raw id).
+
+**7. Nav alert badge (Phase 5 follow-up)** — `OpenAlertBadge` (`top-nav.tsx`) previously fetched
+`getOpenAlertCount()` once per mount and went stale after acknowledge/resolve. Added a
+module-level pub/sub in `frontend/lib/api/alerts.ts` (`subscribeOpenAlertCount` /
+`notifyOpenAlertCountChanged`); `updateAlert()` notifies after a successful `PATCH`, and the
+badge refetches on notify. Not cross-tab.
+
+### Decisions made
+
+- Configurable `alert_rules` table over hardcoded thresholds — admins edit without a redeploy.
+- Existing tracker debounce/firing logic never touched — only the threshold value source
+  changed, so behavior is unchanged until an admin actually edits a rule.
+- A missing `alert_rules` row always falls back to an org-wide default or hardcoded constant —
+  alerting can never silently break due to missing data.
+- Occupancy is store-level (no `capacity` column on stores — threshold is a raw headcount) and
+  independent of the dwell/queue debounce paths.
+- Admin API is PUT-only; new rows come from migrations, seed, or zone provisioning, not manual
+  creation.
+- Zone deletion is a hard delete with a cascading `alert_rules` delete in the same transaction,
+  matching the real FK.
+
+### Known limitations
+
+- Dwell/queue writer severity is still hardcoded `"warning"` in `database/writer.py` (occupancy
+  reads from `alert_rules`; dwell/queue would need a per-zone DB lookup inside `_insert_alert` —
+  deferred).
+- Admin alert-rules API is PUT-only (no POST/DELETE).
+- Occupancy threshold is looked up on every ENTRY/EXIT (no caching).
+- Nav badge pub/sub is same-tab only.
+- `tests/scripts/run-events-demo.py` remains unwired to `alert_rules` (uses its own CLI flags).
+- `PUT /api/zones/{id}` doesn't sync the analytics `zones` row (pre-existing, unrelated to
+  `alert_rules` — polygon/name/type edits from the admin UI can drift stale relative to what the
+  pipeline and the `alert_rules` FK actually use; flagged for a future pass).
+
+### Tests
+
+- `tests/test_alert_rules.py` — 13 tests (service loading + fallback, dwell/queue/occupancy
+  threshold firing with DB-backed values) + an autouse cleanup fixture that deletes test-zone
+  `alert_rules` rows before/after each test (self-healing against leftover state from
+  interrupted runs).
+- `tests/test_api_extended.py::TestAdminAlertRules` — 4 tests (list, update, non-admin 403,
+  invalid threshold 422).
+- `tests/test_api_extended.py::TestZoneAlertRuleProvisioning` — 3 tests (general zone provisions
+  dwell rule, queue zone provisions queue rules, zone delete cascades `alert_rules`).
+- Full analytics regression after Phase 3:
+  `pytest tests/test_occupancy.py tests/test_alert_rules.py tests/test_events.py tests/test_database.py -q`
+  → 44 passed.
+- End-to-end verification: `run-events-demo.py` against `town.mp4` with
+  `--dwell-threshold 2 --persist-db` — 21 `DWELL_THRESHOLD` bus events fired and persisted to
+  both `events` and `alerts` tables, confirming the full `alert_rules` → service →
+  `AnalyticsEngineConfig` → tracker → bus → `AnalyticsDbWriter` → `alerts` path.
+  (Recorded-pipeline event timestamps are video-relative, near epoch — a wall-clock
+  `NOW() - INTERVAL` filter will silently exclude them when querying for verification.)
+- `tests/test_api.py::TestAnalytics` fixes bundled into this pass: `test_zones`/`test_dwell`
+  needed a `store_id` param (422 without it); `test_traffic` now asserts store-level `/traffic`
+  reads full 24-hour `VisitorMetric` rollups (was silently omitting zero-traffic hours from
+  sparse `Event` aggregation); `test_queues_empty` needed `store_id` plus an actual
+  queue-type `zone_id`.
+
+**Reseed verification:**
+```bash
+python -m database.seed
+docker exec retail-analytics-postgres psql -U retail -d retail_analytics \
+  -c "SELECT rule_type, COUNT(*) FROM alert_rules GROUP BY rule_type;"
+```
+Reference seed row counts: `DWELL_THRESHOLD` 8, `QUEUE_THRESHOLD` 3,
+`QUEUE_THRESHOLD_DURATION` 3, `OCCUPANCY_THRESHOLD` 1 (4 zones: `store1`, `store2`,
+`floor_main`, `queue_lane` — one queue zone).
+
+### ✅ Test Checkpoint 15 — Verified
+
+- [x] Migration creates table + seed produces expected rows (verified in Postgres).
+- [x] Threshold firing reads DB-backed values (unit tests + live pipeline run).
+- [x] Occupancy fires once per breach, re-fires after drop + re-breach.
+- [x] Admin list/update API + RBAC (`TestAdminAlertRules` 4/4).
+- [x] Zone create provisions `alert_rules` from org defaults; zone delete cascades them
+      (`TestZoneAlertRuleProvisioning` 3/3).
+- [x] Alert Thresholds modal shows real zone names, not raw `zone_id`.
+- [x] Nav badge updates immediately after acknowledge/resolve, same tab, no reload.
+
+---
+
+## ✅ Module 16 — System Administration (Camera / Zone / Line / User Configuration) — DONE
+
+Admin-facing config tools that replace the dev-time OpenCV click-scripts (`polygon_editor.py`
+et al.) with the real UI a System Administrator uses in production. Built incrementally: initial
+mock UI in Module 13, wired to live endpoints in Module 13.5 pass 2, then hardened by the
+2026-08-03 API-correctness audit and the per-camera analytics-modules wiring pass.
+
+### What was built
+
+**1. Camera management** (`/admin/cameras`, `lib/api/cameras.ts`)
+- Form covers the PRD §8 fields backed by `CameraResponse`/`CameraUpdate`: id (server-generated
+  on create), name, store, location, `rtsp_url`/source, camera type, resolution, fps, status,
+  `analytics_modules`.
+- Create/update/delete/enable/disable all call real endpoints (`POST`/`PUT`/`DELETE
+  /api/cameras/{id}`). Enable/disable is a `status` field on `PUT` (fixed in the 2026-08-03 audit
+  — the toggle previously sent an empty body and did nothing); delete is a soft delete
+  (`status="disabled"`), excluded from `GET /api/cameras` by default, and the admin table now
+  updates in place instead of optimistically removing the row.
+- **Test Camera** — `POST /api/cameras/{id}/test` now actually called (Pass 2 fix; previously an
+  inline `setTimeout` fake pass/fail). Returns real probe metrics (resolution/fps readback,
+  success/error) and updates the admin table row immediately, no page refresh. It does **not**
+  return an image — see Known Limitations.
+- New cameras default to **all** analytics modules enabled on the frontend form, matching the
+  backend's actual default for an omitted field (Pass-2-era gap, fixed in the 2026-08-03 audit).
+
+**2. Zone editor** (`/admin/zones-lines`, `lib/api/zones.ts`)
+- Canvas-based polygon editor: click points, save via `POST /api/zones`. Save was a `console.log`
+  stub through Module 13; wired to `createZone`/`updateZone`/`deleteZone` in 13.5 Pass 2
+  (`syncCameraShapes()`), including delete now correctly throwing on a failed `DELETE` instead of
+  removing the shape from local state and letting it silently reappear on reload (2026-08-03
+  audit).
+- `POST /api/zones` also inserts the matching analytics `Zone` row (real polygon, mapped
+  `zone_type`) needed by the pipeline and by Module 15's `alert_rules` provisioning.
+
+**3. Counting line editor** — same page/pattern as the zone editor: two points + direction
+(`point_a`/`point_b`/`direction` ↔ frontend `insideSide`), saved via `POST`/`PUT`/`DELETE
+/api/lines`, wired to real endpoints in the same Pass 2 fix as zones.
+
+**4. User management** (`/admin/users`, `lib/api/users.ts`)
+- Full CRUD (`POST`/`PUT`/`DELETE /api/users`) + `POST /api/users/{id}/reset-password`, all wired
+  to real endpoints in Pass 2.
+- **Critical login bug fixed in the 2026-08-03 audit:** `authenticate_user` ignored
+  `password_hash` and only checked the shared `API_DEFAULT_PASSWORD`, so created users' passwords
+  and password resets were persisted but had zero effect on login. Fixed — `authenticate_user`
+  now verifies `password_hash` when set; `get_current_user` re-reads the user row on every
+  request so a deleted user's token stops working immediately instead of riding out the JWT
+  expiry.
+- Route protection: `/admin/*` gated by `AuthGuard` + `role === "System Administrator"` in
+  `app/admin/layout.tsx` (client-side, not middleware). Backend RBAC is a real two-tier
+  `admin`/`user` system (`002_normalize_user_roles`) — all mutating endpoints admin-only, all
+  reads open to any authenticated user. Whether the frontend's four *display* role labels (Store
+  Manager / Operations Manager / Retail Analyst / System Administrator) actually map onto the
+  backend's `admin`/`user` values in a way that gates correctly was never confirmed post-13.5 —
+  see Known Limitations.
+
+**5. Per-camera analytics module gating (PRD §8)** — wired end-to-end (2026-08-03), independent
+of the UI work above:
+- `cameras.analytics_modules` JSONB (`entry_exit`, `occupancy`, `zones`, `dwell`, `heatmap`,
+  `queues`) drives real pipeline gating, not just UI hiding — `process_recorded.py` skips
+  `LineCounter`/`ZoneDetector`/`HeatmapEngine` for disabled modules, `analytics/events/engine.py`
+  skips the corresponding aggregation, `database/writer.py` skips the corresponding rollups.
+- Disabled-module API calls return `403 analytics_module_disabled`, not a silent empty payload.
+- Migration `005_camera_analytics_modules` backfilled existing cameras from geometry (counting
+  line → `entry_exit`+`occupancy`; analytics-enabled zone → `zones`+`dwell`+`heatmap`; queue-type
+  zone → `queues`) rather than defaulting everything on or off.
+
+### Known limitations
+
+- **No camera thumbnail/frame preview.** Test Camera is a stream probe only — it reports
+  success/failure and resolution/fps, but returns no image, and the preview panel explicitly
+  says "not available." The zone/line editor therefore does **not** draw over a captured
+  reference frame from the camera as the spec describes; it's a coordinate-only canvas. Needs a
+  frame-capture endpoint (still/JPEG snapshot from `VideoSource.open()`) before this matches the
+  intended workflow.
+- **Frontend/backend role mapping unconfirmed.** The admin route gate checks for the display
+  string `"System Administrator"`, but backend RBAC only issues `admin`/`user`. This gap was
+  flagged during the 13.5 planning pass and never explicitly closed (unlike two sibling gaps in
+  the same list, which were). Until verified, logging in as a real backend `admin` user may not
+  actually satisfy the frontend's role check — needs an explicit test + fix (map `admin` →
+  `"System Administrator"` in the auth mapper, or change the gate to check `admin` directly).
+
+### ✅ Test Checkpoint 16
+
+- [x] Add a camera entirely through the UI (no manual DB inserts) — `createCamera` → real
+      `POST /api/cameras`.
+- [ ] Test Camera confirms connectivity, but does **not** show a live thumbnail — blocked on the
+      frame-preview gap above.
+- [x] Draw a zone and a counting line entirely through the UI editors; coordinates save via the
+      real `POST /api/zones` / `POST /api/lines` and produce correct `ZONE_ENTER`/`ENTRY`
+      behavior when the pipeline runs (same geometry path Modules 4/6 already verified against).
+- [ ] Log in as a non-admin role and confirm admin-only pages are inaccessible — not verified
+      post-13.5; blocked on the role-mapping gap above.
+
+---
+
+## Next Up: Module 17 — Dockerization & Deployment
 
 ### Module 17 note (not started)
 
