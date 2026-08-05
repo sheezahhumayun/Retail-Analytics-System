@@ -5,7 +5,7 @@ import { Users, LogIn, LogOut, Maximize2 } from "lucide-react"
 
 import type { Camera, OverlayState } from "@/lib/types"
 import {
-  DEFAULT_OVERLAYS,
+  LIVE_CAMERA_OVERLAYS,
   OverlayToggles,
 } from "@/components/cameras/overlay-toggles"
 import { CameraFrame } from "@/components/cameras/camera-frame"
@@ -13,7 +13,7 @@ import { CameraModal } from "@/components/cameras/camera-modal"
 import { StatusBadge } from "@/components/cameras/status-badge"
 
 export function CameraTile({ camera }: { camera: Camera }) {
-  const [overlays, setOverlays] = useState<OverlayState>(DEFAULT_OVERLAYS)
+  const [overlays, setOverlays] = useState<OverlayState>(LIVE_CAMERA_OVERLAYS)
   const [expanded, setExpanded] = useState(false)
 
   return (
@@ -30,7 +30,7 @@ export function CameraTile({ camera }: { camera: Camera }) {
 
         {/* Overlay toggles above the tile */}
         <div className="mb-2.5">
-          <OverlayToggles value={overlays} onChange={setOverlays} />
+          <OverlayToggles value={overlays} onChange={setOverlays} mode="live" />
         </div>
 
         {/* Clickable frame -> expands to modal */}

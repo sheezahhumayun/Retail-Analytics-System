@@ -52,6 +52,7 @@ class Camera(SQLModel, table=True):
     resolution: str | None = Field(default=None, max_length=32)
     fps: float | None = Field(default=None)
     status: str = Field(default="offline", max_length=32)
+    status_changed_at: datetime | None = Field(default=None)
     analytics_modules: list[str] = Field(
         default_factory=list,
         sa_column=Column(JSONB, nullable=False, server_default="[]"),
@@ -262,6 +263,10 @@ class AlertRule(SQLModel, table=True):
     zone_id: str | None = Field(
         default=None, foreign_key="zones.id", index=True,
         description="Per-zone thresholds for dwell/queue rules; null = store-wide (for occupancy rules)"
+    )
+    camera_id: str | None = Field(
+        default=None, foreign_key="cameras.id", index=True,
+        description="Per-camera thresholds (e.g. CAMERA_OFFLINE_DURATION); null = not camera-specific",
     )
     threshold: float = Field(
         nullable=False,

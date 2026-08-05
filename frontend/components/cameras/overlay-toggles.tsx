@@ -11,6 +11,14 @@ export const DEFAULT_OVERLAYS: OverlayState = {
   countingLines: true,
 }
 
+/** Live camera preview (Phase 1a): zones/lines only — no inference overlays yet. */
+export const LIVE_CAMERA_OVERLAYS: OverlayState = {
+  boundingBoxes: false,
+  trackIds: false,
+  zones: true,
+  countingLines: true,
+}
+
 type ToggleKey = keyof OverlayState
 
 const TOGGLES: { key: ToggleKey; label: string; icon: typeof Box }[] = [
@@ -20,18 +28,28 @@ const TOGGLES: { key: ToggleKey; label: string; icon: typeof Box }[] = [
   { key: "countingLines", label: "Counting Lines", icon: Minus },
 ]
 
+const LIVE_CAMERA_TOGGLE_KEYS = new Set<ToggleKey>(["zones", "countingLines"])
+
 export function OverlayToggles({
   value,
   onChange,
   size = "sm",
+  mode = "full",
 }: {
   value: OverlayState
   onChange: (next: OverlayState) => void
   size?: "sm" | "md"
+  /** `live` hides bounding-box / track-ID toggles (no inference overlay yet). */
+  mode?: "full" | "live"
 }) {
+  const toggles =
+    mode === "live"
+      ? TOGGLES.filter(({ key }) => LIVE_CAMERA_TOGGLE_KEYS.has(key))
+      : TOGGLES
+
   return (
     <div className="flex flex-wrap gap-1.5">
-      {TOGGLES.map(({ key, label, icon: Icon }) => {
+      {toggles.map(({ key, label, icon: Icon }) => {
         const active = value[key]
         return (
           <button

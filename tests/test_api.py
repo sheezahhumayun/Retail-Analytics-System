@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -237,6 +238,64 @@ class TestCameras:
             json={"status": "online"},
         )
         assert resp.status_code == 422
+
+    def test_camera_stream_requires_auth(self, api_client: TestClient):
+        resp = api_client.get("/api/cameras/entrance/stream")
+        assert resp.status_code == 401
+        assert resp.json()["error"]["code"] == "not_authenticated"
+
+    def test_camera_stream_accepts_token_query_param(
+        self, api_client: TestClient, auth_headers: dict
+    ):
+        token = auth_headers["Authorization"].split(" ", 1)[1]
+        mock_source = MagicMock()
+        mock_source.is_live.return_value = False
+        mock_source.read.return_value = (False, None)
+        first_chunk = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n\xff\xd8\xff"
+
+        with patch(
+            "backend.app.routers.cameras.open_stream_source",
+            return_value=(mock_source, first_chunk),
+        ):
+            with api_client.stream(
+                "GET",
+                f"/api/cameras/entrance/stream?token={token}",
+            ) as resp:
+                assert resp.status_code == 200, resp.text
+                assert "multipart/x-mixed-replace" in resp.headers.get(
+                    "content-type", ""
+                )
+                chunk = next(resp.iter_bytes(chunk_size=256))
+                assert chunk.startswith(b"--frame")
+        mock_source.release.assert_called()
+
+    def test_camera_stream_not_found(self, api_client: TestClient, auth_headers: dict):
+        resp = api_client.get(
+            "/api/cameras/does-not-exist/stream",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "camera_not_found"
+
+    def test_camera_stream_rejects_recorded_source(
+        self, api_client: TestClient, auth_headers: dict
+    ):
+        create = api_client.post(
+            "/api/cameras",
+            headers=auth_headers,
+            json={
+                "store_id": STORE_ID,
+                "name": "Recorded Stream Block",
+                "rtsp_url": "sample-data/checkout.mp4",
+                "source_type": "recorded",
+            },
+        )
+        assert create.status_code == 201, create.text
+        camera_id = create.json()["id"]
+
+        resp = api_client.get(f"/api/cameras/{camera_id}/stream", headers=auth_headers)
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "camera_not_live"
 
 
 class TestAnalytics:

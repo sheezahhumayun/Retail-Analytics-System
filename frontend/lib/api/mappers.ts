@@ -5,6 +5,7 @@ import type {
   Camera,
   CameraStatus,
   ComparisonInfo,
+  CountingLine,
   DataRow,
   LineShape,
   LiveCameraStatus,
@@ -18,6 +19,7 @@ import type {
   Store,
   User,
   UserRole,
+  Zone,
   ZoneRow,
   ZoneShape,
   ZoneType,
@@ -724,22 +726,63 @@ function mapLiveStatus(status: string): LiveCameraStatus {
   return "offline";
 }
 
+const LIVE_ZONE_VARIANTS: Zone["variant"][] = ["accent", "warm", "cool"];
+
+function mapLiveCameraZones(
+  cameraId: string,
+  zones: BackendZoneShape[],
+): Zone[] {
+  return zones
+    .filter((zone) => zone.camera_id === cameraId)
+    .map((zone, index) => {
+      const shape = mapZoneShape(zone);
+      return {
+        id: shape.id,
+        label: shape.name,
+        points: shape.points.map((point) => `${point.x},${point.y}`).join(" "),
+        variant: LIVE_ZONE_VARIANTS[index % LIVE_ZONE_VARIANTS.length],
+      };
+    });
+}
+
+function mapLiveCameraCountingLines(
+  cameraId: string,
+  lines: BackendCountingLine[],
+): CountingLine[] {
+  return lines
+    .filter((line) => line.camera_id === cameraId)
+    .map((line) => {
+      const shape = mapCountingLine(line);
+      const [start, end] = shape.points;
+      return {
+        id: shape.id,
+        label: shape.name,
+        x1: start.x,
+        y1: start.y,
+        x2: end.x,
+        y2: end.y,
+      };
+    });
+}
+
 export function mapLiveCamera(
   camera: BackendCamera,
   status?: BackendCameraStatus | null,
+  zones: BackendZoneShape[] = [],
+  lines: BackendCountingLine[] = [],
 ): Camera {
   return {
     id: camera.id,
     name: camera.name,
     location: camera.location ?? "",
     status: mapLiveStatus(status?.status ?? camera.status),
-    frameUrl: camera.source_type === "recorded" ? null : (camera.rtsp_url ?? null),
+    frameUrl: null,
     occupancy: status?.current_occupancy ?? 0,
     entriesToday: 0,
     exitsToday: 0,
     boundingBoxes: [],
-    zones: [],
-    countingLines: [],
+    zones: mapLiveCameraZones(camera.id, zones),
+    countingLines: mapLiveCameraCountingLines(camera.id, lines),
   };
 }
 

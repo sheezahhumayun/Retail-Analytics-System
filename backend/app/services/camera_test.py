@@ -9,6 +9,12 @@ from urllib.parse import urlparse
 
 from ..schemas.extended.cameras import CameraTestResponse
 
+from .opencv_io import opencv_io
+from .opencv_rtsp import (
+    apply_rtsp_ffmpeg_capture_options,
+    open_rtsp_videocapture,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -49,7 +55,7 @@ def test_camera_stream(rtsp_url: str | None, *, timeout: float = 5.0) -> CameraT
                 status="error",
                 message=f"Could not reach {host}:{port} — {exc}",
             )
-        resolution, fps = _probe_stream_optional(rtsp_url, timeout=timeout)
+        resolution, fps = _probe_stream_optional(rtsp_url)
         return CameraTestResponse(
             status="success",
             latency_ms=latency_ms,
@@ -87,36 +93,38 @@ def _probe_video_optional(path: Path) -> tuple[str | None, float | None]:
     try:
         import cv2  # type: ignore[import-untyped]
 
-        cap = cv2.VideoCapture(str(path))
-        try:
-            if not cap.isOpened():
-                return None, None
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = float(cap.get(cv2.CAP_PROP_FPS)) or None
-            resolution = f"{width}x{height}" if width and height else None
-            return resolution, fps
-        finally:
-            cap.release()
+        with opencv_io():
+            cap = cv2.VideoCapture(str(path))
+            try:
+                if not cap.isOpened():
+                    return None, None
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = float(cap.get(cv2.CAP_PROP_FPS)) or None
+                resolution = f"{width}x{height}" if width and height else None
+                return resolution, fps
+            finally:
+                cap.release()
     except ImportError:
         return None, None
 
 
-def _probe_stream_optional(url: str, *, timeout: float) -> tuple[str | None, float | None]:
+def _probe_stream_optional(url: str) -> tuple[str | None, float | None]:
     try:
         import cv2  # type: ignore[import-untyped]
 
-        cap = cv2.VideoCapture(url)
-        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(timeout * 1000))
-        try:
-            if not cap.isOpened():
-                return None, None
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = float(cap.get(cv2.CAP_PROP_FPS)) or None
-            resolution = f"{width}x{height}" if width and height else None
-            return resolution, fps
-        finally:
-            cap.release()
+        with opencv_io():
+            apply_rtsp_ffmpeg_capture_options()
+            cap = open_rtsp_videocapture(url)
+            try:
+                if not cap.isOpened():
+                    return None, None
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = float(cap.get(cv2.CAP_PROP_FPS)) or None
+                resolution = f"{width}x{height}" if width and height else None
+                return resolution, fps
+            finally:
+                cap.release()
     except ImportError:
         return None, None

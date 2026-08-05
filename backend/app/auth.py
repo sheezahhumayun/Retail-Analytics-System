@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
-from fastapi import Depends
+from fastapi import Depends, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel, Field
@@ -137,6 +137,48 @@ async def require_admin(
     if user.role != ROLE_ADMIN:
         raise ApiError(403, "forbidden", "Requires admin role")
     return user
+
+
+def _user_from_raw_token(raw_token: str, session: Session) -> TokenPayload:
+    payload = decode_token(raw_token)
+    user = session.get(User, payload.sub)
+    if user is None:
+        raise ApiError(401, "invalid_token", "User no longer exists")
+    return TokenPayload(
+        sub=user.id,
+        email=user.email,
+        role=normalize_role(user.role),
+        org_id=user.org_id,
+        exp=payload.exp,
+    )
+
+
+async def get_current_user_from_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+    session: DbSession,
+    token: Annotated[
+        str | None,
+        Query(
+            description=(
+                "JWT access token for contexts that cannot send Authorization "
+                "headers (e.g. HTML <img> MJPEG streams)."
+            ),
+        ),
+    ] = None,
+) -> TokenPayload:
+    """Authenticate via ``Authorization: Bearer`` header or ``?token=`` query param."""
+    raw_token: str | None = None
+    if credentials is not None and credentials.scheme.lower() == "bearer":
+        raw_token = credentials.credentials
+    elif token is not None:
+        raw_token = token
+    if raw_token is None:
+        raise ApiError(
+            401,
+            "not_authenticated",
+            "Missing or invalid Authorization header or token query parameter",
+        )
+    return _user_from_raw_token(raw_token, session)
 
 
 TokenResponse.model_rebuild()

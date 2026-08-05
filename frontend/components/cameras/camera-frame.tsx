@@ -1,7 +1,9 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import { Camera as CameraIcon, VideoOff, TriangleAlert } from "lucide-react"
 
+import { getCameraStreamUrl } from "@/lib/api/cameras"
 import type { Camera, OverlayState } from "@/lib/types"
 
 /** The frame uses a true 16:9 coordinate space (160 x 90) so overlays scale
@@ -42,18 +44,26 @@ export function CameraFrame({
   camera: Camera
   overlays: OverlayState
 }) {
-  const isLive = camera.status === "online"
+  const [streamFailed, setStreamFailed] = useState(false)
+  const isOnline = camera.status === "online"
+  const showStream = isOnline && !streamFailed
+  const streamUrl = showStream ? getCameraStreamUrl(camera.id) : null
+  const showScrim = !isOnline || streamFailed
+  const scrimIsError = streamFailed || camera.status === "error"
+
+  useEffect(() => {
+    setStreamFailed(false)
+  }, [camera.id, camera.status])
 
   return (
     <div className="relative aspect-video w-full overflow-hidden rounded-md bg-muted">
-      {/* Frame source — swap `camera.frameUrl` for a real stream (img/video) later. */}
-      {camera.frameUrl ? (
+      {streamUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={camera.frameUrl || "/placeholder.svg"}
-          alt={`${camera.name} live frame`}
+          src={streamUrl}
+          alt={`${camera.name} live stream`}
           className="h-full w-full object-cover"
-          crossOrigin="anonymous"
+          onError={() => setStreamFailed(true)}
         />
       ) : (
         <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-[repeating-linear-gradient(45deg,transparent,transparent_10px,rgba(0,0,0,0.02)_10px,rgba(0,0,0,0.02)_20px)] text-muted-foreground">
@@ -62,22 +72,22 @@ export function CameraFrame({
         </div>
       )}
 
-      {/* Non-live status scrim */}
-      {!isLive && (
+      {/* Non-live / stream-lost status scrim */}
+      {showScrim && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background/70 backdrop-blur-[1px]">
-          {camera.status === "offline" ? (
+          {!scrimIsError ? (
             <VideoOff className="h-7 w-7 text-muted-foreground" aria-hidden="true" />
           ) : (
             <TriangleAlert className="h-7 w-7 text-destructive" aria-hidden="true" />
           )}
           <span className="text-sm font-medium text-foreground">
-            {camera.status === "offline" ? "Camera Offline" : "Signal Error"}
+            {!scrimIsError ? "Camera Offline" : "Signal Error"}
           </span>
         </div>
       )}
 
       {/* Overlay layer */}
-      {isLive && (
+      {showStream && (
         <svg
           viewBox="0 0 160 90"
           className="pointer-events-none absolute inset-0 h-full w-full"

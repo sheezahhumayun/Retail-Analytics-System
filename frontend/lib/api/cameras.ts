@@ -4,7 +4,7 @@ import {
   getStatusLabel,
 } from "@/lib/admin-cameras-data";
 import type { AdminCamera, Camera, CameraStatus, Resolution } from "@/lib/types";
-import type { BackendCamera, BackendCameraStatus } from "@/lib/api/mappers";
+import type { BackendCamera, BackendCameraStatus, BackendCountingLine, BackendZoneShape } from "@/lib/api/mappers";
 import {
   analyticsModulesToBackend,
   buildStoreNameMap,
@@ -12,7 +12,7 @@ import {
   mapLiveCamera,
   resolutionToBackend,
 } from "@/lib/api/mappers";
-import { apiRequest } from "@/lib/api/client";
+import { apiRequest, getAccessToken } from "@/lib/api/client";
 
 export {
   ANALYTICS_MODULES_LABELS,
@@ -54,6 +54,14 @@ export type ProcessCameraStatus = {
 
 let storeNameMap: Map<string, string> | null = null;
 
+/** MJPEG stream URL for live camera tiles (`<img>` cannot send Authorization headers). */
+export function getCameraStreamUrl(cameraId: string): string | null {
+  const token = getAccessToken();
+  if (!token) return null;
+  const params = new URLSearchParams({ token });
+  return `/api/cameras/${encodeURIComponent(cameraId)}/stream?${params.toString()}`;
+}
+
 async function loadStoreNames(): Promise<Map<string, string>> {
   if (storeNameMap) return storeNameMap;
   const stores = await apiRequest<{ id: string; name: string }[]>("/api/stores");
@@ -90,7 +98,11 @@ export async function getCameras(): Promise<AdminCamera[]> {
 }
 
 export async function getLiveCameras(): Promise<Camera[]> {
-  const cameras = await apiRequest<BackendCamera[]>("/api/cameras");
+  const [cameras, zones, lines] = await Promise.all([
+    apiRequest<BackendCamera[]>("/api/cameras"),
+    apiRequest<BackendZoneShape[]>("/api/zones").catch(() => [] as BackendZoneShape[]),
+    apiRequest<BackendCountingLine[]>("/api/lines").catch(() => [] as BackendCountingLine[]),
+  ]);
   const live = cameras
     .filter((camera) => camera.status !== "disabled")
     .filter((camera) => (camera.source_type ?? "live") === "live");
@@ -103,7 +115,9 @@ export async function getLiveCameras(): Promise<Camera[]> {
     ),
   );
 
-  return live.map((camera, index) => mapLiveCamera(camera, statuses[index]));
+  return live.map((camera, index) =>
+    mapLiveCamera(camera, statuses[index], zones, lines),
+  );
 }
 
 export async function getCameraStatus(id: string): Promise<CameraStatus | null> {

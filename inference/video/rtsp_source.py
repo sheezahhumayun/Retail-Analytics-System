@@ -37,6 +37,7 @@ from .base import (
     VideoSource,
     VideoSourceError,
 )
+from .rtsp_timeouts import open_rtsp_videocapture
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
@@ -144,10 +145,11 @@ class RTSPVideoSource(VideoSource):
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = options
 
         if self._capture_factory is not None:
-            return self._capture_factory(self._url)
+            cap = self._capture_factory(self._url)
+        else:
+            cap = open_rtsp_videocapture(self._url)
 
-        # Standard Python OpenCV API
-        return cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
+        return cap
 
     def _open_capture(self) -> None:
         cap = self._build_capture()

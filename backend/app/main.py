@@ -10,7 +10,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from database.session import POOL_SIZE, MAX_OVERFLOW, get_engine, log_pool_settings, session_scope
-from .services.camera_health import refresh_all_live_camera_statuses
+from .services.camera_health import (
+    evaluate_camera_offline_duration_alerts,
+    refresh_all_live_camera_statuses,
+)
 
 from .config import get_settings
 from .exceptions import register_exception_handlers
@@ -85,7 +88,12 @@ def _camera_health_worker(interval_seconds: int) -> None:
         try:
             with session_scope() as session:
                 count = refresh_all_live_camera_statuses(session)
-            _health_logger.info("Camera health check updated %d live camera(s)", count)
+                alerts_created = evaluate_camera_offline_duration_alerts(session)
+            _health_logger.info(
+                "Camera health check updated %d live camera(s), created %d offline-duration alert(s)",
+                count,
+                alerts_created,
+            )
         except Exception:
             _health_logger.exception("Camera health check failed")
         time.sleep(interval_seconds)

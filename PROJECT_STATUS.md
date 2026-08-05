@@ -1,6 +1,6 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-08-05 (Module 15 — Alerting System complete, Phases 1–6b + follow-ups)
+**Last updated:** 2026-08-06 (Module 15 — `CAMERA_OFFLINE_DURATION` health-worker alerting; Module 16 — `status_changed_at` + offline-duration evaluation in camera health worker)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
 
 ---
@@ -104,7 +104,7 @@ fixes.
 | 13 | Frontend Web Dashboard | ✅ Complete (UI + live API via `lib/api/*`) |
 | 14 | Reports (CSV/PDF export) | ✅ Complete (frontend export wired in 13.5 pass 2) |
 | 15 | Alerting | ✅ Complete |
-| 16 | System Administration | ✅ Complete (camera thumbnail preview + role-gate mapping outstanding — see Known Limitations) |
+| 16 | System Administration | ✅ Complete (admin still-frame preview + role-gate mapping outstanding — see Known Limitations; Live Cameras MJPEG delivered in Phase 1a) |
 | 17 | Dockerization & Deployment | ⬜ Not started |
 | 18 | Testing, Evaluation & Accuracy Validation | ⬜ Not started |
 | 19 | Scalability & Path to Multi-Camera/Multi-Store | ⬜ Not started |
@@ -134,6 +134,7 @@ Base URL: `http://127.0.0.1:8000` · Swagger: **`/docs`** · OpenAPI: **`/openap
 | `POST` | `/api/cameras/{id}/test` | admin | Test stream connectivity (live cameras) |
 | `POST` | `/api/cameras/{id}/process` | admin | Process recorded video → analytics DB (background thread) |
 | `GET` | `/api/cameras/{id}/process-status` | admin | Poll recorded-video processing job status |
+| `GET` | `/api/cameras/{id}/stream` | JWT (`Authorization: Bearer` **or** `?token=` query param) | Live-camera MJPEG preview (`source_type=live` only; multipart/x-mixed-replace) |
 | `GET` | `/api/zones` | JWT | List zone **geometry** (`?camera_id=`) — `zone_shapes` table |
 | `POST` | `/api/zones` | admin | Create zone shape |
 | `PUT` | `/api/zones/{id}` | admin | Update zone shape |
@@ -1196,7 +1197,7 @@ erDiagram
 | `organizations` | `id` | Tenant name (multi-store retail group) | `database.seed` (Module 16 admin later) |
 | `stores` | `id` | Store name, address; belongs to one org | Seed / admin |
 | `users` | `id` | Name, email, role (`admin`, `viewer`, …); belongs to one org | Seed / Module 16 |
-| `cameras` | `id` | Camera name, location, RTSP URL **or** video file path (`rtsp_url`), `source_type` (`live` \| `recorded`), `last_processed_at`, type, resolution, fps, online status; belongs to one store | Seed (fixed ids) / `POST /api/cameras` (auto `cam_{slug}_{suffix}`) |
+| `cameras` | `id` | Camera name, location, RTSP URL **or** video file path (`rtsp_url`), `source_type` (`live` \| `recorded`), `last_processed_at`, type, resolution, fps, online status (`status`), `status_changed_at` (wall-clock transition timestamp for offline-duration alerting); belongs to one store | Seed (fixed ids) / `POST /api/cameras` (auto `cam_{slug}_{suffix}`) |
 | `zones` | `id` | Polygon coordinates (JSON), zone type, analytics on/off; belongs to one camera | Seed / `polygon_editor` JSON |
 | `counting_lines` | `id` | Line endpoints (`point_a`, `point_b`), crossing direction; belongs to one camera | Seed / `line_editor` JSON |
 
@@ -1209,7 +1210,7 @@ erDiagram
 | `tracks` | `id` (auto) | Anonymous track id per camera, `first_seen`, `last_seen` (unique per `camera_id` + `track_id`) | `AnalyticsDbWriter` on bus events with `track_id` |
 | `events` | `id` (auto) | Raw analytics bus events: `event_type`, `timestamp`, optional `zone_id` / `track_id`, JSON `metadata` | `AnalyticsDbWriter` on every bus event except `PERSON_DETECTED` |
 | `dwell_events` | `id` (auto) | Completed zone visit: `enter_ts`, `exit_ts`, `dwell_seconds`, anonymous `track_id` | `AnalyticsDbWriter.on_dwell_event` (zone EXIT / track-lost) |
-| `alerts` | `id` (auto) | Threshold / camera-offline alerts: `alert_type`, `severity`, `status`, JSON `metadata` | `AnalyticsDbWriter` on `DWELL_THRESHOLD`, `QUEUE_THRESHOLD`, `CAMERA_OFFLINE` |
+| `alerts` | `id` (auto) | Threshold / camera-offline alerts: `alert_type`, `severity`, `status`, JSON `metadata` | `AnalyticsDbWriter` on pipeline threshold events + `CAMERA_OFFLINE`; camera health worker on `CAMERA_OFFLINE_DURATION` (live cameras down past `alert_rules` threshold) |
 
 **Retention:** `events` rows pruned after 90 days (`RAW_EVENT_RETENTION_DAYS`). All other tables kept.
 
@@ -1441,7 +1442,7 @@ backend\.venv\Scripts\python -m pytest tests/test_api_extended.py -v
 
 4. **Features implemented (all mock-backed):**
    - Overview (6 KPI cards + 3 charts)
-   - Live Cameras grid (overlays, modal expand — `frameUrl` seam for real streams)
+   - Live Cameras grid (MJPEG streams for `source_type=live`, zone/line overlays, modal expand — Phase 1a)
    - 5 analytics pages via shared `AnalyticsPageLayout` (traffic, occupancy, zones, dwell time, queues)
    - Visual analytics: heatmap (SVG), zone performance standalone, customer flow placeholder
    - Reports (form → simulated delay → `ReportPreview`; CSV/PDF buttons are `alert()` stubs)
@@ -1622,7 +1623,7 @@ These are shape / semantics mismatches between mock return types and Module 12 +
 
 12. **Users admin** — Frontend `assignedStore` (display name) + `status: Active\|Disabled`; backend `store_id` + no disabled flag on `UserResponse`. Create user requires `org_id` + `id` slug pattern.
 
-13. **Live cameras** — `Camera` type includes `boundingBoxes`, `zones`, `countingLines`, `occupancy`, `entriesToday` — no composite backend endpoint; would require cameras + status + optional future inference overlay stream.
+13. **Live cameras** — Live grid now streams MJPEG for `source_type=live` cameras (Phase 1a, 2026-08-05). Still no real-time inference overlay API (bounding boxes / track IDs). Zone/line geometry hydrated from `GET /api/zones` + `GET /api/lines`. Occupancy/entries/exits on tiles are status-snapshot only.
 
 14. **Errors** — Backend returns `{ error: { code, message, details } }` on 4xx; frontend mocks throw plain `Error` strings.
 
@@ -1632,8 +1633,7 @@ These are shape / semantics mismatches between mock return types and Module 12 +
 
 | Need | Gap |
 |------|-----|
-| Live video stream URL (MJPEG/HLS/WebRTC) | No streaming endpoint; `frameUrl` stays `null` |
-| Real-time CV overlays (bounding boxes, track IDs) | No inference overlay API |
+| Real-time CV overlays (bounding boxes, track IDs) | No inference overlay API — Phase 1a delivers video + zone/line geometry only |
 | Customer flow trajectories | Placeholder only — no path analytics endpoint |
 | Zone performance rollup (all zones for a store) | Must fan out `GET /api/analytics/zones` per zone or add aggregate endpoint. **Resolved as intentional design** (2026-08-04): confirmed as the permanent approach, not a gap — see "Shared ScopeSelector Component" Bug 2b below. |
 | Overview KPI single call | Must compose multiple analytics endpoints |
@@ -1718,9 +1718,9 @@ Login with any seed user email + password `demo`. Admin routes require **System 
 
 | UI surface | Gap | UI behavior |
 |------------|-----|-------------|
-| Live camera tiles (`source_type=live` only) | No MJPEG/HLS/WebRTC stream URL for **live** cameras | `frameUrl` null; placeholder tile. Recorded cameras excluded from live grid; processed via `POST /api/cameras/{id}/process` instead |
-| Live camera overlays | No inference overlay API | Empty `boundingBoxes` / zones on tile from mapper |
-| Camera test modal preview | Stream probe only, no frame feed | Success shows probe metrics; preview panel says not available |
+| Live camera overlays (inference) | No real-time detection/track overlay API | Phase 1a: zones + counting lines from geometry API; bounding boxes / track IDs hidden on live tiles |
+| Camera test modal preview | Stream probe only, no frame feed | Success shows probe metrics; preview panel says not available (Live Cameras page has MJPEG — admin test modal does not) |
+| Zone/line editor reference frame | No still-frame capture endpoint | Coordinate-only canvas; does not draw over a captured camera frame |
 | Customer Flow page | No path/trajectory analytics API | “Not available yet” empty state |
 | Heatmap floor plan labels | `FLOOR_ZONES` in `lib/heatmap-data.ts` | **UI layout constants only** — heatmap density from `GET /api/analytics/heatmap` |
 | Zone performance rollup | No single-store multi-zone endpoint | Fans out `GET /api/analytics/zones` per zone |
@@ -1889,7 +1889,11 @@ Two data-flow bugs fixed after root-cause tracing (not UI-only patches).
 - `backend/app/services/camera_health.py` — shared probe + `apply_probe_to_camera()` / `refresh_all_live_camera_statuses()`
 - `POST /api/cameras/{id}/test` — persists `online` or `error` for live cameras; response includes `camera_status`
 - `GET /api/cameras/{id}/status` — probes live cameras before returning (updates DB)
-- Background worker on API startup — probes all live cameras every **120 s** (`CAMERA_HEALTH_INTERVAL_SECONDS` in `.env` / `backend/app/config.py`)
+- Background worker on API startup — probes all live cameras every **120 s**
+  (`camera_health_interval_seconds` in `.env` / `backend/app/config.py`). After each poll cycle
+  it also runs `evaluate_camera_offline_duration_alerts()` (Module 15) — creates
+  `CAMERA_OFFLINE_DURATION` alerts for live cameras that have been non-`online` longer than the
+  matched `alert_rules` threshold (open-alert dedup; separate from pipeline `CAMERA_OFFLINE`).
 
 **Frontend changes:**
 
@@ -2260,17 +2264,21 @@ code changes; keep the existing tracker debounce/firing logic completely unchang
 
 ### What was built
 
-**1. `alert_rules` table** (migration `006_alert_rules`, extended by `007_occupancy_alert`)
+**1. `alert_rules` table** (migration `006_alert_rules`, extended by `007_occupancy_alert`,
+  `008_alert_rules_camera_id`, `010_camera_offline_dur`)
 - `AlertRule` model: `id`, `rule_type` (`DWELL_THRESHOLD` \| `QUEUE_THRESHOLD` \|
-  `QUEUE_THRESHOLD_DURATION` \| `OCCUPANCY_THRESHOLD`), `store_id` (nullable), `zone_id`
-  (nullable), `threshold`, `severity`, `enabled`, `created_at`, `updated_at`.
+  `QUEUE_THRESHOLD_DURATION` \| `OCCUPANCY_THRESHOLD` \| `CAMERA_OFFLINE_DURATION`),
+  `store_id` (nullable), `zone_id` (nullable), `camera_id` (nullable, migration `008`),
+  `threshold`, `severity`, `enabled`, `created_at`, `updated_at`.
 - Fallback hierarchy: per-zone rule → store-specific rule (future) → org-wide default
   (`store_id=NULL, zone_id=NULL`). A missing row never silently disables alerting — it falls
   back to a hardcoded default.
 - Seeded values: `DWELL_THRESHOLD` 60s, `QUEUE_THRESHOLD` 5 persons, `QUEUE_THRESHOLD_DURATION`
   120s (from `analytics/` module README examples), `OCCUPANCY_THRESHOLD` 30 persons
-  (placeholder, store-level, `zone_id` always `NULL`). All seeded `severity="warning"`,
-  `enabled=true`.
+  (placeholder, store-level, `zone_id` always `NULL`), `CAMERA_OFFLINE_DURATION` **300s**
+  (`severity="critical"`, org-wide — chosen so at least two 120s health polls elapse before
+  breach; thresholds under ~150s are unreliable with the current poll interval). Dwell/queue/
+  occupancy seeded `severity="warning"`; camera-offline-duration uses `critical`.
 - `database/seed.py` — `_upsert_alert_rule()` / `_seed_alert_rules()` mirror the migration
   values idempotently on every reseed (migrations only run once; a truncate/reseed previously
   left the table empty).
@@ -2281,6 +2289,9 @@ code changes; keep the existing tracker debounce/firing logic completely unchang
   hierarchy.
 - `get_occupancy_threshold(store_id)` / `get_occupancy_severity(store_id)` — store-specific →
   org-wide → hardcoded `30.0` fallback.
+- `get_camera_offline_duration_rule(camera_id, store_id, session?)` — per-camera → store-wide →
+  org-wide default; returns `(threshold_seconds, severity)` for the health-worker path (not used
+  by the inference pipeline).
 - `provision_zone_alert_rules(zone_id, zone_type, store_id, session)` (Phase 6) — auto-creates
   per-zone rules on zone creation, copying threshold/severity/enabled from the *current*
   org-wide default (not hardcoded), so new zones stay consistent with any prior admin edits.
@@ -2335,6 +2346,26 @@ module-level pub/sub in `frontend/lib/api/alerts.ts` (`subscribeOpenAlertCount` 
 `notifyOpenAlertCountChanged`); `updateAlert()` notifies after a successful `PATCH`, and the
 badge refetches on notify. Not cross-tab.
 
+**8. Camera offline-duration alerting (2026-08-06)** — real alerts when a **live** camera stays
+non-`online` longer than a configurable threshold. Uses the **camera health worker** (Module 16),
+**not** the inference pipeline's separate `CAMERA_OFFLINE` event (`rtsp_source.py` — hardcoded
+`critical`, reconnect-exhaustion only; left untouched).
+
+- Schema: `cameras.status_changed_at` (migration `009_camera_status_changed_at`) — set only on
+  actual `status` transitions in `camera_health.py` (`_set_camera_status()`), not on every poll.
+- `alert_rules.camera_id` (migration `008`) enables per-camera threshold overrides alongside
+  existing `store_id` / `zone_id` columns.
+- After each health poll (`refresh_all_live_camera_statuses`), `evaluate_camera_offline_duration_alerts()`
+  checks live cameras with `status` in `{error, offline}` (skips `disabled`). If
+  `(now − status_changed_at) ≥ threshold` from the matched rule and **no open**
+  `CAMERA_OFFLINE_DURATION` alert exists for that `camera_id`, inserts one into `alerts` with
+  severity from `alert_rules` and metadata matching the `AnalyticsDbWriter` alert shape
+  (`threshold_seconds`, `offline_duration_seconds`, `connectivity_status`, `status_changed_at`).
+  Open-alert dedup prevents repeat inserts every 120s poll; when the camera returns `online`,
+  the next outage can alert again once duration is exceeded.
+- **No admin UI yet** for this rule type — org-wide default row only (migration `010`); Alert
+  Thresholds modal follow-up pending.
+
 ### Decisions made
 
 - Configurable `alert_rules` table over hardcoded thresholds — admins edit without a redeploy.
@@ -2361,6 +2392,10 @@ badge refetches on notify. Not cross-tab.
 - `PUT /api/zones/{id}` doesn't sync the analytics `zones` row (pre-existing, unrelated to
   `alert_rules` — polygon/name/type edits from the admin UI can drift stale relative to what the
   pipeline and the `alert_rules` FK actually use; flagged for a future pass).
+- `CAMERA_OFFLINE_DURATION` is not editable in the Alert Thresholds modal yet (no UI label /
+  row handling for the new rule type — follow-up prompt).
+- Pipeline `CAMERA_OFFLINE` (`rtsp_source.py` → `AnalyticsDbWriter`) and health-worker
+  `CAMERA_OFFLINE_DURATION` are intentionally separate mechanisms — do not merge.
 
 ### Tests
 
@@ -2372,6 +2407,9 @@ badge refetches on notify. Not cross-tab.
   invalid threshold 422).
 - `tests/test_api_extended.py::TestZoneAlertRuleProvisioning` — 3 tests (general zone provisions
   dwell rule, queue zone provisions queue rules, zone delete cascades `alert_rules`).
+- `tests/test_camera_offline_duration_alerts.py` — 3 tests (creates alert when down past
+  threshold, skips when open alert exists, no alert when under threshold) — **3 passed**
+  (2026-08-06).
 - Full analytics regression after Phase 3:
   `pytest tests/test_occupancy.py tests/test_alert_rules.py tests/test_events.py tests/test_database.py -q`
   → 44 passed.
@@ -2394,8 +2432,9 @@ docker exec retail-analytics-postgres psql -U retail -d retail_analytics \
   -c "SELECT rule_type, COUNT(*) FROM alert_rules GROUP BY rule_type;"
 ```
 Reference seed row counts: `DWELL_THRESHOLD` 8, `QUEUE_THRESHOLD` 3,
-`QUEUE_THRESHOLD_DURATION` 3, `OCCUPANCY_THRESHOLD` 1 (4 zones: `store1`, `store2`,
-`floor_main`, `queue_lane` — one queue zone).
+`QUEUE_THRESHOLD_DURATION` 3, `OCCUPANCY_THRESHOLD` 1, `CAMERA_OFFLINE_DURATION` 1 (org-wide
+default from migration `010`; not yet mirrored in `database/seed.py`). Reference seed zones:
+`store1`, `store2`, `floor_main`, `queue_lane` — one queue zone.
 
 ### ✅ Test Checkpoint 15 — Verified
 
@@ -2407,6 +2446,8 @@ Reference seed row counts: `DWELL_THRESHOLD` 8, `QUEUE_THRESHOLD` 3,
       (`TestZoneAlertRuleProvisioning` 3/3).
 - [x] Alert Thresholds modal shows real zone names, not raw `zone_id`.
 - [x] Nav badge updates immediately after acknowledge/resolve, same tab, no reload.
+- [x] `CAMERA_OFFLINE_DURATION` health-worker path creates alert when down past threshold,
+      skips duplicate open alerts, ignores under-threshold cameras (`test_camera_offline_duration_alerts` 3/3).
 
 ---
 
@@ -2476,14 +2517,99 @@ of the UI work above:
   line → `entry_exit`+`occupancy`; analytics-enabled zone → `zones`+`dwell`+`heatmap`; queue-type
   zone → `queues`) rather than defaulting everything on or off.
 
+**6. Camera status transitions + offline-duration evaluation (2026-08-06)** — extends the
+existing health worker (`camera_health.py` / `main.py` startup thread) for Module 15 alerting:
+- `cameras.status_changed_at` (migration `009`) — updated only when `status` actually changes
+  (`_set_camera_status()` in probe / MJPEG error paths), not on every 120s poll.
+- `evaluate_camera_offline_duration_alerts()` runs in the same DB session after
+  `refresh_all_live_camera_statuses()`; treats `error` and `offline` as down, skips `disabled`.
+- Distinct from inference `CAMERA_OFFLINE` (`rtsp_source.py`) — health worker path uses
+  configurable `CAMERA_OFFLINE_DURATION` rules and persisted connectivity status.
+
+**7. Phase 1a — Live camera MJPEG preview (2026-08-05)** — replaces placeholder tiles on
+`/live-cameras` for `source_type=live` cameras only. Recorded-camera processing unchanged.
+Incremental hardening passes **1a-fix … 1a-fix7** followed in the same session.
+
+**Backend — streaming**
+- `GET /api/cameras/{id}/stream` — multipart MJPEG (`multipart/x-mixed-replace`) via
+  `backend/app/services/camera_stream.py`; opens RTSP through existing `VideoSource` /
+  `create_video_source()` (no second RTSP client).
+- Auth: `Authorization: Bearer` **or** `?token=<jwt>` query param (required for `<img>` tags that
+  cannot send headers). **Tradeoff:** JWT appears in URLs (logs/history/referrer risk).
+- Returns **404** if `source_type != live`; **503** `stream_unavailable` if open fails.
+  Dead sources give up within ~**10 s** on a single viewer connection (fast-fail reconnect +
+  5 s OpenCV watchdog — see 1a-fix4/5/7 below).
+- **Known limitation:** one RTSP connection per active viewer (no shared fan-out). Deferred relay
+  (MediaMTX/WebRTC) → Module 17 note below.
+
+**Backend — reliability passes**
+- **1a-fix (mid-stream death):** when a live read fails mid-stream (`CameraState.ERROR` or stall
+  timeout), MJPEG loop stops, `VideoSource` released, `cameras.status` set to `error` via existing
+  `apply_probe_to_camera()` path (`persist_camera_stream_error()` in `camera_health.py`).
+- **1a-fix2 (event loop):** `source.read()` runs in `asyncio.to_thread()`; pacing uses
+  `asyncio.sleep()` — avoids blocking the ASGI event loop during FFmpeg read timeouts.
+- **1a-fix3 (FFmpeg thread safety):** process-wide `threading.Lock` in `opencv_io.py` serializes
+  all OpenCV/FFmpeg open/read/release across MJPEG workers, health worker, and Test Camera probe.
+  **Tradeoff:** under contention, frame reads queue (~tens–low-hundreds of ms per competing
+  stream); correctness over parallel decode throughput.
+- **1a-fix4/5 (timeouts):** shared **5000 ms** open/read limits in `inference/video/rtsp_timeouts.py`
+  (`RTSP_OPEN_READ_TIMEOUT_MS`). Applied via FFmpeg `stimeout` env option **and** OpenCV
+  `(open-only)` constructor params `[CAP_PROP_OPEN_TIMEOUT_MSEC, 5000, CAP_PROP_READ_TIMEOUT_MSEC, 5000]`
+  through `open_rtsp_videocapture()`. On OpenCV **4.10.0 + CAP_FFMPEG**, post-construction
+  `cap.set()` returns `False` and leaves the 30 s default — constructor params are required for the
+  `_opencv_ffmpeg_interrupt_callback` watchdog. Health/test probe (`camera_test.py`) uses the same
+  helper.
+- **1a-fix6 (investigation — no code):** confirmed a single `GET /stream` connection could log
+  ~12× `"Stream timeout triggered"` over ~90 s without new browser requests. Root cause: MJPEG loop
+  `continue`s on every `(False, None)` while `RTSPVideoSource` still reports `ONLINE`/`PROCESSING`
+  (not `ERROR`); each `read()` can block 60+ s inside patient `_reconnect()` (5 failures × ~5 s,
+  then 5 reopen attempts with 1/2/4/8/16 s backoff + 60 s `retry_after_exhaustion`). Outer
+  `LIVE_STREAM_STALL_TIMEOUT_SEC` could not bound response time while `read()` blocked internally.
+- **1a-fix7 (fast-fail reconnect profile):** MJPEG preview passes per-instance overrides via
+  `create_video_source(..., **STREAM_RTSP_RECONNECT_KWARGS)` in `camera_stream.py` only — patient
+  `RTSPVideoSource` defaults unchanged for inference pipelines, demos, and tests:
+  `reconnect_threshold=1`, `reconnect_attempts=1`, `backoff_base=0`, `backoff_max=0`,
+  `retry_after_exhaustion=5`. Worst case ~5 s failed read + ~5 s single reopen ≈ **10 s** before
+  `CameraState.ERROR`. `LIVE_STREAM_STALL_TIMEOUT_SEC` lowered **90 → 15 s** as secondary safety net.
+
+**Frontend — Live Cameras page**
+- `CameraFrame` renders `<img src="/api/cameras/{id}/stream?token=…">` for online live cameras
+  (`getCameraStreamUrl()` in `lib/api/cameras.ts`).
+- Zone + counting-line SVG overlays toggled on/off (`OverlayToggles` `mode="live"` — no bbox/track
+  toggles in this phase). Geometry hydrated in `getLiveCameras()` from `/api/zones` + `/api/lines`.
+- Expand modal: occupancy/entries/exits cards removed (redundant with analytics pages).
+- **1a-fix:** `onError` on `<img>` shows Signal Error scrim when stream dies (no frozen last frame).
+  No tile auto-reconnect — recovery via existing **90 s** status poll or manual reload.
+
+**Tests added/updated:** `tests/test_camera_stream.py` (mid-read failure, status persist);
+`tests/test_api.py` stream auth/404/recorded-rejection/token-query tests. **8 passed** (2026-08-05);
+fast-fail profile re-verified after 1a-fix7 (2026-08-06);
+`tests/test_camera_offline_duration_alerts.py` — offline-duration alert creation/dedup (**3 passed**,
+2026-08-06).
+
+**Key files:** `backend/app/services/camera_stream.py`, `camera_health.py`, `opencv_io.py`,
+`opencv_rtsp.py`, `backend/app/auth.py` (`get_current_user_from_token`), `backend/app/routers/cameras.py`,
+`inference/video/rtsp_source.py`, `inference/video/rtsp_timeouts.py`,
+`frontend/components/cameras/camera-frame.tsx`, `camera-tile.tsx`, `camera-modal.tsx`,
+`overlay-toggles.tsx`, `frontend/lib/api/cameras.ts`, `frontend/lib/api/mappers.ts`.
+
 ### Known limitations
 
-- **No camera thumbnail/frame preview.** Test Camera is a stream probe only — it reports
-  success/failure and resolution/fps, but returns no image, and the preview panel explicitly
-  says "not available." The zone/line editor therefore does **not** draw over a captured
-  reference frame from the camera as the spec describes; it's a coordinate-only canvas. Needs a
-  frame-capture endpoint (still/JPEG snapshot from `VideoSource.open()`) before this matches the
-  intended workflow.
+- **No camera thumbnail/frame preview in admin Test Camera or zone/line editor.** Test Camera is a
+  stream probe only — it reports success/failure and resolution/fps, but returns no image, and the
+  preview panel explicitly says "not available." The zone/line editor therefore does **not** draw
+  over a captured reference frame from the camera as the spec describes; it's a coordinate-only
+  canvas. *(Live Cameras page has MJPEG video — that is separate from admin still-frame preview.)*
+  Needs a frame-capture endpoint (single JPEG snapshot from `VideoSource.open()`) before admin
+  editor workflow matches the intended design.
+- **Live stream — Phase 1a scope boundaries:**
+  - One RTSP connection per viewer (no relay/fan-out until Module 17 MediaMTX/WebRTC).
+  - JWT in stream URL query param (`?token=`) — required for `<img>`; not ideal for production hardening.
+  - No bounding-box / track-ID overlays on live tiles (inference worker not built).
+  - No tile auto-reconnect after stream death — `onError` scrim + `status=error` persist (within
+    ~10 s of source death via fast-fail reconnect); recovery via Live Cameras **90 s** status
+    poll or page reload.
+  - Global `opencv_io()` lock may add brief frame jitter when health check + multiple streams coincide.
 - **Frontend/backend role mapping unconfirmed.** The admin route gate checks for the display
   string `"System Administrator"`, but backend RBAC only issues `admin`/`user`. This gap was
   flagged during the 13.5 planning pass and never explicitly closed (unlike two sibling gaps in
@@ -2496,7 +2622,11 @@ of the UI work above:
 - [x] Add a camera entirely through the UI (no manual DB inserts) — `createCamera` → real
       `POST /api/cameras`.
 - [ ] Test Camera confirms connectivity, but does **not** show a live thumbnail — blocked on the
-      frame-preview gap above.
+      admin still-frame gap above (Live Cameras MJPEG preview is separate).
+- [x] Live Cameras page shows real MJPEG stream for online `source_type=live` cameras with
+      zone/line overlay toggles (Phase 1a, 2026-08-05).
+- [x] Health worker tracks `status_changed_at` on transitions and evaluates
+      `CAMERA_OFFLINE_DURATION` alerts after each poll (`test_camera_offline_duration_alerts` 3/3).
 - [x] Draw a zone and a counting line entirely through the UI editors; coordinates save via the
       real `POST /api/zones` / `POST /api/lines` and produce correct `ZONE_ENTER`/`ENTRY`
       behavior when the pipeline runs (same geometry path Modules 4/6 already verified against).
@@ -2510,3 +2640,4 @@ of the UI work above:
 ### Module 17 note (not started)
 
 - **TODO (heatmap storage):** local-disk NPZ under `data/heatmaps/` will not survive multi-instance / containerized deployment — move heatmap hour buckets to object storage or DB-stored blobs before any multi-replica rollout.
+- **Deferred:** MediaMTX relay + WebRTC live playback — considered during Live Cameras streaming work (2026-08-05). Would fix the one-RTSP-connection-per-viewer limitation from Phase 1a and enable proper WebRTC playback instead of MJPEG, and would let a future live-inference worker (Track 3, not yet built) share one camera pull instead of opening its own connection. Decision: defer to Module 17 (Dockerization & Deployment), since it's a new always-running service and belongs with that infra work, not bolted onto the display feature. Not started.

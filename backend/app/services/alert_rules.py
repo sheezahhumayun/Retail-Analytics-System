@@ -115,6 +115,62 @@ def get_occupancy_severity(store_id: str) -> str:
     return "warning"
 
 
+def get_camera_offline_duration_rule(
+    camera_id: str,
+    store_id: str,
+    session: Session | None = None,
+) -> tuple[float, str] | None:
+    """Load CAMERA_OFFLINE_DURATION rule for a camera.
+
+    Lookup order: per-camera → store-wide → org-wide default.
+    Returns ``(threshold_seconds, severity)`` or ``None`` if no enabled rule exists.
+    """
+    if session is not None:
+        return _load_camera_offline_duration_rule(session, camera_id, store_id)
+
+    with session_scope() as sess:
+        return _load_camera_offline_duration_rule(sess, camera_id, store_id)
+
+
+def _load_camera_offline_duration_rule(
+    session: Session,
+    camera_id: str,
+    store_id: str,
+) -> tuple[float, str] | None:
+    stmt = select(AlertRule).where(
+        AlertRule.rule_type == "CAMERA_OFFLINE_DURATION",
+        AlertRule.enabled == True,
+    )
+    all_rules = session.exec(stmt).all()
+
+    camera_rule: AlertRule | None = None
+    store_rule: AlertRule | None = None
+    org_default: AlertRule | None = None
+
+    for rule in all_rules:
+        if rule.camera_id == camera_id:
+            camera_rule = rule
+        elif (
+            rule.camera_id is None
+            and rule.zone_id is None
+            and rule.store_id == store_id
+        ):
+            store_rule = rule
+        elif (
+            rule.camera_id is None
+            and rule.zone_id is None
+            and rule.store_id is None
+        ):
+            org_default = rule
+
+    matched = camera_rule if camera_rule is not None else store_rule
+    if matched is None:
+        matched = org_default
+    if matched is None:
+        return None
+    return matched.threshold, matched.severity
+
+
 def _load_occupancy_rule(store_id: str) -> tuple[float, str] | None:
     """Load store-level OCCUPANCY_THRESHOLD rule with org-wide fallback."""
     with session_scope() as session:

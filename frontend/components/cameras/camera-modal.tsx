@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect } from "react"
-import { X, Users, LogIn, LogOut } from "lucide-react"
+import { X } from "lucide-react"
 
 import type { Camera, OverlayState } from "@/lib/types"
 import { OverlayToggles } from "@/components/cameras/overlay-toggles"
@@ -66,41 +66,16 @@ export function CameraModal({
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-5">
           <div className="mb-3">
-            <OverlayToggles value={overlays} onChange={onOverlaysChange} size="md" />
+            <OverlayToggles
+              value={overlays}
+              onChange={onOverlaysChange}
+              size="md"
+              mode="live"
+            />
           </div>
           <CameraFrame camera={camera} overlays={overlays} />
-
-          {/* Live counts */}
-          <div className="mt-4 grid grid-cols-3 gap-3">
-            <CountStat icon="occupancy" label="Occupancy" value={camera.occupancy} />
-            <CountStat icon="entries" label="Entries Today" value={camera.entriesToday} />
-            <CountStat icon="exits" label="Exits Today" value={camera.exitsToday} />
-          </div>
         </div>
       </div>
-    </div>
-  )
-}
-
-function CountStat({
-  icon,
-  label,
-  value,
-}: {
-  icon: "occupancy" | "entries" | "exits"
-  label: string
-  value: number
-}) {
-  const Icon = icon === "occupancy" ? Users : icon === "entries" ? LogIn : LogOut
-  return (
-    <div className="rounded-lg border border-border bg-background p-3">
-      <div className="flex items-center gap-1.5 text-muted-foreground">
-        <Icon className="h-3.5 w-3.5" />
-        <span className="text-xs font-medium">{label}</span>
-      </div>
-      <p className="mt-1 text-2xl font-semibold tracking-tight text-foreground">
-        {value.toLocaleString()}
-      </p>
     </div>
   )
 }

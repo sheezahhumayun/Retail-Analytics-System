@@ -5,13 +5,20 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlmodel import select
 
 from database.models import Camera, Event, OccupancyMetric, Store
 
-from ..auth import TokenPayload, get_current_user, require_admin
+from ..auth import TokenPayload, get_current_user, get_current_user_from_token, require_admin
 from ..deps import DbSession
 from ..exceptions import ApiError
+from ..services.camera_stream import (
+    MJPEG_CONTENT_TYPE,
+    StreamOpenError,
+    async_iter_open_mjpeg_stream,
+    open_stream_source,
+)
 from ..schemas.cameras import (
     CameraCreate,
     CameraResponse,
@@ -146,4 +153,58 @@ def camera_status(
             if camera.source_type == "recorded" and camera.last_processed_at
             else None
         ),
+    )
+
+
+@router.get(
+    "/{camera_id}/stream",
+    summary="Live camera MJPEG stream",
+    description=(
+        "Multipart MJPEG preview for ``source_type=live`` cameras. "
+        "Authenticate with ``Authorization: Bearer`` or ``?token=<jwt>`` "
+        "(required for ``<img>`` tags). Each viewer opens its own RTSP connection."
+    ),
+    responses={
+        200: {
+            "content": {"multipart/x-mixed-replace": {}},
+            "description": "MJPEG frame stream",
+        },
+        404: {"description": "Camera not found or not a live source"},
+        503: {"description": "Stream could not be opened"},
+    },
+)
+def camera_stream(
+    camera_id: str,
+    session: DbSession,
+    _user: Annotated[TokenPayload, Depends(get_current_user_from_token)],
+) -> StreamingResponse:
+    camera = session.get(Camera, camera_id)
+    if camera is None:
+        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    if camera.source_type != "live":
+        raise ApiError(
+            404,
+            "camera_not_live",
+            f"Camera '{camera_id}' is not a live source",
+        )
+    if not camera.rtsp_url:
+        raise ApiError(
+            400,
+            "no_stream_url",
+            f"Camera '{camera_id}' has no stream URL configured",
+        )
+
+    try:
+        source, first_chunk = open_stream_source(camera.rtsp_url)
+    except StreamOpenError as exc:
+        raise ApiError(
+            503,
+            "stream_unavailable",
+            f"Could not open camera stream: {exc}",
+        ) from exc
+
+    return StreamingResponse(
+        async_iter_open_mjpeg_stream(source, first_chunk, camera_id=camera.id),
+        media_type=MJPEG_CONTENT_TYPE,
+        headers={"Cache-Control": "no-store"},
     )
