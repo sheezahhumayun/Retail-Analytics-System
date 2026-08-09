@@ -3569,6 +3569,54 @@ not yet built.
 
 ---
 
+## 2026-08-09 — Superadmin UI complete (org detail: services, users, stores) — DONE
+
+Final piece of the superadmin frontend: org detail page now covers services toggle, user
+management, and store CRUD. "All Stores" user assignment (`store_id: null`) fixes a real bug
+where orgs with zero stores could not create users.
+
+### DONE
+
+- **`GET /organizations/{org_id}/users`** and **`GET /organizations/{org_id}/stores`** — new
+  superadmin-only read endpoints (`backend/app/routers/organizations_admin.py`)
+- **`reset_password`** widened from `require_admin` to `require_user_admin_or_superadmin`
+  (same `is_superadmin` branch pattern as `update_user`/`delete_user`)
+- **`create_store`/`update_store`/`delete_store`** widened the same way — superadmin can now
+  manage stores for any org; `list_stores` deliberately left unchanged (already usable by any
+  authenticated org user, no admin gating to begin with)
+- **New Stores section** on the org detail page (`frontend/app/superadmin/organizations/[id]/page.tsx`):
+  create/edit/delete via `StoreModal` + `stores-admin.ts`; backend **409 `store_has_cameras`**
+  surfaced inline via `actionError` rather than failing silently
+- **New "All Stores" option** (`store_id: null`) on user store-assignment, in both `/admin/users`
+  and the superadmin org detail page — fixes a real bug where an org with zero stores made user
+  creation impossible (`assignedStore` was a hard-required field with no valid fallback).
+  `ALL_STORES_LABEL` in `mappers.ts`, explicit null mapping in `users.ts`, default in
+  `user-modal.tsx`; `update_user` uses `"store_id" in body.model_fields_set` so explicit null
+  clears store on re-edit
+- **Bug caught during earlier verification:** `organizations_admin.py`'s own `_to_response`
+  shadowed the imported `users._to_response` — renamed to `user_to_response`
+- **All of the above manually verified directly by the user** in a real browser against the live
+  dev servers — store create/edit/delete (including the 409-with-cameras case), "All Stores"
+  round-tripping correctly through create and re-edit, and regular `/admin/users` confirmed
+  unaffected
+
+### SUPERADMIN UI: COMPLETE
+
+Org list, create, toggle, delete, services (Retail Analytics toggle), user management, store
+management — all built and verified, both API and UI.
+
+### TODO (carried forward, unchanged)
+
+- AnalyticsDbWriter per-event DB session (highest priority deferred item)
+- `test_export_csv` failure
+- General test-suite batch flakiness
+- Stale README admin password docs
+- Two pre-existing frontend type errors
+- Continuous live analytics (unscoped)
+- Pipeline-file reconciliation (deferred until live analytics scoping begins)
+
+---
+
 ## Next Up: Module 17 — Dockerization & Deployment
 
 ### Module 17 note (not started)

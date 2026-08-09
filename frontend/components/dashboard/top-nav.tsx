@@ -149,6 +149,30 @@ function OpenAlertBadge() {
 
 export function TopNav() {
   const { user } = useAuth()
+
+  if (user?.accountType === "superadmin") {
+    return (
+      <header className="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+        <div className="flex h-14 items-center gap-2 px-4 sm:px-6">
+          <Link href="/superadmin/organizations" className="flex items-center gap-2" aria-label="Retail Analytics home">
+            <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+              <Activity className="size-[18px]" aria-hidden="true" />
+            </span>
+            <span className="hidden text-sm font-semibold tracking-tight text-foreground sm:block">
+              Retail<span className="text-muted-foreground">IQ</span>
+            </span>
+          </Link>
+
+          <div className="ml-auto flex items-center gap-1 sm:gap-2">
+            <ThemeToggle />
+            <div className="mx-1 hidden h-6 w-px bg-border sm:block" />
+            <UserMenu />
+          </div>
+        </div>
+      </header>
+    )
+  }
+
   const navItems = navItemsForSessionRole(user?.role)
 
   return (

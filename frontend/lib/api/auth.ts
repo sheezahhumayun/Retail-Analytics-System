@@ -10,6 +10,7 @@ import {
 import {
   backendRoleToFrontend,
   type BackendMeResponse,
+  type BackendSuperadminMeResponse,
   type BackendUserInfo,
 } from "@/lib/api/mappers";
 import { clearStoresCache } from "@/lib/api/stores";
@@ -85,7 +86,28 @@ export async function refreshCurrentUser(): Promise<SessionUser | null> {
   const session = readAuthSession();
   if (!session?.access_token) return null;
 
+  const accountType = session.user.accountType ?? "org_user";
+
   try {
+    if (accountType === "superadmin") {
+      const me = await apiRequest<BackendSuperadminMeResponse>(
+        "/api/auth/superadmin/me",
+      );
+      const updated: AuthSession = {
+        access_token: session.access_token,
+        org_id: null,
+        user: {
+          id: me.id,
+          name: me.name,
+          email: me.email,
+          role: backendRoleToFrontend(me.role),
+          accountType: "superadmin",
+        },
+      };
+      writeAuthSession(updated);
+      return updated.user;
+    }
+
     const me = await apiRequest<BackendMeResponse>("/api/auth/me");
     const updated: AuthSession = {
       access_token: session.access_token,
@@ -95,7 +117,7 @@ export async function refreshCurrentUser(): Promise<SessionUser | null> {
         name: me.name,
         email: me.email,
         role: backendRoleToFrontend(me.role),
-        accountType: "org_user",
+        accountType: me.account_type ?? "org_user",
       },
     };
     writeAuthSession(updated);

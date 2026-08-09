@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from sqlmodel import select
 
-from database.models import Organization
+from database.models import Organization, User
 
 from ..auth import ORG_STATUS_ACTIVE, ORG_STATUS_DISABLED, TokenPayload, get_current_superadmin
 from ..deps import DbSession
@@ -18,8 +18,12 @@ from ..schemas.extended.organizations_admin import (
     OrganizationCreate,
     OrganizationDeleteConfirm,
 )
+from ..schemas.extended.users import UserResponse
+from ..schemas.stores import StoreResponse
 from ..services.camera_process import kill_processing_runs_for_org
 from ..services.org_delete import delete_organization_cascade
+from ..services.org_scope import stores_for_org_stmt
+from .users import _to_response as user_to_response
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +85,41 @@ def get_organization(
     if org is None:
         raise ApiError(404, "org_not_found", f"Organization '{org_id}' not found")
     return _to_response(org)
+
+
+@router.get(
+    "/{org_id}/users",
+    response_model=list[UserResponse],
+    summary="List organization users",
+    description="Return all users in an organization. Superadmin only.",
+)
+def list_organization_users(
+    org_id: str,
+    session: DbSession,
+    _superadmin: Annotated[TokenPayload, Depends(get_current_superadmin)],
+) -> list[UserResponse]:
+    if session.get(Organization, org_id) is None:
+        raise ApiError(404, "org_not_found", f"Organization '{org_id}' not found")
+    rows = session.exec(
+        select(User).where(User.org_id == org_id).order_by(User.name)
+    ).all()
+    return [user_to_response(u) for u in rows]
+
+
+@router.get(
+    "/{org_id}/stores",
+    response_model=list[StoreResponse],
+    summary="List organization stores",
+    description="Return all stores in an organization. Superadmin only.",
+)
+def list_organization_stores(
+    org_id: str,
+    session: DbSession,
+    _superadmin: Annotated[TokenPayload, Depends(get_current_superadmin)],
+) -> list[StoreResponse]:
+    if session.get(Organization, org_id) is None:
+        raise ApiError(404, "org_not_found", f"Organization '{org_id}' not found")
+    return list(session.exec(stores_for_org_stmt(org_id)).all())
 
 
 @router.post(

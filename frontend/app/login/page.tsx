@@ -13,7 +13,6 @@ export default function LoginPage() {
   const [selectedHint, setSelectedHint] = useState('');
   const [errors, setErrors] = useState<{ email?: string; password?: string }>({});
   const [loginError, setLoginError] = useState('');
-  const [superadminNotice, setSuperadminNotice] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
@@ -46,7 +45,6 @@ export default function LoginPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
-    setSuperadminNotice('');
 
     if (!validateForm()) {
       return;
@@ -57,10 +55,7 @@ export default function LoginPage() {
     try {
       const session = await login(email, password);
       if (session.accountType === 'superadmin') {
-        setSuperadminNotice(
-          'Superadmin dashboard is not yet available — coming in a later phase.',
-        );
-        setIsLoading(false);
+        router.push('/superadmin/organizations');
         return;
       }
       router.push('/');
@@ -128,12 +123,6 @@ export default function LoginPage() {
             {loginError && (
               <div className="p-3 bg-red-500/10 border border-red-500/20 rounded text-sm text-red-600 dark:text-red-400">
                 {loginError}
-              </div>
-            )}
-
-            {superadminNotice && (
-              <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded text-sm text-amber-800 dark:text-amber-200">
-                {superadminNotice}
               </div>
             )}
 

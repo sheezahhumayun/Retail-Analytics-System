@@ -33,6 +33,8 @@ import type { HeatBlob } from "@/lib/types";
 
 // ─── Backend response shapes ─────────────────────────────────────────────────
 
+export const ALL_STORES_LABEL = "All Stores" as const;
+
 export type BackendAccountType = "org_user" | "superadmin";
 
 export interface BackendUserInfo {
@@ -46,6 +48,17 @@ export interface BackendUserInfo {
 
 export interface BackendMeResponse extends BackendUserInfo {
   store_id: string | null;
+  store_ids: string[];
+}
+
+export interface BackendSuperadminMeResponse {
+  id: string;
+  email: string;
+  name: string;
+  role: "admin" | "user";
+  org_id: null;
+  account_type: "superadmin";
+  store_id: null;
   store_ids: string[];
 }
 
@@ -957,7 +970,7 @@ export function mapBackendUser(
     role: backendRoleToFrontend(user.role),
     assignedStore: user.store_id
       ? storeNameMap.get(user.store_id) ?? user.store_id
-      : "—",
+      : ALL_STORES_LABEL,
     status: backendStatusToFrontend(user.status ?? "active"),
   };
 }

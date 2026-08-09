@@ -3,13 +3,15 @@
 import { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 import type { User, UserRole } from '@/lib/types';
-import { STORES, USER_ROLES } from '@/lib/api/users';
+import { ALL_STORES_LABEL, STORES, USER_ROLES } from '@/lib/api/users';
 
 interface UserModalProps {
   user?: User;
   isOpen: boolean;
   onClose: () => void;
   onSave: (user: User & { password?: string }) => Promise<void>;
+  /** When set, overrides the module-level STORES cache (e.g. superadmin org context). */
+  storeOptions?: string[];
 }
 
 interface FormErrors {
@@ -21,14 +23,27 @@ interface FormErrors {
   confirmPassword?: string;
 }
 
-export function UserModal({ user, isOpen, onClose, onSave }: UserModalProps) {
+export function UserModal({
+  user,
+  isOpen,
+  onClose,
+  onSave,
+  storeOptions,
+}: UserModalProps) {
+  const baseStores = storeOptions ?? STORES;
+  const stores = [
+    ALL_STORES_LABEL,
+    ...baseStores.filter((store) => store !== ALL_STORES_LABEL),
+  ];
+  const defaultStore = ALL_STORES_LABEL;
+
   const [formData, setFormData] = useState<Partial<User>>(
     user || {
       id: '',
       name: '',
       email: '',
       role: 'Retail Analyst',
-      assignedStore: STORES[0],
+      assignedStore: defaultStore,
       status: 'Active',
     }
   );
@@ -47,7 +62,7 @@ export function UserModal({ user, isOpen, onClose, onSave }: UserModalProps) {
         name: '',
         email: '',
         role: 'Retail Analyst',
-        assignedStore: STORES[0],
+        assignedStore: defaultStore,
         status: 'Active',
       });
     }
@@ -56,7 +71,7 @@ export function UserModal({ user, isOpen, onClose, onSave }: UserModalProps) {
     setErrors({});
     setSaveError('');
     setIsSaving(false);
-  }, [user, isOpen]);
+  }, [user, isOpen, defaultStore]);
 
   const validateEmail = (email: string): boolean => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -247,8 +262,7 @@ export function UserModal({ user, isOpen, onClose, onSave }: UserModalProps) {
                 errors.assignedStore ? 'border-red-500' : 'border-border'
               }`}
             >
-              <option value="">Select a store</option>
-              {STORES.map((store) => (
+              {stores.map((store) => (
                 <option key={store} value={store}>
                   {store}
                 </option>

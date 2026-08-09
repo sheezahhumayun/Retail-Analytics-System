@@ -8,7 +8,7 @@ import { ScopeProvider } from "@/lib/scope/ScopeContext";
 
 function ScopeWhenAuthenticated({ children }: { children: ReactNode }) {
   const { user } = useAuth();
-  if (!user) {
+  if (!user || user.accountType === "superadmin") {
     return <>{children}</>;
   }
   return <ScopeProvider>{children}</ScopeProvider>;

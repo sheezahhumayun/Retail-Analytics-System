@@ -242,10 +242,9 @@ def update_user(
 
         user.role = body.role
 
-    if body.store_id is not None:
-
-        require_store_in_org(session, body.store_id, user.org_id)
-
+    if "store_id" in body.model_fields_set:
+        if body.store_id is not None:
+            require_store_in_org(session, body.store_id, user.org_id)
         user.store_id = body.store_id
 
     if body.status is not None:
@@ -325,11 +324,16 @@ def reset_password(
 
     session: DbSession,
 
-    admin: Annotated[TokenPayload, Depends(require_admin)],
+    caller: Annotated[UserAdminCaller, Depends(require_user_admin_or_superadmin)],
 
 ) -> None:
 
-    user = require_user_in_org(session, user_id, admin.org_id)
+    if caller.is_superadmin:
+        user = session.get(User, user_id)
+        if user is None:
+            raise ApiError(404, "user_not_found", f"User '{user_id}' not found")
+    else:
+        user = require_user_in_org(session, user_id, caller.payload.org_id)
 
     user.password_hash = hash_password(body.new_password)
 

@@ -9,7 +9,12 @@ from sqlmodel import select
 
 from database.models import Camera, Organization, Store
 
-from ..auth import TokenPayload, get_current_user, require_admin
+from ..auth import (
+    TokenPayload,
+    UserAdminCaller,
+    get_current_user,
+    require_user_admin_or_superadmin,
+)
 from ..deps import DbSession
 from ..exceptions import ApiError
 from ..schemas.stores import StoreCreate, StoreResponse, StoreUpdate
@@ -41,9 +46,9 @@ def list_stores(
 def create_store(
     body: StoreCreate,
     session: DbSession,
-    admin: Annotated[TokenPayload, Depends(require_admin)],
+    caller: Annotated[UserAdminCaller, Depends(require_user_admin_or_superadmin)],
 ) -> Store:
-    if body.org_id != admin.org_id:
+    if not caller.is_superadmin and body.org_id != caller.payload.org_id:
         raise ApiError(404, "org_not_found", f"Organization '{body.org_id}' not found")
     if session.get(Store, body.id) is not None:
         raise ApiError(409, "store_exists", f"Store '{body.id}' already exists")
@@ -67,9 +72,14 @@ def update_store(
     store_id: str,
     body: StoreUpdate,
     session: DbSession,
-    admin: Annotated[TokenPayload, Depends(require_admin)],
+    caller: Annotated[UserAdminCaller, Depends(require_user_admin_or_superadmin)],
 ) -> Store:
-    store = require_store_in_org(session, store_id, admin.org_id)
+    if caller.is_superadmin:
+        store = session.get(Store, store_id)
+        if store is None:
+            raise ApiError(404, "store_not_found", f"Store '{store_id}' not found")
+    else:
+        store = require_store_in_org(session, store_id, caller.payload.org_id)
     if body.name is not None:
         store.name = body.name
     if body.address is not None:
@@ -91,9 +101,14 @@ def update_store(
 def delete_store(
     store_id: str,
     session: DbSession,
-    admin: Annotated[TokenPayload, Depends(require_admin)],
+    caller: Annotated[UserAdminCaller, Depends(require_user_admin_or_superadmin)],
 ) -> None:
-    require_store_in_org(session, store_id, admin.org_id)
+    if caller.is_superadmin:
+        store = session.get(Store, store_id)
+        if store is None:
+            raise ApiError(404, "store_not_found", f"Store '{store_id}' not found")
+    else:
+        store = require_store_in_org(session, store_id, caller.payload.org_id)
     has_cameras = session.exec(
         select(Camera.id).where(Camera.store_id == store_id).limit(1)
     ).first()
@@ -103,6 +118,4 @@ def delete_store(
             "store_has_cameras",
             "Cannot delete a store that still has cameras assigned",
         )
-    store = session.get(Store, store_id)
-    assert store is not None
     session.delete(store)

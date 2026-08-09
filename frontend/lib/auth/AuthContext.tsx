@@ -19,12 +19,14 @@ import {
   type SessionUser,
 } from "@/lib/api/auth";
 import type { UserRole } from "@/lib/types";
+import type { AccountType } from "@/lib/api/client";
 
 export type AuthUser = {
   id: string;
   name: string;
   email: string;
   role: UserRole;
+  accountType: AccountType;
   mustChangePassword: boolean;
 };
 
@@ -43,6 +45,7 @@ function sessionToAuthUser(session: SessionUser): AuthUser {
     name: session.name,
     email: session.email,
     role: session.role,
+    accountType: session.accountType,
     mustChangePassword: false,
   };
 }
@@ -77,11 +80,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (email: string, password: string) => {
     const session = await apiLogin(email, password);
-    if (session.accountType === "superadmin") {
-      await apiLogout();
-      setUser(null);
-      return session;
-    }
     setUser(sessionToAuthUser(session));
     return session;
   }, []);

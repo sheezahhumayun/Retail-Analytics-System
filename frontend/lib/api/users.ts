@@ -1,5 +1,6 @@
 import { apiRequest } from "@/lib/api/client";
 import {
+  ALL_STORES_LABEL,
   buildStoreNameMap,
   frontendRoleToBackend,
   frontendStatusToBackend,
@@ -16,7 +17,7 @@ import {
 } from "@/lib/admin-users-data";
 import type { User, UserRole, UserStatus } from "@/lib/types";
 
-export { ROLE_COLORS, USER_ROLES, getRoleColor, getStatusColor };
+export { ROLE_COLORS, USER_ROLES, getRoleColor, getStatusColor, ALL_STORES_LABEL };
 
 /** Hydrated from GET /api/stores — populated on first users API call. */
 export const STORES: string[] = [];
@@ -51,9 +52,26 @@ async function ensureStoreNames(): Promise<Map<string, string>> {
   return storeNameMap;
 }
 
-async function resolveStoreId(storeName: string): Promise<string | null> {
-  const stores = await apiRequest<BackendStore[]>("/api/stores");
+async function fetchStores(orgId?: string): Promise<BackendStore[]> {
+  if (orgId) {
+    return apiRequest<BackendStore[]>(`/api/organizations/${orgId}/stores`);
+  }
+  return apiRequest<BackendStore[]>("/api/stores");
+}
+
+async function resolveStoreId(
+  storeName: string,
+  orgId?: string,
+): Promise<string | null> {
+  const stores = await fetchStores(orgId);
   return stores.find((store) => store.name === storeName)?.id ?? null;
+}
+
+async function resolveStoreNameMap(orgId?: string): Promise<Map<string, string>> {
+  if (orgId) {
+    return buildStoreNameMap(await fetchStores(orgId));
+  }
+  return ensureStoreNames();
 }
 
 function slugifyId(value: string): string {
@@ -72,12 +90,18 @@ export async function getUsers(): Promise<User[]> {
   return users.map((user) => mapBackendUser(user, names));
 }
 
-export async function createUser(data: CreateUserData): Promise<User> {
-  const org_id = getSessionOrgId();
+export async function createUser(
+  data: CreateUserData,
+  orgId?: string,
+): Promise<User> {
+  const org_id = orgId ?? getSessionOrgId();
   if (!org_id) {
     throw new Error("Not authenticated");
   }
-  const store_id = await resolveStoreId(data.assignedStore);
+  const store_id =
+    data.assignedStore === ALL_STORES_LABEL
+      ? null
+      : await resolveStoreId(data.assignedStore, orgId);
   const created = await apiRequest<BackendUser>("/api/users", {
     method: "POST",
     body: {
@@ -90,20 +114,24 @@ export async function createUser(data: CreateUserData): Promise<User> {
       password: data.password,
     },
   });
-  const names = await ensureStoreNames();
+  const names = await resolveStoreNameMap(orgId);
   return mapBackendUser(created, names);
 }
 
 export async function updateUser(
   id: string,
   data: UpdateUserData,
+  orgId?: string,
 ): Promise<User> {
   const body: Record<string, unknown> = {};
   if (data.name !== undefined) body.name = data.name;
   if (data.email !== undefined) body.email = data.email;
   if (data.role !== undefined) body.role = frontendRoleToBackend(data.role);
   if (data.assignedStore !== undefined) {
-    body.store_id = await resolveStoreId(data.assignedStore);
+    body.store_id =
+      data.assignedStore === ALL_STORES_LABEL
+        ? null
+        : await resolveStoreId(data.assignedStore, orgId);
   }
   if (data.status !== undefined) {
     body.status = frontendStatusToBackend(data.status);
@@ -113,11 +141,11 @@ export async function updateUser(
     method: "PUT",
     body,
   });
-  const names = await ensureStoreNames();
+  const names = await resolveStoreNameMap(orgId);
   return mapBackendUser(updated, names);
 }
 
-export async function deleteUser(id: string): Promise<boolean> {
+export async function deleteUser(id: string, _orgId?: string): Promise<boolean> {
   try {
     await apiRequest<void>(`/api/users/${id}`, { method: "DELETE" });
     return true;
@@ -129,6 +157,7 @@ export async function deleteUser(id: string): Promise<boolean> {
 export async function resetPassword(
   id: string,
   newPassword: string,
+  _orgId?: string,
 ): Promise<ResetPasswordResult> {
   try {
     await apiRequest<void>(`/api/users/${id}/reset-password`, {
