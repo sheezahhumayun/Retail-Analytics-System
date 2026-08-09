@@ -12,13 +12,16 @@ from backend.app.services.alert_rules import get_camera_offline_duration_rule
 from database.models import Alert, Camera
 
 from ..schemas.extended.cameras import CameraTestResponse
-from .camera_test import test_camera_stream
+from .camera_test import recorded_source_file_exists, test_camera_stream
 
 logger = logging.getLogger(__name__)
 
 CameraConnectivityStatus = Literal["online", "offline", "error"]
 
 CAMERA_OFFLINE_DURATION_ALERT_TYPE = "CAMERA_OFFLINE_DURATION"
+
+# Automatic health checks must not overwrite these manual/transient statuses.
+_HEALTH_SKIP_STATUSES = frozenset({"disabled", "processing"})
 
 
 def connectivity_status_from_test(result: CameraTestResponse) -> CameraConnectivityStatus:
@@ -59,15 +62,31 @@ def apply_probe_to_camera(
     *,
     now: datetime | None = None,
 ) -> CameraConnectivityStatus:
-    """Update ``cameras.status`` from a probe result (skipped when disabled)."""
-    if camera.status == "disabled":
-        return camera.status  # type: ignore[return-value]
-    if camera.source_type == "recorded":
+    """Update ``cameras.status`` from a probe result (skipped when disabled/processing)."""
+    if camera.status in _HEALTH_SKIP_STATUSES:
         return camera.status  # type: ignore[return-value]
 
     new_status = connectivity_status_from_test(result)
     _set_camera_status(camera, new_status, now=now)
     return new_status  # type: ignore[return-value]
+
+
+def apply_recorded_file_check_to_camera(
+    camera: Camera,
+    *,
+    now: datetime | None = None,
+) -> CameraConnectivityStatus:
+    """Set recorded-camera status from on-disk source file existence."""
+    if camera.status in _HEALTH_SKIP_STATUSES:
+        return camera.status  # type: ignore[return-value]
+    if camera.source_type != "recorded":
+        return camera.status  # type: ignore[return-value]
+
+    new_status: CameraConnectivityStatus = (
+        "online" if recorded_source_file_exists(camera.rtsp_url) else "error"
+    )
+    _set_camera_status(camera, new_status, now=now)
+    return new_status
 
 
 def refresh_camera_status(session: Session, camera: Camera) -> CameraConnectivityStatus:
@@ -80,16 +99,31 @@ def refresh_camera_status(session: Session, camera: Camera) -> CameraConnectivit
     ``disabled`` while we were probing — the manual write wins and this
     probe's result is discarded rather than clobbering it.
     """
-    if camera.status == "disabled" or camera.source_type == "recorded":
+    if camera.status in _HEALTH_SKIP_STATUSES or camera.source_type != "live":
         return camera.status  # type: ignore[return-value]
 
     result = probe_camera(camera)
 
     session.refresh(camera)
-    if camera.status == "disabled":
+    if camera.status in _HEALTH_SKIP_STATUSES:
         return camera.status  # type: ignore[return-value]
 
     status = apply_probe_to_camera(camera, result)
+    session.add(camera)
+    session.flush()
+    return status
+
+
+def refresh_recorded_camera_status(session: Session, camera: Camera) -> CameraConnectivityStatus:
+    """Check recorded-camera source file existence and persist status."""
+    if camera.status in _HEALTH_SKIP_STATUSES or camera.source_type != "recorded":
+        return camera.status  # type: ignore[return-value]
+
+    session.refresh(camera)
+    if camera.status in _HEALTH_SKIP_STATUSES:
+        return camera.status  # type: ignore[return-value]
+
+    status = apply_recorded_file_check_to_camera(camera)
     session.add(camera)
     session.flush()
     return status
@@ -102,6 +136,7 @@ def refresh_all_live_camera_statuses(session: Session) -> int:
             select(Camera).where(
                 Camera.source_type == "live",
                 Camera.status != "disabled",
+                Camera.status != "processing",
             )
         ).all()
     )
@@ -112,6 +147,27 @@ def refresh_all_live_camera_statuses(session: Session) -> int:
             updated += 1
         except Exception:
             logger.exception("Camera health probe failed for %s", camera.id)
+    return updated
+
+
+def refresh_all_recorded_camera_statuses(session: Session) -> int:
+    """Check every non-skipped recorded camera's source file and persist status."""
+    cameras = list(
+        session.exec(
+            select(Camera).where(
+                Camera.source_type == "recorded",
+                Camera.status != "disabled",
+                Camera.status != "processing",
+            )
+        ).all()
+    )
+    updated = 0
+    for camera in cameras:
+        try:
+            refresh_recorded_camera_status(session, camera)
+            updated += 1
+        except Exception:
+            logger.exception("Recorded camera file check failed for %s", camera.id)
     return updated
 
 

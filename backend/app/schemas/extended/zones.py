@@ -18,6 +18,7 @@ class ZoneShapeResponse(BaseModel):
     type: str = Field(validation_alias="shape_type", serialization_alias="type")
     polygon_points: list[Any]
     created_at: str
+    status: str = "offline"
 
 
 class ZoneShapeCreate(BaseModel):

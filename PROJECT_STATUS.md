@@ -1,7 +1,754 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-08-06 (Module 15 — `CAMERA_OFFLINE_DURATION` health-worker alerting; Module 16 — `status_changed_at` + offline-duration evaluation in camera health worker)
+**Last updated:** 2026-08-09 (Phase 1 multi-tenancy — superadmins table + unified login — DONE; Phase 0 organization-scoping enforcement — DONE; user disable — DONE; reference-frame snapshots — shipped; batch-test flakiness deferred)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
+
+---
+
+## 2026-08-09 — Phase 1: Multi-tenancy — superadmins table + unified login — DONE
+
+Platform-level **superadmin** accounts live in a separate table with a unified login flow.
+Org-scoped API routes are unchanged; superadmin JWTs are rejected at the auth layer before
+any org-scoped lookup runs.
+
+### DONE
+
+- **superadmins table** (migration `016_superadmins`, model in `database/models.py`) — `id`,
+  `name`, `email` (unique), `password_hash`, `status`
+- **Unified `/api/auth/login`** — checks `users` then `superadmins`, generic **401** if neither
+  match (no leak of which table)
+- **`TokenPayload` / `UserInfo.org_id`** now `str | None`; new `account_type`:
+  `"org_user" | "superadmin"` discriminator field, legacy tokens default to `"org_user"`
+- **`get_current_user`** and **`_user_from_raw_token`** (MJPEG/snapshot `?token=` path) both
+  reject superadmin tokens with **403** `superadmin_token_not_allowed` before any org-scoped
+  lookup runs
+- **New `get_current_superadmin` dependency** for future superadmin-only routes (Phase 2)
+- **Cross-table email uniqueness** enforced on user creation (**409** if email matches an
+  existing superadmin)
+- **Zero changes** to the 20+ files that read `current_user.org_id` for org scoping — confirmed
+  untouched
+- **Frontend:** superadmin login shows a "not yet available" notice instead of crashing on the
+  org-scoped redirect (`AuthContext`, `login/page.tsx`, `mappers.ts`, `client.ts`, `auth.ts`)
+- **Frontend:** fixed stale-session bug where logging in as superadmin after an org-admin
+  session left `AuthContext.user` set, causing silent **403**s and a blank redirect
+- **Frontend:** fixed silently-swallowed user create/update errors in the admin panel — both now
+  surface real backend error messages (**409** duplicate email, **422** validation) in the modal
+  instead of failing silently; modal only closes on success
+- **Seed script:** `tests/scripts/seed_superadmin_manual_test.py` (idempotent, real password
+  hashing)
+- **Manually verified end-to-end:** superadmin login/notice, org-admin login unaffected, direct
+  **403** on org-scoped endpoints with a superadmin token, generic **401** for unknown email,
+  **409** on duplicate email during user creation (both create and edit paths), no stale-session
+  leakage
+
+### KNOWN NON-ISSUES (verified during this phase, do not re-investigate)
+
+- `test_recorded_camera_health.py` and
+  `test_processing_runs.py::test_video_range_request_returns_206` failures seen in one full-suite
+  run did not reproduce in isolation on current code; likely batch-run flakiness, not caused by
+  superadmin changes. Folded into the existing general test-suite batch flakiness TODO.
+
+### IN PROGRESS
+
+None — Phase 1 fully closed.
+
+### NEXT
+
+**Phase 2** — organization CRUD, org admin management, org disable/delete, store CRUD fixes
+(POST currently has no real org check).
+
+---
+
+## 2026-08-08 — Phase 0: Organization-scoping enforcement — DONE
+
+Multi-tenant **org isolation** is now enforced on backend data APIs: list/query endpoints filter
+by the authenticated user's `org_id`; resource-by-ID access returns **404** (not 403) when the
+row belongs to another org or is genuinely missing — same outward response in both cases.
+
+### What shipped
+
+- **`backend/app/services/org_scope.py`** — `require_*_in_org()` helpers, org-filtered query
+  builders (`stores_for_org_stmt`, `cameras_for_org_stmt`, `alerts_for_org_stmt`, etc.),
+  `require_analytics_scope()` for analytics/reports parameters
+- **Routers updated** — stores, cameras, cameras_extended, zones, lines, events, alerts,
+  alerts_extended, alert_rules_admin, analytics, reports, processing_runs, users
+- **Migration `015_alert_rules_org_id`** — adds `alert_rules.org_id` with backfill from
+  store/zone/camera chains
+- **Cross-org POST guards** — foreign `org_id` on store/user create returns **404**
+  (`org_not_found`), matching missing-org semantics
+
+### Org isolation — verified on real Postgres
+
+| File | Result | Scope |
+|------|--------|-------|
+| `tests/test_org_scoping.py` | **13 passed, 0 failed** | Two-org isolation (stores, cameras, zones, users, analytics scope, alert rules); single-org regression; **new** store-level occupancy alert regression (below) |
+
+Run against live Postgres (`docker compose` on port 5433, migration `015` applied). This is the
+authoritative proof that org B's data is invisible to org A.
+
+### Regression fixed during this phase — store-level `OCCUPANCY_THRESHOLD` alerts
+
+Initial org-scoping made **store-level occupancy alerts invisible**:
+
+- `database/writer.py` `_insert_alert()` creates `OCCUPANCY_THRESHOLD` rows with
+  **`camera_id=None`**, **`zone_id=None`**, store context only in **`metadata_["store_id"]`**
+- First-pass `alerts_for_org_stmt()` / `require_alert_in_org()` only resolved org via camera/zone
+  FKs → both-null alerts excluded from list and unreachable by ID (**404**)
+
+**Fix:** org resolution now also checks `metadata_["store_id"]` and resolves org via
+`store → org`, same as everywhere else. Regression test:
+`test_store_level_occupancy_alert_org_scoped` in `test_org_scoping.py`.
+
+### Other fixes bundled in this phase
+
+| Item | What happened |
+|------|----------------|
+| **`sample-data/checkout.mp4`** | Accidentally deleted from the **working tree** (not intentionally removed — only commit touching the file is Module 1 ingestion). Restored via `git checkout HEAD -- sample-data/checkout.mp4`. Required by recorded-camera health/process tests and demos. |
+| **`test_analytics_modules` gating** | Tests called `GET /api/analytics/queues` without `store_id` → **422** before module-disabled **403** could run. **Test fixed** to send `store_id` — matches real frontend usage (`frontend/lib/api/analytics.ts` always includes `store_id` on queue requests). |
+| **`test_report_module_scope` gating** | `reports.py` enforced org scope on `camera_id` but did not call `require_camera_module()` at the router layer for camera-scoped reports. **Gap closed** — `require_camera_module(camera, REPORT_TYPE_MODULE[report_type])` added to JSON + export handlers when `camera_id` is set. |
+| **`cameras_extended.py` missing imports** | `TokenPayload`, `require_admin`, `require_camera_in_org`, `require_store_in_org` were used but not imported → FastAPI treated `admin` as a required **query** param (**422** on `PUT`/`DELETE`/`POST` camera admin routes). **Fixed**; resolved dependent failures in `test_api.py` (soft-delete, status toggle, OpenAPI schema) and all of `test_processing_runs.py` as a side effect. |
+
+### Tests — final verification run (2026-08-08)
+
+Backend venv (targeted API/DB suite against real Postgres):
+
+- **144 passed**, 6 failed, 1 error (132s)
+- **Green for this phase:** all of `test_org_scoping`, `test_processing_runs`, `test_analytics_modules`, `test_report_module_scope`, `test_recorded_camera_health`, `test_user_disable`, and item-6 camera API tests (`test_delete_camera_is_soft_delete…`, `test_put_status_disable…`, `test_openapi_lists_endpoints`)
+- Inference venv (non-API suite, same Postgres): **213 passed**, 1 skipped (138s)
+
+**Acceptable / pre-existing failures (not introduced by org-scoping):**
+
+- `test_zones_queue_exclusion` — **2** tests (`test_camera_level_excludes_queue_zones`,
+  `test_store_level_excludes_queue_zones`) — `UniqueViolation` on `uq_zone_metrics_zone_hour`
+  (test fixture collides with seed/demo `zone_metrics` rows). Third test in that file passes.
+  Documented historically; unchanged by this phase.
+
+**Other failures in the final run** (`test_export_csv` CSV shape, `test_camera_offline_duration_alerts` assert `2==1`, connection-pool `too many clients already` on snapshot/alert_rules tests) align with the **deferred batch pytest flakiness** section below — scattered under repeated full-suite load, not org-scoping logic bugs. **Not new; not blocking this phase.**
+
+**Status:** **DONE** — org isolation enforced and proven; store-level alert regression closed.
+
+---
+
+## 2026-08-07 — User disable — bug + business rules — DONE
+
+### Symptom (reproduced via admin UI)
+
+Disabling a user returned **`422 Unprocessable Content`** and the user was **not** disabled.
+Observed on **`PUT /api/users/user_admin`** when using the admin Users page disable control
+(`/admin/users`, `frontend/lib/api/users.ts` → backend `backend/app/routers/users.py`).
+
+### Root cause — confirmed
+
+Frontend sent display label **`status: "Disabled"`**; backend `UserUpdate` enum only accepts
+**`"active"`** / **`"disabled"`** — **422** on mismatch. Status was also not mapped, sent, or
+persisted end-to-end (no `users.status` column, `UserResponse`/`mapBackendUser` always showed
+Active).
+
+**Pattern note:** same bug class as the earlier zone-editor **Save-after-Delete** issue
+(frontend sending a display value where backend expects an internal enum) — worth recognizing
+this pattern if similar **422**s appear elsewhere in the admin UI.
+
+### Fix — shipped, manually verified
+
+- Migration **`014_user_status`** (`database/alembic/versions/014_user_status.py`) — adds
+  `users.status` (`"active"` default, `"disabled"` for disable)
+- Backend: `UserUpdate` / `UserResponse` schemas, `PUT /api/users/{id}` handler, `authenticate_user`,
+  `get_current_user`, `POST /api/auth/login` (`account_disabled` **401**)
+- Frontend: label mapping in `frontend/lib/api/mappers.ts` (`frontendStatusToBackend` /
+  `backendStatusToFrontend`), `frontend/lib/api/users.ts` (send mapped `status` on PUT),
+  `frontend/app/admin/users/page.tsx` (self-disable → immediate `logout()`)
+
+### Business rules — implemented and manually verified
+
+All three product requirements below are **implemented** and **manually verified end-to-end**
+(not test-level only):
+
+1. **Admin-only reactivation** — a disabled user can only be reactivated by an **admin** (via
+   admin Users UI / `PUT /api/users/{id}`). **No self-service reactivation path** exists (no
+   "re-enable my account" flow; password-reset does not flip active status).
+
+2. **Self-disable → immediate logout** — if the **currently logged-in admin** disables **their
+   own** account, the UI **auto-logs out immediately** (`logout()` on save when
+   `updated.status === "Disabled"`). Backend `get_current_user` re-read rejects disabled users on
+   subsequent requests (parity with deleted-user handling).
+
+3. **Login blocked for all disabled users** — any disabled user (**admin or regular user**) is
+   **unable to log in** until an admin reactivates them. `POST /api/auth/login` returns **401**
+   with code **`account_disabled`** and message *"Account disabled"* — **not** generic
+   `invalid_credentials`.
+
+### Follow-up bug — login error message (fixed separately, manually verified)
+
+During manual verification of rule 3: backend correctly returned the distinct **`account_disabled`**
+code, but the frontend login form showed the generic invalid-credentials message anyway.
+
+**Fix:** `getLoginErrorMessage()` in `frontend/lib/api/auth.ts`; login page
+(`frontend/app/login/page.tsx`) surfaces *"This account has been disabled. Contact an
+administrator."* for `account_disabled`; wrong-password case unchanged.
+
+### Tests
+
+| File | Result | Scope |
+|------|--------|-------|
+| `tests/test_user_disable.py` | **4 passed** (migration applied cleanly) | PUT disable → GET confirms `disabled`; disabled login → `account_disabled`; self-disable token rejected on next request; regression — raw `"Disabled"` → **422** |
+| `frontend/lib/api/auth.test.ts` | **3 passed** | `getLoginErrorMessage()` — disabled vs invalid-credentials vs unknown |
+
+All flows above **manually verified end-to-end** in the admin UI and login form.
+
+### Related — resolved, NOT part of this item
+
+| Area | Status | Notes |
+|------|--------|-------|
+| **Password reset** | **Resolved / working** | Investigated separately; confirmed correct — persisted `password_hash` is honored at login (2026-08-03 audit fix). **Not** part of this disable bug. |
+| **Role mapping** | **DONE** (separate work) | Frontend display roles collapsed to **System Administrator** + **Retail Analyst** (two roles only); backend `admin`/`user` RBAC gating aligned. Documented as completed in the role-mapping / Module 16 user-admin work — same general auth area as this bug, but **out of scope** for the disable fix. |
+
+**Status:** **DONE** — shipped 2026-08-07; manually verified.
+
+---
+
+## 2026-08-07 — Reference-frame snapshots + recorded-camera status — shipped
+
+### Reference-frame snapshots — shipped, manually verified
+
+**Unified snapshot mechanism** across three admin/analytics consumers — no duplicated capture or
+serving logic:
+
+| Consumer | File | Behavior |
+|----------|------|----------|
+| Test Camera modal | `frontend/components/admin/test-camera-modal.tsx` | `<img>` on success via `getCameraSnapshotUrl()` |
+| Zone/line editor canvas | `frontend/components/admin/zones-lines/zones-lines-canvas.tsx` | Snapshot drawn as canvas background behind existing shape rendering |
+| Heatmap page background | `frontend/components/heatmap/heatmap-canvas.tsx` | Plain photo behind unchanged heat-blob + zone overlay layers |
+
+All three call the same endpoint: **`GET /api/cameras/{camera_id}/snapshot`**
+(`backend/app/routers/cameras.py`). Frontend URL helper: `getCameraSnapshotUrl()` in
+`frontend/lib/api/cameras.ts` (JWT via `?token=` for `<img>` tags, same pattern as MJPEG stream).
+
+**Live cameras (`source_type=live`):**
+- One fresh JPEG per request — **no caching, no persistence**
+- Reuses the **Module 16 fast-fail reconnect profile** unchanged:
+  `STREAM_RTSP_RECONNECT_KWARGS` in `backend/app/services/camera_stream.py` (passed into
+  `create_stream_source()` / `capture_snapshot_jpeg()`)
+- Reuses the process-wide **`opencv_io()` lock** in `backend/app/services/opencv_io.py` — no new
+  timeout or concurrency mechanism was invented for this feature
+
+**Recorded cameras (`source_type=recorded`):**
+- Serves the cached preview frame from the most recent **`processing_runs` row with
+  `status='completed'`** (`get_latest_completed_processing_run()` in
+  `backend/app/services/camera_process.py` — separate from unfiltered
+  `get_latest_processing_run()` used by process-status polling)
+- New column **`preview_frame_path`** (nullable `str`) on `processing_runs`; migration
+  **`013_preview_frame_path`** (`database/alembic/versions/013_preview_frame_path.py`)
+- Frame extracted **unconditionally** during `inference/pipeline/process_recorded.py`'s existing
+  first-frame read in the main loop — **not gated on `MODULE_HEATMAP`** or
+  `heatmap_engine.set_reference_frame()` (that in-memory path remains for pipeline overlay only)
+- Saved to disk at **`data/frame-previews/{camera_id}/{run_id}.jpg`** (same
+  `{root}/{camera_id}/...` convention as heatmap hour buckets under `data/heatmaps/`)
+- Subprocess passes `--run-id`; `camera_process._finish_run()` persists `preview_frame_path` from
+  JSON stdout via `_parse_subprocess_result()`
+- **No completed run yet** (or null/missing `preview_frame_path`, or file gone from disk) →
+  **404** with code **`preview_not_available`** and message *"Preview not available yet — process
+  this camera first"*
+- **No fallback** extraction from the raw source video on snapshot request — deliberate
+  simplification, consistent with the create/delete-only design philosophy for this feature area
+  (same rationale as geometry snapshot-at-run-start, not at-request-time)
+
+**Heatmap page scope boundary (explicitly NOT merged into this feature):**
+- Background change is **only** the plain camera photo behind the existing SVG layers
+- **Left untouched:** SVG heat-blob rendering (`heatmap-canvas.tsx` overlay layer),
+  zone-boundary overlay, and `analytics/heatmaps/engine.py`'s separate reference-frame /
+  overlay-compositing logic used **only** by the standalone `tests/scripts/run-heatmap-demo.py`
+  script — not wired into the web heatmap page
+
+### Recorded-camera status via health worker — shipped, manually verified
+
+**Previously:** recorded cameras were **skipped entirely** by the background health worker and
+by `apply_probe_to_camera()` / `refresh_camera_status()` (`camera_health.py` returned early for
+`source_type=recorded`) — status stayed whatever it was set to at creation and never updated.
+
+**Now:** the same background loop (`_camera_health_worker` in `backend/app/main.py`) calls
+`refresh_all_recorded_camera_statuses()` alongside `refresh_all_live_camera_statuses()` on each
+interval (`settings.camera_health_interval_seconds`, default 120s).
+
+**Status rule** (existence-only, same path resolution as `camera_test.py` /
+`recorded_source_file_exists()` in `backend/app/services/camera_test.py` — `_resolve_local_path()`
++ `Path.is_file()`, no decode/corruption check):
+- Resolved source file **exists** → `status="online"`
+- **Missing** → `status="error"`
+
+**Authority / skip rules** (same pattern as live-camera manual-disable protection):
+- **`status="disabled"`** — never overwritten by automatic file-existence checks
+- **`status="processing"`** — also excluded defensively (`_HEALTH_SKIP_STATUSES` in
+  `camera_health.py`), though **nothing in the codebase currently sets `processing` on the
+  `cameras` row** today (only appears as a possible value in `CameraTestResponse.camera_status`
+  schema)
+- `GET /api/cameras/{id}/status` and `POST /api/cameras/{id}/test` also refresh recorded-camera
+  status on read (parity with live probe-on-status)
+
+### UI snapshot hints — shipped, manually verified
+
+**Shared hint logic:** `frontend/lib/snapshot-preview-hint.ts` + pill component
+`frontend/components/cameras/snapshot-preview-hint.tsx` (bottom overlay, `pointer-events-none`,
+does not block drawing or heatmap interaction).
+
+| Condition | Exact hint text |
+|-----------|-----------------|
+| `camera.status === "error"` (snapshot unavailable) | **Camera source unavailable** |
+| Recorded + `online` + no completed-run snapshot yet | **Process this camera to see a real camera view here.** |
+
+Applied on **zone/line editor** and **heatmap page** when snapshot load fails — previously both
+silently fell back to the decorative placeholder with no explanation. Zone editor refreshes camera
+meta via `getCameraMeta()` on camera switch so hints reflect current health-worker status.
+
+**Test Camera modal** (`test-camera-modal.tsx`): success-state preview uses the same hint
+wording; recorded-camera **error** state uses *"Camera source unavailable"* instead of generic
+RTSP troubleshooting copy (live cameras keep RTSP troubleshooting).
+
+### Manual verification (confirmed working this session)
+
+- Live snapshot on Test Camera modal
+- Recorded snapshot after a completed processing run (`preview_frame_path` populated)
+- **"Process first"** hint state (recorded, online, no completed run) on Test Camera / zone
+  editor / heatmap page
+- **"Source unavailable"** hint state (missing file → `error` status) on same surfaces
+- Disabled recorded camera **not** overwritten by health-worker file check
+- Zone soft-delete + **"(deleted)"** labeling (carried from 2026-08-06 entry) still correct
+- End-to-end recorded processing with a **single uvicorn worker** (not multi-stacked reload
+  workers)
+
+### Tests added (automated; separate from manual verification above)
+
+| File | Coverage |
+|------|----------|
+| `tests/test_camera_snapshot.py` | Live JPEG capture, recorded 200/404 `preview_not_available`, reconnect profile + `opencv_io()` |
+| `tests/test_process_recorded_preview.py` | Subprocess JSON `preview_frame_path` parsing |
+| `tests/test_process_recorded_soft_delete.py::TestProcessRecordedPreviewFrame` | Preview file written without heatmap module |
+| `tests/test_recorded_camera_health.py` | online/error/disabled/processing skip + worker refresh |
+| `tests/test_snapshot_hint_resolution.py` | Hint decision table (mirrors frontend TS) |
+
+**Supersedes** the "Known limitations" bullets below that still say admin Test Camera / zone-line
+editor have no still-frame preview and need a frame-capture endpoint — that gap is now closed.
+Those older bullets are left in place per doc policy (no deletion); this entry is authoritative
+for snapshot status as of 2026-08-07.
+
+---
+
+### Known issue — batch pytest flakiness — TODO, deliberately deferred (NOT blocking ship)
+
+**Observed during** repeated **full-batch** `pytest` invocations only — **not** in isolated
+test runs, **not** in normal running-app usage. Manual app testing completed successfully on a
+single uvicorn dev server despite this being unresolved.
+
+**Symptoms (scattered, unrelated modules, different failures on different runs):**
+
+| Test / area | Observed frequency (investigation stopped early) |
+|-------------|--------------------------------------------------|
+| `test_processing_runs::test_list_and_detail_endpoints` | **1 failure in 7** complete batch runs; **0** in subsequent 5 repeat runs; traceback **never captured** |
+| `test_camera_offline_duration_alerts::test_creates_alert_when_down_past_threshold` | **3 of 5** repeat batch runs |
+| `test_analytics_comparison` (3 tests) | **1 batch run** only |
+| Unexplained **4 errors** in one batch run | Output truncated — details not captured |
+
+**Stable pre-existing failures** (still present; unchanged by org-scoping work — re-confirmed
+2026-08-08 after Phase 0 ship):
+- `test_zones_queue_exclusion::test_camera_level_excludes_queue_zones` and
+  `test_store_level_excludes_queue_zones` — `UniqueViolation` on `uq_zone_metrics_zone_hour`
+  (seed/demo row collision). Third test in that file (`test_single_zone_query_not_affected_by_queue_filter`) passes.
+
+~~`test_analytics_modules` queue gating tests~~ — **resolved 2026-08-08** (Phase 0): tests now
+send required `store_id`; `reports.py` module gating gap closed. No longer listed here.
+
+Typical full-batch totals when only the two stable `zones_queue` failures fire: **2 failed** +
+pass count varies. Intermittent extras below add on some runs.
+
+**Also consistent with this bucket (NOT new, NOT caused by org-scoping):**
+- Postgres **`too many clients already`** under repeated full-suite runs (connection-pool
+  exhaustion from stacked `TestClient` / `session_scope` lifetimes)
+- **`test_camera_offline_duration_alerts`** assert `created == 1` getting `2` — likely DB row
+  pollution across repeated runs
+- `test_export_csv` — CSV export shape vs exclusion rows (product/test mismatch; predates Phase 0)
+
+**What was ruled out (with evidence gathered before investigation was stopped):**
+- This session's new tests (`test_recorded_camera_health.py`, `test_snapshot_hint_resolution.py`)
+  run **after** `test_processing_runs.py` in the fixed batch file order — they cannot pollute
+  `test_list_and_detail_endpoints` via DB rows left behind in that ordering
+- `test_recorded_camera_health` + `test_list_and_detail_endpoints` in sequence: **pass**
+- **No confirmed root cause** for the single `test_list_and_detail_endpoints` batch failure —
+  no `-v --tb=long` traceback was captured on a failing run
+
+**Working hypothesis (NOT confirmed):** same class of **shared-resource contention** under
+repeated full-suite load as the two issues fixed earlier on 2026-08-06 (health-worker thread
+leak, `AnalyticsDbWriter` per-event session exhaustion) — scattered failures across unrelated
+modules is that pattern's signature, not evidence of a logic bug in any one test or in the
+snapshot feature.
+
+**Explicitly NOT blocking:** only reproduces under repeated full pytest-suite batch runs stacking
+multiple `TestClient(app)` lifetimes / shared Postgres state — not observed affecting the running
+app.
+
+**Deliberately deferred** — do not investigate further until explicitly requested. **When
+resumed, highest-value first step:** capture one actual failure with **full `-v --tb=long`** (not
+yet done). Repeated blind batch reruns were attempted (including a 15-run loop started) and
+stopped early as unproductive — do not repeat that approach without a captured traceback first.
+
+---
+
+## 2026-08-06 — Zone / line soft delete + processing fixes — shipped
+
+### Soft delete — shipped
+
+**Schema — migration `012_zone_line_soft_delete.py` (Alembic `012_zone_line_soft_delete`):**
+Adds `status` column to `zone_shapes`, `zones`, and `counting_lines`. Same field pattern as
+`Camera`:
+
+| Model | Field | Type | Default | Disable value |
+|-------|-------|------|---------|---------------|
+| `Camera` | `status` | `str` (`max_length=32`) | `"offline"` | `"disabled"` |
+| `ZoneShape` | `status` | `str` (`max_length=32`) | `"offline"` | `"disabled"` |
+| `Zone` | `status` | `str` (`max_length=32`) | `"offline"` | `"disabled"` |
+| `CountingLine` | `status` | `str` (`max_length=32`) | `"offline"` | `"disabled"` |
+
+`DELETE /api/zones/{id}` and `DELETE /api/lines/{id}` set `status="disabled"` on both the
+shape/line row and the paired analytics row (`zones` / `counting_lines`) — **no hard delete**,
+so FK children (`zone_metrics`, `dwell_events`, `events`, `alerts`, etc.) stay attached to the
+original id. `PUT` on a disabled row returns **404** (same as disabled cameras).
+
+**Backend routers:**
+- `backend/app/routers/zones_config.py` — soft delete; `GET /api/zones` excludes disabled by
+  default; `include_disabled=true` opt-in (same pattern as `GET /api/cameras`)
+- `backend/app/routers/lines.py` — same for counting lines
+
+**Two separate zone-loading code paths in the pipeline** (duplicated filter logic, not shared):
+1. **Path (a)** — `claim_processing_run()` in `backend/app/services/camera_process.py` snapshots
+   zones/lines at run start (`status != "disabled"`)
+2. **Path (b)** — `process_recorded_camera()` in `inference/pipeline/process_recorded.py` loads
+   zones/lines for live analytics (`status != "disabled"`)
+
+Both paths verified by tests — path (b) specifically, not just the snapshot path:
+- `tests/test_api_extended.py::test_processing_run_excludes_disabled_zone` / `test_processing_run_excludes_disabled_line` (snapshot path)
+- `tests/test_process_recorded_soft_delete.py` (analytics path via mocked pipeline)
+
+**Frontend `include_disabled` / `includeDisabled` audit:**
+
+| Call site | Purpose | `include_disabled` | Category |
+|-----------|---------|-------------------|----------|
+| `frontend/lib/api/stores.ts` — `getOrganization()` | Global scope tree (Store → Camera → Zone) | `true` | Historical filter — shows "(deleted)" in zone names |
+| `frontend/components/dashboard/scope-selector.tsx` | Analytics scope bar zone dropdown | via org tree | Historical filter |
+| `frontend/lib/scope/use-scope-selector.ts` | Page-level analytics scope | via org tree | Historical filter |
+| `frontend/app/alerts/page.tsx` → `AlertFilters` | Alert history zone filter | via org tree | Historical filter |
+| `frontend/lib/api/alerts.ts` | Alert row camera/zone name maps | `true` | Historical display |
+| `frontend/lib/api/analytics.ts` — `findZoneName()`, zone performance | Analytics labels / filters | `true` | Historical display |
+| `frontend/lib/api/reports.ts` | Report camera/zone name maps | `true` | Historical display |
+| `frontend/components/alert-thresholds-modal.tsx` | Label text on **existing** rules (read-only list) | `true` | Historical display — **not** a zone picker |
+| `frontend/app/admin/zones-lines/page.tsx` | Admin editor shape list after delete | `includeDisabled: true` | Admin view-only — disabled shapes shown read-only |
+| `frontend/lib/api/cameras.ts` — admin camera overlays | Live overlay geometry on admin cameras | default (`false`) | Active config only — correct |
+| `frontend/lib/api/zones.ts` — `getAllShapes()` default | Zone create / sync paths | default (`false`) | Active config only — correct |
+
+**Admin zone/line editor (`/admin/zones-lines`):**
+- Disabled entities remain visible **read-only**, labeled **"(deleted)"** via `status === "disabled"`
+  in `shapes-sidebar.tsx`; excluded from canvas editing (`editableCameraShapes` filter)
+- **No re-enable path** — zones/lines remain create/delete only by design (unlike cameras, which
+  can be re-enabled via `PUT status=offline`)
+
+**`formatHistoricalEntityName()`** (`frontend/lib/api/mappers.ts`) — appends `" (deleted)"` when
+`status === "disabled"`. Applied to historical zone names in alerts, analytics, reports, and
+scope selectors. **First session this labeling was applied to disabled cameras in those displays
+too** (not just zones) — e.g. `mapAlert()` camera column, `reports.ts` camera name map.
+
+**No creation-time zone picker exists anywhere in the app** (confirmed this session): alert
+thresholds modal only edits existing seeded rules (`PUT` only; no `POST /api/admin/alert-rules`);
+zones/lines are created by drawing on the admin canvas (`POST /api/zones`, `POST /api/lines`),
+not by picking from a dropdown. The `include_disabled=true` change to historical scope filters
+does **not** leak into any "create new thing, pick a zone" flow.
+
+### Bugs found and fixed during this work
+
+**Orphaned `processing_runs` rows blocking further processing:**
+After a backend restart, any `processing_runs` row still at `status='running'` is orphaned (no
+worker survives restart). The partial unique index
+`uq_processing_runs_one_running_per_camera` treats it as still active → subsequent
+`POST /api/cameras/{id}/process` returns **409** (`processing_run_active`). Symptom in manual
+testing: processing appeared to do nothing; preview kept showing the last **completed** run.
+
+**Fix:** `reconcile_orphaned_processing_runs()` in `backend/app/services/camera_process.py`
+marks all `running` rows `failed` with message `"interrupted by server restart"` on backend
+startup (`backend/app/main.py` `@app.on_event("startup")`). Regression:
+`tests/test_processing_runs.py::test_reconcile_orphaned_processing_runs_marks_stale_running_as_failed`.
+
+**Frontend:** `camera-table.tsx` now surfaces **409** from `POST /process` (`ApiClientError`)
+and `failed` poll status as visible errors (previously only `completed` updated UI).
+
+**`DetachedInstanceError` on `CountingLine.direction` in `process_recorded.py`:**
+`DbCountingLine` was fetched inside `session_scope()` but `_line_from_db()` was called **after**
+the session closed → `sqlalchemy.orm.exc.DetachedInstanceError` on every run for cameras with a
+counting line. **Fix:** build `CountingLine` inside the session block before exit.
+
+**Save-after-Delete in zone/line editor:**
+Deleting a zone/line (soft delete) succeeded, but `handleDeleteShape` refetched with
+`includeDisabled: true` into both `shapes` and `savedShapes`. Save then called `syncCameraShapes()`,
+which issued **PUT** against shapes present in both current and baseline — disabled rows correctly
+**404**, surfacing a confusing error after delete had already succeeded.
+
+**Fix:** `syncCameraShapes()` (`frontend/lib/api/zones.ts`) filters to active shapes only
+(`status !== "disabled"`) before diffing; soft-deleted shapes are excluded from PUT batches.
+
+### TODO — next priority fix (blocks reliable repeated processing; not implemented yet)
+
+**`AnalyticsDbWriter` per-event DB sessions (`database/writer.py` line 128):**
+Opens a new `session_scope()` **per analytics event** during processing, not one session per
+run. Measured during this session: a single inference subprocess spiked Postgres connections
+from **~1 to 86 in ~64 seconds** (with backend still running). Connections **do release** when
+the run completes (`conn_after=1` observed — not a permanent leak), but with `max_connections=100`
+this leaves very little headroom and routinely exhausts the pool during a single run.
+
+**This is NOT just a dev-environment issue under heavy manual testing.** Initially framed partly
+as aggravated by stacked `uvicorn --reload` workers; subsequent manual testing disproved that as
+the primary story. Processing the **same video three times in a row** (two source videos, three
+total runs) hit connection exhaustion **every time**, consistently — each run required a **Postgres
+restart** before the next run would succeed. This blocks **normal repeated use** of "process a
+recorded camera", not only concurrent or stress scenarios.
+
+**Related symptom (likely same root cause, not confirmed as a separate bug):** an
+`OperationalError` from a **query-invoked autoflush** was observed during manual testing under
+this condition — very likely autoflush attempting a query when no connection is available in the
+pool, i.e. a direct consequence of the exhaustion above rather than an independent defect.
+
+**Fix approach (scoped, intentionally deferred — pick up next):** refactor `AnalyticsDbWriter` in
+`database/writer.py` to use **one session per processing run** (or equivalent batching) instead of
+one `session_scope()` per individual analytics event. **Not implemented yet** — deferred to ship
+soft-delete and processing-run fixes first, not forgotten or deprioritized.
+
+**Dev-environment aggravator (secondary, not root cause):** multiple stacked `uvicorn --reload`
+worker processes multiply pool usage (each: `pool_size=10 + max_overflow=10`). Three reload
+workers were observed during earlier investigation (PIDs 14100, 17192, 20384). Prefer one worker
+when testing, but fixing `AnalyticsDbWriter` session usage is required regardless. The
+camera-health worker singleton/shutdown fix from the processing_runs ship entry remains intact —
+this is **not** a regression of that leak.
+
+### Test results (this session)
+
+| Suite | Result |
+|-------|--------|
+| `tests/test_processing_runs.py` | **7 passed** (incl. startup reconciliation test) |
+| `tests/test_api_extended.py` | **48 passed** |
+| Inference venv (`--ignore` API/fastapi-dependent test files) | **201 passed, 1 skipped** |
+| `tests/test_process_recorded_soft_delete.py` | **1 passed** |
+| `test_zones_queue_exclusion` (3) + `test_analytics_modules` (2) | **5 failed** — unchanged, stash-verified pre-existing |
+
+**Real clean end-to-end processing run (DB evidence):**
+- Run id: **`run_066f8cbab308`** — `status=completed`, `source_path=sample-data/town.mp4`,
+  `finished_at=2026-08-06 11:08:10 UTC`, message `Video processed successfully`
+- **44 new `events` rows** written (ids 18770–18813; `ENTRY` / `EXIT` / `ZONE_ENTER` for
+  `cam_recorded_00151028_68a33e`)
+- **`zone_metrics` rows updated** during the run
+- `GET /api/cameras/{id}/processing-runs` returns `run_066f8cbab308` as the first **completed**
+  run → "Preview last processed" shows this run, not older `run_ef78067020c1`
+
+**Supersedes:** `2026-08-06 — Zone delete bug` section below (investigation + rejected
+cascade-delete); Module 15 "Zone lifecycle integration" bullet describing hard delete is now
+stale — zones/lines use soft delete per this entry.
+
+---
+
+## 2026-08-06 — zone_shapes/zones PUT sync fix
+
+### Bug — `PUT /api/zones/{id}` left analytics geometry stale
+
+`zone_shapes` (UI / Live Cameras overlay source of truth via `GET /api/zones`) and `zones`
+(analytics pipeline source of truth, read by `process_recorded.py`) are paired rows sharing the
+same `id`. `POST /api/zones` (create) and `DELETE /api/zones/{id}` already kept both tables in
+sync. **`PUT /api/zones/{id}` updated only `zone_shapes`** — after any update, the UI would show
+the new polygon while the pipeline continued running against the old `zones.polygon_coords`
+indefinitely (nothing else re-synced the analytics row).
+
+**Fix:** `update_zone` (`backend/app/routers/zones_config.py`) now mirrors `name`, `type`
+(mapped to `zone_type` via `_shape_type_to_zone_type`), and `polygon_points` → `polygon_coords`
+on the matching `zones` row when present. No coordinate transform — both tables store pixel
+coords in JSONB (confirmed on create path and in investigation).
+
+**Counting lines:** single-table only (`counting_lines` — used by both `/api/lines` CRUD and
+`process_recorded.py`). No split table; not affected.
+
+**Regression tests added:** `tests/test_api_extended.py::TestZoneShapes` —
+`test_update_keeps_analytics_zone_in_sync` (create → PUT → assert both tables match via DB query);
+`test_delete_removes_analytics_zone` (delete already removed both rows — regression guard).
+
+**Pre-existing, unrelated (confirmed via `git stash` before/after):** 5 failures in
+`test_analytics_modules.py` (2: expected `403`, got `422` on queue-disabled camera API calls) and
+`test_zones_queue_exclusion.py` (3: `UniqueViolation` on `uq_zone_metrics_zone_hour` during test
+fixture inserts, plus `assert len(buckets) == 1` got 17). Identical failures with and without
+this fix in the working tree — not caused by the zone sync change.
+
+**Frontend `PUT` exposure (defensive fix — limited live UI path):** `updateZone()` exists in
+`frontend/lib/api/zones.ts` and is called from `syncCameraShapes()` when Save is clicked on
+`/admin/zones-lines` for shapes that already existed in the last-saved baseline (re-upsert path,
+not geometry-edit). The admin canvas (`zones-lines-canvas.tsx`) does **not** expose editing
+existing polygon/line geometry — only draw-new (→ `POST`) and delete (→ `DELETE`). To change
+geometry in practice an admin would delete and redraw (new id → `POST`, not `PUT`). So the bug
+was primarily an API/integrity gap (direct `PUT` or save-resync could desync tables); there is no
+dedicated "edit zone geometry" UI control, but **Save still issues `PUT` for every unchanged
+pre-existing shape** on that camera whenever the admin saves after create/delete-only edits.
+
+---
+
+## 2026-08-06 — Preview last processed (processing_runs) — shipped
+
+### What was built
+
+**Schema — migration `011_processing_runs.py` (Alembic `011_processing_runs`):**
+`processing_runs` table with `id` (string PK), `camera_id` (FK → `cameras`), `status`
+(`running` | `completed` | `failed`), `started_at`, `finished_at` (nullable), `message`
+(nullable), `source_path`, `zones_snapshot` (JSONB), `lines_snapshot` (JSONB). Partial unique
+index `uq_processing_runs_one_running_per_camera` on `(camera_id) WHERE status = 'running'`
+(via Alembic `op.create_index(..., postgresql_where=sa.text("status = 'running'"))`).
+
+**Geometry snapshot timing:** zones/lines geometry is snapshotted at run **start** (not
+completion). Zones/lines are UI-immutable in the admin editor (create/delete only, no edit) —
+start-of-run is the only correct snapshot point.
+
+**Backend job state — replaces in-memory `_jobs` entirely:**
+`backend/app/services/camera_process.py` now persists runs to Postgres (`claim_processing_run`
+inserts a `running` row with geometry snapshots, then spawns the subprocess thread). `GET
+/process-status` and other readers use `get_process_job()` against the latest `processing_runs`
+row. `camera.last_processed_at` is still set on real subprocess success (unchanged behavior;
+not the run's source of truth going forward).
+
+**TOCTOU fix (folded into same work):** duplicate `POST /api/cameras/{id}/process` while a run
+is already `running` for that camera now returns **409** (partial unique index +
+`ProcessingRunActiveError`), subprocess is **not** spawned. Regression test mocks subprocess
+spawn and counts invocations — not just HTTP status codes
+(`tests/test_processing_runs.py::test_concurrent_process_returns_409_and_spawns_one_subprocess`).
+
+**New API endpoints** (`backend/app/routers/processing_runs.py`):
+- `GET /api/cameras/{camera_id}/processing-runs` — list, most recent first
+- `GET /api/cameras/{camera_id}/processing-runs/{run_id}` — detail including JSONB snapshots
+- `GET /api/cameras/{camera_id}/processing-runs/{run_id}/video` — auth same as stream
+  (`Authorization` header or `?token=`); Starlette **`FileResponse`** (native Range support —
+  verified **206** + `Content-Range` in tests); **404** with   `error.code = source_video_unavailable` and explicit message if the file at `source_path` no longer exists
+
+**Accepted risk — explicitly not a bug:** `source_path` stores the file path only, not a copy
+of the video. `cameras.rtsp_url` is mutable and processing never copies the source file — a
+later path/file change can make old-run playback 404 or show different content than what was
+actually processed. **Decision:** accepted for now (recorded sources expected to be small/stable
+demo clips). Do **not** add file-copy semantics unless explicitly requested.
+
+**Frontend:**
+- `ProcessingRunPlayer` (`frontend/components/cameras/processing-run-player.tsx`) — sibling to
+  `CameraFrame`, reuses `OverlayToggles` unmodified; `<video>` pointed at the video endpoint
+- Geometry from run detail JSONB snapshots, converted via
+  `mapProcessingRunSnapshotsToOverlays()` / exported `normalizePolygonPoints()` in
+  `frontend/lib/api/mappers.ts` (same percentage-space as live overlays)
+- Shared modal: `ProcessingRunPreviewModal` (`frontend/components/admin/processing-run-preview-modal.tsx`)
+- **Entry points (both use the same modal — no duplicate player/modal):**
+  1. Admin camera-edit modal (`camera-modal.tsx`) — "Preview last processed" when completed runs exist
+  2. Main Admin → Cameras list (`camera-table.tsx`) — replaced the old "Analytics →" link with
+     "Preview last processed" (same eligibility: recorded camera with `lastProcessedAt` set)
+
+### Related bug found and fixed during this work (not originally scoped)
+
+**Camera-health worker connection leak (`backend/app/main.py`):**
+`_camera_health_worker` had **no singleton guard** and **no shutdown handler** — every app or
+`TestClient` startup spawned a new infinite-loop daemon thread that never stopped, each opening
+`session_scope()` immediately and every 120s. Combined with SQLAlchemy pool sizing, this caused
+`FATAL: sorry, too many clients already` when multiple API test modules ran in one pytest
+process. **Also a real production concern:** reload/multi-worker setups could accumulate workers
+over time.
+
+**Fix:** singleton guard (`_start_camera_health_worker` only starts one thread per process);
+shutdown handler (`_stop_camera_health_worker` via `threading.Event` + `join(timeout=5)` on app
+shutdown). API test fixtures updated to `client.close()` **before** `reset_engine()` so shutdown
+runs before pool dispose.
+
+**Also in `camera_process.py` (production correctness):** worker thread registry,
+`join_processing_worker()`, unified `finally` in `_run_subprocess` so `_finish_run` always runs
+and the worker is unregistered.
+
+### Tests and migration
+
+- New: `tests/test_processing_runs.py` (6 tests: snapshots, delete-zone snapshot isolation,
+  concurrent 409 + spawn count, Range 206, missing-file 404, list/detail)
+- Full backend API suite (single combined invocation): **95 passed, 5 failed, 3 skipped** at
+  time of ship (one additional failure vs earlier 92-pass run was intermittent
+  `test_camera_stream` connection exhaustion under full-suite load; passes alone)
+- Inference venv full suite (API tests excluded): **193 passed, 1 skipped**
+- **5 pre-existing failures** verified via `git stash` before/after — unrelated to this work:
+  `test_analytics_modules.py` (2: expected `403`, got `422`) and
+  `test_zones_queue_exclusion.py` (3: `UniqueViolation` on `uq_zone_metrics_zone_hour` during
+  test INSERTs)
+- Alembic: `alembic -c database/alembic.ini upgrade head` applies `011_processing_runs` cleanly
+  (partial unique index confirmed in Postgres)
+
+**Supersedes:** the 2026-08-03 audit row flagging in-memory `_jobs` and TOCTOU on
+`POST /process` (see table under "General API-correctness audit") — that follow-on is now done.
+
+---
+
+## 2026-08-06 — Zone delete bug — DONE (soft-delete shipped; see entry above)
+
+### Bug found (reproduced with evidence)
+
+`DELETE /api/zones/{id}` failed with **HTTP 500** when dependent analytics rows existed:
+
+```
+ForeignKeyViolation: zone_metrics_zone_id_fkey
+DETAIL: Key (id)=(...) is still referenced from table "zone_metrics"
+```
+
+**Not specific to queue/checkout `zone_type`** — any zone with rows in `zone_metrics` (or other
+FK children) fails. Queue/checkout zones fail more often in practice because they accumulate more
+`zone_metrics` / `queue_metrics` / `dwell_events` rows (demo seed + analytics pipeline), while
+newly created plain zones with no metrics delete fine.
+
+**Pre-delete cleanup in handler (before this investigation):** only `alert_rules`, analytics
+`zones`, and `zone_shapes`. **Missing:** `zone_metrics`, `dwell_events`, `queue_metrics`,
+`events`, `alerts` (all have FK → `zones.id`). Failure is a raw FK violation at commit — **not**
+swallowed; UI `deleteZone()` throws on non-success (no fake 204).
+
+**UI zone types:** checkout/queue zones send `type: checkout_queue` from the frontend
+(`frontend/lib/api/zones.ts`); backend maps to `zones.zone_type = 'queue'`.
+
+### First fix attempt — REJECTED (do not build on this)
+
+A **cascade-delete** implementation was written (`_delete_zone_dependent_rows` in
+`zones_config.py` — delete `zone_metrics`, `dwell_events`, `queue_metrics`, `events`, `alerts`
+before deleting the zone row), with regression test
+`test_delete_removes_zone_metrics_for_queue_zone`.
+
+**Product decision: REJECTED.** Silently destroying `zone_metrics` / `dwell_events` /
+`queue_metrics` / `events` / `alerts` history along with the zone is wrong — e.g. re-drawing a
+zone in a new position later should not wipe analytics history tied to the old zone id/geometry.
+
+**Status of that code:** treated as **abandoned / pending revert** — **do not resume from the
+cascade-delete implementation**. Next work starts from soft-delete design fresh.
+
+### Resolution — DONE (2026-08-06)
+
+**Implemented** — full ship details in `2026-08-06 — Zone / line soft delete + processing fixes —
+shipped` (top of file). Summary:
+
+- Migration `012_zone_line_soft_delete`; `status: str` field on `zone_shapes`, `zones`,
+  `counting_lines` (default `"offline"`, disable value `"disabled"` — same as `Camera`)
+- `DELETE` sets `status="disabled"` instead of hard-deleting; `GET` excludes disabled by default,
+  `include_disabled=true` opt-in
+- Counting lines included; UI **(deleted)** labeling for zones **and cameras** in historical
+  displays; admin editor read-only for disabled shapes; no re-enable path for zones/lines
+- Processing-run startup reconciliation, `DetachedInstanceError` fix, Save-after-Delete fix (see
+  shipped entry)
+
+**Explicit constraint (unchanged):** zones/lines remain create/delete only (no geometry edit).
+Soft delete does **not** reopen edit or undelete/re-enable for zones/lines the way cameras can be
+re-enabled — a disabled zone/line stays disabled permanently.
+
+### Connection to `test_zones_queue_exclusion` pre-existing failures
+
+The 3 failures in `test_zones_queue_exclusion.py` (`UniqueViolation` on
+`uq_zone_metrics_zone_hour` when tests INSERT fixture metrics for `floor_main` / `queue_lane`) are
+**related to the same `zone_metrics` table** but are a **test data collision** issue (demo/seed
+data already has rows for those `(zone_id, metric_date, hour)` tuples) — **not** fixed by either
+the cascade-delete attempt or the planned soft-delete work. Still classified pre-existing at
+time of processing-runs ship; may need separate test-isolation fix.
+
+**Supersedes / contradicts:** Module 15 bullet at "Zone lifecycle integration" below previously
+described `DELETE /api/zones/{id}` as hard delete — **now stale**; see
+`2026-08-06 — Zone / line soft delete + processing fixes — shipped` for current behavior.
 
 ---
 
@@ -2331,11 +3078,10 @@ rollup, not per-camera/zone:
   `zone_type`) — required so `alert_rules.zone_id` has a real FK target — then calls
   `provision_zone_alert_rules()` (non-fatal on failure; a missing row just degrades to the
   org-default fallback).
-- `DELETE /api/zones/{id}` is a hard delete (no soft-delete flag, unlike cameras) and now
-  cascades in the same transaction: `alert_rules` rows for that zone → analytics `zones` row →
-  `zone_shapes` row (this order is required because `alert_rules.zone_id` has a real Postgres FK
-  to `zones.id`). Historical `alerts` rows are preserved, same "preserve history" pattern as
-  camera soft-delete.
+- `DELETE /api/zones/{id}` is a **soft delete** (`status="disabled"` on both `zone_shapes` and
+  analytics `zones` rows — migration `012`, shipped 2026-08-06). Historical `zone_metrics` /
+  `events` / `alerts` rows remain attached to the original `zone_id`. `alert_rules` rows for
+  that zone are **not** deleted (same preserve-history pattern as camera soft-delete).
 - Zone display names in the Alert Thresholds modal: `alert-thresholds-modal.tsx` loads zone
   names via `getOrganization()` alongside `getAlertRules()`; `formatAlertRuleLabel()` resolves
   `zone_id` → name (falls back to the raw id).
@@ -2632,6 +3378,45 @@ fast-fail profile re-verified after 1a-fix7 (2026-08-06);
       behavior when the pipeline runs (same geometry path Modules 4/6 already verified against).
 - [ ] Log in as a non-admin role and confirm admin-only pages are inaccessible — not verified
       post-13.5; blocked on the role-mapping gap above.
+
+### Explicitly remaining — Module 16 follow-on: processing-run persistence + preview last processed
+
+**Status (2026-08-06): SHIPPED** — see dated entry
+`2026-08-06 — Preview last processed (processing_runs) — shipped` at top of file. Content below
+is the original planning note, retained for context.
+
+Replaces the in-memory `_jobs` dict in `camera_process.py` (see 2026-08-03 audit row for
+`POST /api/cameras/{id}/process`) and enables playback of a run's source video with SVG overlays
+of the zones/lines that existed at run start.
+
+**Planned schema — `processing_runs` table:** `camera_id`, `status`, `started_at`, `finished_at`,
+`message`, `source_path`, `zones_snapshot` (JSONB), `lines_snapshot` (JSONB).
+
+**Geometry snapshot timing:** captured at run **start**, not completion. Zones/lines are
+UI-immutable (create/delete only, no edit in the admin editor); the snapshot records exactly what
+the pipeline read. Snapshotting at completion could capture zones deleted after the pipeline
+already ran against the old geometry.
+
+**TOCTOU fix (same schema work):** partial unique index on
+`processing_runs(camera_id) WHERE status = 'running'` replaces the current in-process
+`threading.Lock` in `start_recorded_processing` (which does not protect across uvicorn workers).
+A duplicate `POST /process` while one run is active should return **409** instead of possibly
+spawning a second subprocess.
+
+**Known limitation — accepted risk (not an oversight):** `source_path` stores the file path
+only, not a copy of the video. `cameras.rtsp_url` is mutable via `PUT /api/cameras/{id}`, and
+processing never copies the source file — if the path is later changed or the file at that path is
+overwritten/deleted, playback of an old run may 404 or show different content than what was
+actually processed. **Decision:** accepted for now (recorded sources expected to be small/stable
+demo clips under `sample-data/`). Revisit if this causes real problems; do **not** add file-copy
+semantics unless explicitly requested.
+
+**Playback serving:** no static/range-request video endpoint exists today (live MJPEG only on
+`GET /api/cameras/{id}/stream`). File serving for recorded playback is part of this follow-on,
+not yet built.
+
+**Playback serving (2026-08-06 update):** implemented — see shipped entry above
+(`GET .../processing-runs/{run_id}/video`, Starlette `FileResponse` with Range support).
 
 ---
 

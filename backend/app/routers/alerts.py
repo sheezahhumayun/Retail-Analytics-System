@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query
-from sqlmodel import select
 
 from database.models import Alert
 
 from ..auth import TokenPayload, get_current_user
 from ..deps import DbSession
 from ..schemas.alerts import AlertListResponse, AlertResponse
+from ..services.org_scope import alerts_for_org_stmt
 
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
 
@@ -24,7 +24,7 @@ router = APIRouter(prefix="/alerts", tags=["Alerts"])
 )
 def list_alerts(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     status: Annotated[
         Literal["open", "acknowledged", "resolved"] | None,
         Query(description="Filter by alert status"),
@@ -35,7 +35,7 @@ def list_alerts(
     ] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> AlertListResponse:
-    stmt = select(Alert).order_by(Alert.timestamp.desc()).limit(limit)  # type: ignore[attr-defined]
+    stmt = alerts_for_org_stmt(user.org_id).order_by(Alert.timestamp.desc()).limit(limit)  # type: ignore[attr-defined]
     if status is not None:
         stmt = stmt.where(Alert.status == status)
     if severity is not None:

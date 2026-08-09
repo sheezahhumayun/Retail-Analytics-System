@@ -5,14 +5,13 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from sqlmodel import select
 
-from database.models import Camera, Event
+from database.models import Event
 
 from ..auth import TokenPayload, get_current_user
 from ..deps import DbSession, require_date_range
-from ..exceptions import ApiError
 from ..schemas.events import EventListResponse, EventResponse
+from ..services.org_scope import events_for_org_stmt, require_camera_in_org
 
 router = APIRouter(prefix="/events", tags=["Events"])
 
@@ -25,7 +24,7 @@ router = APIRouter(prefix="/events", tags=["Events"])
 )
 def list_events(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     date_range: Annotated[tuple, Depends(require_date_range)],
     camera_id: Annotated[str | None, Query(description="Filter by camera")] = None,
     event_type: Annotated[str | None, Query(description="Filter by event type")] = None,
@@ -33,11 +32,11 @@ def list_events(
 ) -> EventListResponse:
     start, end = date_range
 
-    if camera_id is not None and session.get(Camera, camera_id) is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    if camera_id is not None:
+        require_camera_in_org(session, camera_id, user.org_id)
 
     stmt = (
-        select(Event)
+        events_for_org_stmt(user.org_id)
         .where(Event.timestamp >= start, Event.timestamp <= end)
         .order_by(Event.timestamp.desc())  # type: ignore[attr-defined]
         .limit(limit)

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+import cv2
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -77,9 +80,20 @@ def _line_from_db(row: DbCountingLine) -> CountingLine:
     )
 
 
+def _save_preview_frame(camera_id: str, run_id: str, frame) -> str:
+    """Persist the first pipeline frame for admin snapshot consumers."""
+    rel_path = f"data/frame-previews/{camera_id}/{run_id}.jpg"
+    abs_path = REPO_ROOT / rel_path
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(abs_path), frame):
+        raise RuntimeError(f"Failed to write preview frame to {abs_path}")
+    return rel_path
+
+
 def process_recorded_camera(
     camera_id: str,
     *,
+    run_id: str | None = None,
     backend: str = "ultralytics",
     target_fps: float = 10.0,
 ) -> dict[str, object]:
@@ -98,14 +112,23 @@ def process_recorded_camera(
         enabled = frozenset(normalize_modules(camera.analytics_modules))
 
         db_zones = list(
-            session.exec(select(DbZone).where(DbZone.camera_id == camera_id)).all()
+            session.exec(
+                select(DbZone).where(
+                    DbZone.camera_id == camera_id,
+                    DbZone.status != "disabled",
+                )
+            ).all()
         )
         all_zones = [_zone_from_db(z) for z in db_zones if z.analytics_enabled]
         pipeline_zones = zones_for_enabled_modules(all_zones, enabled)
 
         db_line = session.exec(
-            select(DbCountingLine).where(DbCountingLine.camera_id == camera_id)
+            select(DbCountingLine).where(
+                DbCountingLine.camera_id == camera_id,
+                DbCountingLine.status != "disabled",
+            )
         ).first()
+        counting_line = _line_from_db(db_line) if db_line is not None else None
 
     needs_counting = (
         module_enabled(enabled, MODULE_ENTRY_EXIT)
@@ -154,9 +177,8 @@ def process_recorded_camera(
     )
 
     counter = None
-    if db_line is not None and needs_counting:
-        line = _line_from_db(db_line)
-        counter = LineCounter(line, event_bus=bus)
+    if counting_line is not None and needs_counting:
+        counter = LineCounter(counting_line, event_bus=bus)
 
     zone_detector = ZoneDetector(pipeline_zones) if needs_zone_detector else None
     tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
@@ -168,6 +190,7 @@ def process_recorded_camera(
 
     frames_processed = 0
     events_published = 0
+    preview_frame_path: str | None = None
 
     with create_detector(backend=backend) as detector:
         src = warmup_source(
@@ -178,6 +201,9 @@ def process_recorded_camera(
         )
         try:
             for frame, ts in iter_frames(src, duration=None, preview=False):
+                if preview_frame_path is None and run_id is not None:
+                    preview_frame_path = _save_preview_frame(camera_id, run_id, frame)
+
                 if heatmap_engine is None and heatmap_store is not None:
                     h, w = frame.shape[:2]
                     heatmap_engine = HeatmapEngine(
@@ -222,12 +248,18 @@ def process_recorded_camera(
         "frames_processed": frames_processed,
         "events_published": events_published,
         "processed_at": processed_at.isoformat(),
+        "preview_frame_path": preview_frame_path,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Process a recorded camera video into analytics DB")
     parser.add_argument("--camera-id", required=True, help="Camera id (source_type=recorded)")
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Processing run id — when set, saves a preview frame for admin snapshots",
+    )
     parser.add_argument("--backend", choices=["ultralytics", "onnx"], default="ultralytics")
     parser.add_argument("--target-fps", type=float, default=10.0)
     args = parser.parse_args()
@@ -235,6 +267,7 @@ def main() -> int:
     try:
         result = process_recorded_camera(
             args.camera_id,
+            run_id=args.run_id,
             backend=args.backend,
             target_fps=args.target_fps,
         )
@@ -242,7 +275,7 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    print(result)
+    print(json.dumps(result))
     return 0
 
 

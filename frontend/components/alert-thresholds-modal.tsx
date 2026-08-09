@@ -10,7 +10,8 @@ import {
   type AlertRule,
   type AlertRuleUpdate,
 } from '@/lib/api/alert-rules';
-import { getOrganization } from '@/lib/api/stores';
+import { apiRequest } from '@/lib/api/client';
+import { formatHistoricalEntityName, type BackendZoneShape } from '@/lib/api/mappers';
 import type { AlertSeverity } from '@/lib/types';
 
 interface AlertThresholdsModalProps {
@@ -59,14 +60,13 @@ export function AlertThresholdsModal({ isOpen, onClose }: AlertThresholdsModalPr
       setLoadError('');
       setSaveError('');
       try {
-        const [data, org] = await Promise.all([getAlertRules(), getOrganization()]);
+        const [data, zones] = await Promise.all([
+          getAlertRules(),
+          apiRequest<BackendZoneShape[]>("/api/zones", { query: { include_disabled: true } }),
+        ]);
         const names = new Map<string, string>();
-        for (const store of org.stores) {
-          for (const camera of store.cameras) {
-            for (const zone of camera.zones) {
-              names.set(zone.id, zone.name);
-            }
-          }
+        for (const zone of zones) {
+          names.set(zone.id, formatHistoricalEntityName(zone.name, zone.status));
         }
         if (!cancelled) {
           setZoneNames(names);

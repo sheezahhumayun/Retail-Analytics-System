@@ -191,13 +191,14 @@ def _upsert_alert_rule(
     rule_type: str,
     threshold: float,
     now: datetime,
+    org_id: str = ORG_ID,
     store_id: str | None = None,
     zone_id: str | None = None,
     severity: str = "warning",
     enabled: bool = True,
 ) -> None:
     """Insert or update one alert_rules row (idempotent on rule_type + store_id + zone_id)."""
-    stmt = select(AlertRule).where(AlertRule.rule_type == rule_type)
+    stmt = select(AlertRule).where(AlertRule.rule_type == rule_type, AlertRule.org_id == org_id)
     if store_id is None:
         stmt = stmt.where(AlertRule.store_id.is_(None))  # type: ignore[union-attr]
     else:
@@ -212,6 +213,7 @@ def _upsert_alert_rule(
         session.add(
             AlertRule(
                 rule_type=rule_type,
+                org_id=org_id,
                 store_id=store_id,
                 zone_id=zone_id,
                 threshold=threshold,

@@ -20,16 +20,23 @@ export function ShapesSidebar({ shapes, selectedId, onSelect, onDelete }: Shapes
   const lines = shapes.filter((s) => s.kind === 'line');
 
   function renderItem(shape: Shape) {
-    const isSelected = shape.id === selectedId;
+    const isDisabled = shape.status === 'disabled';
+    const isSelected = !isDisabled && shape.id === selectedId;
+    const displayName = isDisabled ? `${shape.name} (deleted)` : shape.name;
+
     return (
       <div
         key={shape.id}
-        onClick={() => onSelect(shape.id)}
+        onClick={() => {
+          if (!isDisabled) onSelect(shape.id);
+        }}
         className={[
-          'flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer group transition-colors',
-          isSelected
-            ? 'bg-primary/10 border border-primary/30'
-            : 'hover:bg-muted border border-transparent',
+          'flex items-center gap-3 px-3 py-2.5 rounded-lg group transition-colors',
+          isDisabled
+            ? 'opacity-60 cursor-not-allowed border border-transparent'
+            : isSelected
+              ? 'bg-primary/10 border border-primary/30 cursor-pointer'
+              : 'hover:bg-muted border border-transparent cursor-pointer',
         ].join(' ')}
       >
         {/* Color swatch */}
@@ -40,11 +47,13 @@ export function ShapesSidebar({ shapes, selectedId, onSelect, onDelete }: Shapes
 
         {/* Name + sub-label */}
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-foreground truncate">{shape.name}</p>
+          <p className="text-sm font-medium text-foreground truncate">{displayName}</p>
           <p className="text-xs text-muted-foreground truncate">
-            {shape.kind === 'zone'
-              ? ZONE_TYPE_LABEL[(shape as Extract<Shape, { kind: 'zone' }>).type]
-              : `Line · ${(shape as Extract<Shape, { kind: 'line' }>).insideSide} = inside`}
+            {isDisabled
+              ? 'Deleted — view only'
+              : shape.kind === 'zone'
+                ? ZONE_TYPE_LABEL[(shape as Extract<Shape, { kind: 'zone' }>).type]
+                : `Line · ${(shape as Extract<Shape, { kind: 'line' }>).insideSide} = inside`}
           </p>
         </div>
 
@@ -55,17 +64,19 @@ export function ShapesSidebar({ shapes, selectedId, onSelect, onDelete }: Shapes
           <Minus className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
         )}
 
-        {/* Delete */}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete(shape.id);
-          }}
-          className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-          title="Delete"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </button>
+        {/* Delete — only for active shapes */}
+        {!isDisabled && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(shape.id);
+            }}
+            className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+            title="Delete"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
     );
   }

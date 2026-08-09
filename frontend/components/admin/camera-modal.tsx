@@ -12,6 +12,8 @@ import {
   processCameraVideo,
   STORES,
 } from '@/lib/api/cameras';
+import { getProcessingRuns } from '@/lib/api/processing-runs';
+import { ProcessingRunPreviewModal } from '@/components/admin/processing-run-preview-modal';
 
 interface CameraModalProps {
   camera?: AdminCamera;
@@ -72,6 +74,8 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
   const [validationError, setValidationError] = useState('');
   const [processing, setProcessing] = useState(false);
   const [processMessage, setProcessMessage] = useState('');
+  const [hasCompletedRun, setHasCompletedRun] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   useEffect(() => {
     if (!isOpen) {
@@ -112,6 +116,30 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
     }
 
     hydrateForm();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, camera]);
+
+  useEffect(() => {
+    if (!isOpen || !camera || camera.sourceType !== 'recorded') {
+      setHasCompletedRun(false);
+      return;
+    }
+
+    let cancelled = false;
+    getProcessingRuns(camera.id)
+      .then((runs) => {
+        if (!cancelled) {
+          setHasCompletedRun(runs.some((run) => run.status === 'completed'));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHasCompletedRun(false);
+        }
+      });
+
     return () => {
       cancelled = true;
     };
@@ -189,6 +217,7 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
         return;
       }
       setProcessMessage('Video processed successfully.');
+      setHasCompletedRun(true);
       onProcessed?.({
         ...camera,
         lastProcessedAt: status.finished_at ?? new Date().toISOString(),
@@ -356,6 +385,15 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
                   >
                     View analytics
                   </Link>
+                  {hasCompletedRun && (
+                    <button
+                      type="button"
+                      onClick={() => setPreviewOpen(true)}
+                      className="px-3 py-1.5 rounded border border-border text-sm hover:bg-muted"
+                    >
+                      Preview last processed
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={handleProcessVideo}
@@ -465,6 +503,14 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
           </div>
         </form>
       </div>
+      {camera && (
+        <ProcessingRunPreviewModal
+          cameraId={camera.id}
+          cameraName={camera.name}
+          isOpen={previewOpen}
+          onClose={() => setPreviewOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -311,6 +311,7 @@ export interface ZoneShape {
   points: Point[];
   color: string;
   cameraId: string;
+  status?: string;
 }
 
 export interface LineShape {
@@ -323,6 +324,7 @@ export interface LineShape {
   insideSide: "left" | "right";
   color: string;
   cameraId: string;
+  status?: string;
 }
 
 export type Shape = ZoneShape | LineShape;
@@ -331,11 +333,7 @@ export type DrawMode = "select" | "zone" | "line";
 
 // ─── Users & auth ──────────────────────────────────────────────────────────────
 
-export type UserRole =
-  | "Store Manager"
-  | "Operations Manager"
-  | "Retail Analyst"
-  | "System Administrator";
+export type UserRole = "Retail Analyst" | "System Administrator";
 export type UserStatus = "Active" | "Disabled";
 
 export interface User {

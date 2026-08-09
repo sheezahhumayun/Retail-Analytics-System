@@ -36,6 +36,17 @@ class User(SQLModel, table=True):
     email: str = Field(max_length=255, nullable=False, unique=True)
     role: str = Field(max_length=64, nullable=False, default="user")
     password_hash: str | None = Field(default=None, max_length=255)
+    status: str = Field(default="active", max_length=32)
+
+
+class Superadmin(SQLModel, table=True):
+    __tablename__ = "superadmins"
+
+    id: str = Field(primary_key=True, max_length=64)
+    name: str = Field(max_length=255, nullable=False)
+    email: str = Field(max_length=255, nullable=False, unique=True, index=True)
+    password_hash: str = Field(max_length=255, nullable=False)
+    status: str = Field(default="active", max_length=32)
 
 
 class Camera(SQLModel, table=True):
@@ -67,6 +78,7 @@ class ZoneShape(SQLModel, table=True):
     id: str = Field(primary_key=True, max_length=64)
     camera_id: str = Field(foreign_key="cameras.id", nullable=False, index=True)
     name: str = Field(max_length=255, nullable=False)
+    status: str = Field(default="offline", max_length=32)
     shape_type: str = Field(
         default="general",
         sa_column=Column("type", String(64), nullable=False),
@@ -88,6 +100,7 @@ class Zone(SQLModel, table=True):
     polygon_coords: list[Any] = Field(sa_column=Column(JSONB, nullable=False))
     zone_type: str = Field(max_length=64, nullable=False, default="general")
     analytics_enabled: bool = Field(default=True, nullable=False)
+    status: str = Field(default="offline", max_length=32)
 
 
 class CountingLine(SQLModel, table=True):
@@ -96,6 +109,7 @@ class CountingLine(SQLModel, table=True):
     id: str = Field(primary_key=True, max_length=64)
     camera_id: str = Field(foreign_key="cameras.id", nullable=False, index=True)
     name: str = Field(default="main", max_length=255, nullable=False)
+    status: str = Field(default="offline", max_length=32)
     point_a: dict[str, float] = Field(sa_column=Column(JSONB, nullable=False))
     point_b: dict[str, float] = Field(sa_column=Column(JSONB, nullable=False))
     direction: str = Field(max_length=64, nullable=False, default="left_is_inside")
@@ -104,6 +118,27 @@ class CountingLine(SQLModel, table=True):
         nullable=False,
         index=True,
     )
+
+
+class ProcessingRun(SQLModel, table=True):
+    __tablename__ = "processing_runs"
+
+    id: str = Field(primary_key=True, max_length=64)
+    camera_id: str = Field(foreign_key="cameras.id", nullable=False, index=True)
+    status: str = Field(max_length=32, nullable=False)
+    started_at: datetime = Field(nullable=False, index=True)
+    finished_at: datetime | None = Field(default=None)
+    message: str | None = Field(default=None)
+    source_path: str = Field(max_length=1024, nullable=False)
+    zones_snapshot: list[Any] = Field(
+        default_factory=list,
+        sa_column=Column(JSONB, nullable=False, server_default="[]"),
+    )
+    lines_snapshot: list[Any] = Field(
+        default_factory=list,
+        sa_column=Column(JSONB, nullable=False, server_default="[]"),
+    )
+    preview_frame_path: str | None = Field(default=None, max_length=1024)
 
 
 class Track(SQLModel, table=True):
@@ -255,6 +290,12 @@ class AlertRule(SQLModel, table=True):
     )
 
     id: int | None = Field(default=None, primary_key=True)
+    org_id: str | None = Field(
+        default=None,
+        foreign_key="organizations.id",
+        index=True,
+        description="Owning organization; org-wide defaults set this with null store/zone/camera",
+    )
     rule_type: str = Field(max_length=64, nullable=False, index=True)
     store_id: str | None = Field(
         default=None, foreign_key="stores.id", index=True,

@@ -18,6 +18,15 @@ from .opencv_rtsp import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+def recorded_source_file_exists(rtsp_url: str | None) -> bool:
+    """True when a recorded camera's local source path resolves to a regular file."""
+    if not rtsp_url:
+        return False
+    if not _is_local_path(rtsp_url):
+        return False
+    return _resolve_local_path(rtsp_url).is_file()
+
+
 def test_camera_stream(rtsp_url: str | None, *, timeout: float = 5.0) -> CameraTestResponse:
     if not rtsp_url:
         return CameraTestResponse(status="error", message="No rtsp_url configured for this camera")

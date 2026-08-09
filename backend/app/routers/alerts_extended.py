@@ -10,7 +10,7 @@ from database.models import Alert
 
 from ..auth import TokenPayload, get_current_user
 from ..deps import DbSession
-from ..exceptions import ApiError
+from ..services.org_scope import require_alert_in_org
 from ..schemas.extended.alerts import AlertPatch, AlertPatchResponse
 
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
@@ -26,11 +26,9 @@ def patch_alert(
     alert_id: int,
     body: AlertPatch,
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
 ) -> AlertPatchResponse:
-    row = session.get(Alert, alert_id)
-    if row is None:
-        raise ApiError(404, "alert_not_found", f"Alert '{alert_id}' not found")
+    row = require_alert_in_org(session, alert_id, user.org_id)
     row.status = body.status
     session.add(row)
     session.flush()

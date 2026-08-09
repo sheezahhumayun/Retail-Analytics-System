@@ -20,9 +20,12 @@ def api_client():
     except Exception as exc:
         pytest.skip(f"PostgreSQL not available: {exc}")
 
-    with TestClient(app) as client:
+    client = TestClient(app)
+    try:
         yield client
-    reset_engine()
+    finally:
+        client.close()
+        reset_engine()
 
 
 @pytest.fixture(scope="module")

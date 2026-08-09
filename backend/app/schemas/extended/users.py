@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from ...auth import UserRole
+
+UserAccountStatus = Literal["active", "disabled"]
 
 
 class UserResponse(BaseModel):
@@ -16,6 +20,7 @@ class UserResponse(BaseModel):
     role: UserRole
     org_id: str
     store_id: str | None = None
+    status: UserAccountStatus = "active"
 
 
 class UserCreate(BaseModel):
@@ -33,6 +38,7 @@ class UserUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     role: UserRole | None = None
     store_id: str | None = None
+    status: UserAccountStatus | None = None
 
 
 class ResetPasswordRequest(BaseModel):

@@ -11,7 +11,7 @@ import {
   ZONE_TYPE_COLORS,
   ZONE_TYPES,
 } from "@/lib/zones-lines-data";
-import type { Point, Shape, ZoneShape, ZoneType } from "@/lib/types";
+import type { CameraSourceType, CameraStatus, Point, Shape, ZoneShape, ZoneType } from "@/lib/types";
 import {
   createCountingLine,
   deleteCountingLine,
@@ -21,7 +21,12 @@ import {
 
 export { SHAPE_COLORS, ZONE_TYPE_COLORS, ZONE_TYPES };
 
-export type ZonesLinesCameraOption = { id: string; label: string };
+export type ZonesLinesCameraOption = {
+  id: string;
+  label: string;
+  status: CameraStatus;
+  sourceType: CameraSourceType;
+};
 
 export type CreateZoneData = Omit<ZoneShape, "kind" | "id" | "color"> & {
   id?: string;
@@ -70,11 +75,11 @@ async function listAllCameras(): Promise<BackendCamera[]> {
   return apiRequest<BackendCamera[]>("/api/cameras");
 }
 
-export async function getAllShapes(): Promise<Shape[]> {
-  // Two list calls total — not N per camera (camera_id is optional on both endpoints).
+export async function getAllShapes(options?: { includeDisabled?: boolean }): Promise<Shape[]> {
+  const query = options?.includeDisabled ? { include_disabled: true } : undefined;
   const [zones, lines] = await Promise.all([
-    apiRequest<BackendZoneShape[]>("/api/zones"),
-    apiRequest<BackendCountingLine[]>("/api/lines"),
+    apiRequest<BackendZoneShape[]>("/api/zones", { query }),
+    apiRequest<BackendCountingLine[]>("/api/lines", { query }),
   ]);
   return mapShapesSafe(zones, lines);
 }
@@ -84,6 +89,8 @@ export async function getCamerasList(): Promise<ZonesLinesCameraOption[]> {
   return cameras.map((camera) => ({
     id: camera.id,
     label: `${camera.name}${camera.location ? ` (${camera.location})` : ""}`,
+    status: (camera.status as CameraStatus) ?? "offline",
+    sourceType: (camera.source_type ?? "live") as CameraSourceType,
   }));
 }
 
@@ -95,10 +102,17 @@ export async function getZoneShapes(camera_id: string): Promise<ZoneShape[]> {
 }
 
 /** Zones + counting lines for one camera (editor hydration after save/reload). */
-export async function getShapesForCamera(camera_id: string): Promise<Shape[]> {
+export async function getShapesForCamera(
+  camera_id: string,
+  options?: { includeDisabled?: boolean },
+): Promise<Shape[]> {
+  const query: Record<string, string | boolean> = { camera_id };
+  if (options?.includeDisabled) {
+    query.include_disabled = true;
+  }
   const [zones, lines] = await Promise.all([
-    apiRequest<BackendZoneShape[]>("/api/zones", { query: { camera_id } }),
-    apiRequest<BackendCountingLine[]>("/api/lines", { query: { camera_id } }),
+    apiRequest<BackendZoneShape[]>("/api/zones", { query }),
+    apiRequest<BackendCountingLine[]>("/api/lines", { query }),
   ]);
   return mapShapesSafe(zones, lines);
 }
@@ -159,22 +173,29 @@ export function __setShapes(_next: Shape[]): void {
 
 export { getCountingLines };
 
+function isActiveShape(shape: Shape): boolean {
+  return shape.status !== "disabled";
+}
+
 /** Persist create/update/delete for one camera's shapes vs last saved snapshot. */
 export async function syncCameraShapes(
   cameraId: string,
   current: Shape[],
   baseline: Shape[],
 ): Promise<void> {
-  if (current.length === 0 && baseline.length > 0) {
+  const activeCurrent = current.filter(isActiveShape);
+  const activeBaseline = baseline.filter(isActiveShape);
+
+  if (activeCurrent.length === 0 && activeBaseline.length > 0) {
     throw new Error(
       "No shapes to save for this camera. Redraw the zone or reload the page, then try Save again.",
     );
   }
 
-  const baselineIds = new Set(baseline.map((shape) => shape.id));
-  const currentIds = new Set(current.map((shape) => shape.id));
+  const baselineIds = new Set(activeBaseline.map((shape) => shape.id));
+  const currentIds = new Set(activeCurrent.map((shape) => shape.id));
 
-  for (const shape of baseline) {
+  for (const shape of activeBaseline) {
     if (!currentIds.has(shape.id)) {
       if (shape.kind === "zone") {
         await deleteZone(shape.id);
@@ -184,7 +205,7 @@ export async function syncCameraShapes(
     }
   }
 
-  for (const shape of current) {
+  for (const shape of activeCurrent) {
     if (shape.cameraId !== cameraId) continue;
 
     if (baselineIds.has(shape.id)) {

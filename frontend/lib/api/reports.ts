@@ -2,8 +2,10 @@ import { apiRequest, apiRequestBlob, downloadBlob, ApiClientError } from "@/lib/
 import {
   mapReportPayload,
   reportTypeToBackend,
+  formatHistoricalEntityName,
   type BackendCamera,
   type BackendReportPayload,
+  type BackendZoneShape,
 } from "@/lib/api/mappers";
 import { getStores } from "@/lib/api/stores";
 import { REPORT_TYPES as STATIC_REPORT_TYPES } from "@/lib/reports-data";
@@ -61,9 +63,12 @@ let optionsHydrated = false;
 
 export async function ensureReportOptions(): Promise<void> {
   if (optionsHydrated) return;
-  const [stores, cameras] = await Promise.all([
+  const [stores, cameras, zones] = await Promise.all([
     getStores(),
-    apiRequest<BackendCamera[]>("/api/cameras"),
+    apiRequest<BackendCamera[]>("/api/cameras", { query: { include_disabled: true } }),
+    apiRequest<BackendZoneShape[]>("/api/zones", { query: { include_disabled: true } }).catch(
+      () => [] as BackendZoneShape[],
+    ),
   ]);
   STORES.length = 0;
   STORES.push(...stores.map((store) => ({ id: store.id, name: store.name })));
@@ -71,11 +76,21 @@ export async function ensureReportOptions(): Promise<void> {
   CAMERAS.push(
     ...cameras.map((camera) => ({
       id: camera.id,
-      name: camera.name,
+      name: formatHistoricalEntityName(camera.name, camera.status),
       analytics_modules: camera.analytics_modules ?? [],
     })),
   );
+  zoneNameById.clear();
+  for (const zone of zones) {
+    zoneNameById.set(zone.id, formatHistoricalEntityName(zone.name, zone.status));
+  }
   optionsHydrated = true;
+}
+
+const zoneNameById = new Map<string, string>();
+
+export function formatReportZoneName(zoneId: string): string {
+  return zoneNameById.get(zoneId) ?? zoneId;
 }
 
 export function reportModuleForType(reportType: ReportType): string {

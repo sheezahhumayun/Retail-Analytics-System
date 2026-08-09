@@ -5,8 +5,9 @@ import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
 import { Activity, Menu, X } from "lucide-react"
 
-import { NAV_ITEMS } from "@/lib/nav-config"
+import { navItemsForSessionRole } from "@/lib/nav-config"
 import { getOpenAlertCount, subscribeOpenAlertCount } from "@/lib/api/alerts"
+import { useAuth } from "@/lib/auth/AuthContext"
 import { cn } from "@/lib/utils"
 import { AlertBadge } from "@/components/dashboard/alert-badge"
 import { NavDropdown } from "@/components/dashboard/nav-dropdown"
@@ -14,12 +15,12 @@ import { OrganizationLabel } from "@/components/dashboard/organization-label"
 import { ThemeToggle } from "@/components/dashboard/theme-toggle"
 import { UserMenu } from "@/components/dashboard/user-menu"
 
-function DesktopNav() {
+function DesktopNav({ items }: { items: ReturnType<typeof navItemsForSessionRole> }) {
   const pathname = usePathname()
 
   return (
     <nav aria-label="Primary" className="hidden items-center gap-0.5 lg:flex">
-      {NAV_ITEMS.map((item) =>
+      {items.map((item) =>
         item.children ? (
           <NavDropdown key={item.label} label={item.label} items={item.children} />
         ) : (
@@ -42,7 +43,7 @@ function DesktopNav() {
   )
 }
 
-function MobileNav() {
+function MobileNav({ items }: { items: ReturnType<typeof navItemsForSessionRole> }) {
   const [open, setOpen] = useState(false)
   const pathname = usePathname()
 
@@ -73,7 +74,7 @@ function MobileNav() {
             aria-label="Primary"
             className="fixed inset-x-0 top-14 z-50 max-h-[calc(100dvh-3.5rem)] overflow-auto border-b border-border bg-background p-3 shadow-lg"
           >
-            {NAV_ITEMS.map((item) =>
+            {items.map((item) =>
               item.children ? (
                 <div key={item.label} className="py-1">
                   <p className="px-2.5 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -147,6 +148,9 @@ function OpenAlertBadge() {
 }
 
 export function TopNav() {
+  const { user } = useAuth()
+  const navItems = navItemsForSessionRole(user?.role)
+
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
       <div className="flex h-14 items-center gap-2 px-4 sm:px-6">
@@ -161,7 +165,7 @@ export function TopNav() {
           </Link>
           <div className="hidden h-8 w-px bg-border md:block" aria-hidden="true" />
           <OrganizationLabel />
-          <DesktopNav />
+          <DesktopNav items={navItems} />
         </div>
 
         <div className="ml-auto flex items-center gap-1 sm:gap-2">
@@ -169,7 +173,7 @@ export function TopNav() {
           <ThemeToggle />
           <div className="mx-1 hidden h-6 w-px bg-border sm:block" />
           <UserMenu />
-          <MobileNav />
+          <MobileNav items={navItems} />
         </div>
       </div>
     </header>

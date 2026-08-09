@@ -1,5 +1,6 @@
 import {
   apiRequest,
+  ApiClientError,
   clearAuthSession,
   readAuthSession,
   writeAuthSession,
@@ -21,6 +22,17 @@ export const LOGIN_HINTS = [
   { email: "user@demo-retail.local", label: "User (Retail Analyst)" },
 ] as const;
 
+const DISABLED_ACCOUNT_MESSAGE =
+  "This account has been disabled. Contact an administrator.";
+const INVALID_CREDENTIALS_MESSAGE = "Invalid email or password.";
+
+export function getLoginErrorMessage(error: unknown): string {
+  if (error instanceof ApiClientError && error.code === "account_disabled") {
+    return DISABLED_ACCOUNT_MESSAGE;
+  }
+  return INVALID_CREDENTIALS_MESSAGE;
+}
+
 interface LoginResponse {
   access_token: string;
   token_type: string;
@@ -34,6 +46,7 @@ function toSessionUser(user: BackendUserInfo): SessionUser {
     name: user.name,
     email: user.email,
     role: backendRoleToFrontend(user.role),
+    accountType: user.account_type ?? "org_user",
   };
 }
 
@@ -61,7 +74,11 @@ export function logout(): Promise<void> {
 
 export function getCurrentUser(): SessionUser | null {
   const session = readAuthSession();
-  return session?.user ?? null;
+  if (!session?.user) return null;
+  return {
+    ...session.user,
+    accountType: session.user.accountType ?? "org_user",
+  };
 }
 
 export async function refreshCurrentUser(): Promise<SessionUser | null> {
@@ -78,6 +95,7 @@ export async function refreshCurrentUser(): Promise<SessionUser | null> {
         name: me.name,
         email: me.email,
         role: backendRoleToFrontend(me.role),
+        accountType: "org_user",
       },
     };
     writeAuthSession(updated);

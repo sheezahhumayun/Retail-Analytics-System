@@ -2,6 +2,7 @@ import { apiRequest } from "@/lib/api/client";
 import {
   buildStoreNameMap,
   frontendRoleToBackend,
+  frontendStatusToBackend,
   mapBackendUser,
   type BackendStore,
   type BackendUser,
@@ -10,11 +11,12 @@ import { getSessionOrgId } from "@/lib/api/auth";
 import {
   ROLE_COLORS,
   USER_ROLES,
+  getRoleColor,
   getStatusColor,
 } from "@/lib/admin-users-data";
 import type { User, UserRole, UserStatus } from "@/lib/types";
 
-export { ROLE_COLORS, USER_ROLES, getStatusColor };
+export { ROLE_COLORS, USER_ROLES, getRoleColor, getStatusColor };
 
 /** Hydrated from GET /api/stores — populated on first users API call. */
 export const STORES: string[] = [];
@@ -95,7 +97,7 @@ export async function createUser(data: CreateUserData): Promise<User> {
 export async function updateUser(
   id: string,
   data: UpdateUserData,
-): Promise<User | null> {
+): Promise<User> {
   const body: Record<string, unknown> = {};
   if (data.name !== undefined) body.name = data.name;
   if (data.email !== undefined) body.email = data.email;
@@ -103,17 +105,16 @@ export async function updateUser(
   if (data.assignedStore !== undefined) {
     body.store_id = await resolveStoreId(data.assignedStore);
   }
-
-  try {
-    const updated = await apiRequest<BackendUser>(`/api/users/${id}`, {
-      method: "PUT",
-      body,
-    });
-    const names = await ensureStoreNames();
-    return mapBackendUser(updated, names);
-  } catch {
-    return null;
+  if (data.status !== undefined) {
+    body.status = frontendStatusToBackend(data.status);
   }
+
+  const updated = await apiRequest<BackendUser>(`/api/users/${id}`, {
+    method: "PUT",
+    body,
+  });
+  const names = await ensureStoreNames();
+  return mapBackendUser(updated, names);
 }
 
 export async function deleteUser(id: string): Promise<boolean> {

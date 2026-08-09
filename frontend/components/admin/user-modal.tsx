@@ -9,7 +9,7 @@ interface UserModalProps {
   user?: User;
   isOpen: boolean;
   onClose: () => void;
-  onSave: (user: User & { password?: string }) => void;
+  onSave: (user: User & { password?: string }) => Promise<void>;
 }
 
 interface FormErrors {
@@ -35,6 +35,8 @@ export function UserModal({ user, isOpen, onClose, onSave }: UserModalProps) {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [errors, setErrors] = useState<FormErrors>({});
+  const [saveError, setSaveError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     if (user) {
@@ -52,6 +54,8 @@ export function UserModal({ user, isOpen, onClose, onSave }: UserModalProps) {
     setPassword('');
     setConfirmPassword('');
     setErrors({});
+    setSaveError('');
+    setIsSaving(false);
   }, [user, isOpen]);
 
   const validateEmail = (email: string): boolean => {
@@ -99,7 +103,7 @@ export function UserModal({ user, isOpen, onClose, onSave }: UserModalProps) {
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!validateForm()) {
@@ -115,8 +119,18 @@ export function UserModal({ user, isOpen, onClose, onSave }: UserModalProps) {
       status: formData.status || 'Active',
     };
 
-    onSave(user ? newUser : { ...newUser, password });
-    onClose();
+    setSaveError('');
+    setIsSaving(true);
+    try {
+      await onSave(user ? newUser : { ...newUser, password });
+      onClose();
+    } catch (error) {
+      setSaveError(
+        error instanceof Error ? error.message : 'Failed to save user',
+      );
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -319,6 +333,12 @@ export function UserModal({ user, isOpen, onClose, onSave }: UserModalProps) {
             </div>
           )}
 
+          {saveError && (
+            <div className="p-3 bg-red-500/10 border border-red-500/20 rounded text-sm text-red-600 dark:text-red-400">
+              {saveError}
+            </div>
+          )}
+
           {/* Actions */}
           <div className="flex justify-end gap-3 pt-4 border-t border-border">
             <button
@@ -330,9 +350,10 @@ export function UserModal({ user, isOpen, onClose, onSave }: UserModalProps) {
             </button>
             <button
               type="submit"
-              className="px-4 py-2 rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+              disabled={isSaving}
+              className="px-4 py-2 rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-60"
             >
-              {user ? 'Update User' : 'Add User'}
+              {isSaving ? 'Saving…' : user ? 'Update User' : 'Add User'}
             </button>
           </div>
         </form>

@@ -1,8 +1,8 @@
 'use client';
 
-import Link from 'next/link';
 import { Trash2, Edit2, Check, X, Zap, Play } from 'lucide-react';
 import type { AdminCamera } from '@/lib/types';
+import { ProcessingRunPreviewModal } from '@/components/admin/processing-run-preview-modal';
 import {
   ANALYTICS_MODULES_LABELS,
   getStatusColor,
@@ -10,6 +10,7 @@ import {
   processCameraVideo,
   getCameraProcessStatus,
 } from '@/lib/api/cameras';
+import { ApiClientError } from '@/lib/api/client';
 import { ACTION_STATUS_COLORS } from '@/lib/constants';
 import { useState } from 'react';
 
@@ -37,6 +38,16 @@ function RecordedBadge({ camera }: { camera: AdminCamera }) {
   );
 }
 
+function formatProcessErrorMessage(message: string | null | undefined): string {
+  if (!message) return 'Video processing failed';
+  const trimmed = message.trim();
+  const operational = trimmed.match(/(?:OperationalError|DetachedInstanceError|Error):[^\n]*/)?.[0];
+  if (operational) return operational;
+  const firstLine = trimmed.split('\n').find((line) => line.trim())?.trim();
+  if (firstLine && firstLine.length <= 240) return firstLine;
+  return trimmed.length > 240 ? `${trimmed.slice(0, 240)}…` : trimmed;
+}
+
 export function CameraTable({
   cameras,
   onEdit,
@@ -46,9 +57,12 @@ export function CameraTable({
   onCameraUpdated,
 }: CameraTableProps) {
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const [processError, setProcessError] = useState<{ cameraId: string; message: string } | null>(null);
+  const [previewCamera, setPreviewCamera] = useState<AdminCamera | null>(null);
 
   const handleProcess = async (camera: AdminCamera) => {
     setProcessingId(camera.id);
+    setProcessError(null);
     try {
       let status = await processCameraVideo(camera.id);
       while (status.status === 'running') {
@@ -60,7 +74,20 @@ export function CameraTable({
           ...camera,
           lastProcessedAt: status.finished_at ?? new Date().toISOString(),
         });
+      } else if (status.status === 'failed') {
+        setProcessError({
+          cameraId: camera.id,
+          message: formatProcessErrorMessage(status.message),
+        });
       }
+    } catch (err) {
+      const message =
+        err instanceof ApiClientError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Failed to start processing';
+      setProcessError({ cameraId: camera.id, message });
     } finally {
       setProcessingId(null);
     }
@@ -97,12 +124,20 @@ export function CameraTable({
                         {new Date(camera.lastProcessedAt).toLocaleString()}
                       </p>
                     )}
-                    <Link
-                      href="/analytics/occupancy"
-                      className="text-xs text-primary hover:underline block"
-                    >
-                      Analytics →
-                    </Link>
+                    {camera.lastProcessedAt && (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewCamera(camera)}
+                        className="text-xs text-primary hover:underline block text-left"
+                      >
+                        Preview last processed
+                      </button>
+                    )}
+                    {processError?.cameraId === camera.id && (
+                      <p className="text-xs text-destructive max-w-[14rem]" role="alert">
+                        {processError.message}
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <span className="text-xs text-muted-foreground">Live stream</span>
@@ -180,6 +215,14 @@ export function CameraTable({
           ))}
         </tbody>
       </table>
+      {previewCamera && (
+        <ProcessingRunPreviewModal
+          cameraId={previewCamera.id}
+          cameraName={previewCamera.name}
+          isOpen={Boolean(previewCamera)}
+          onClose={() => setPreviewCamera(null)}
+        />
+      )}
     </div>
   );
 }

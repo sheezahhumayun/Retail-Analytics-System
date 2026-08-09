@@ -6,14 +6,14 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
-from sqlmodel import col, select
+from sqlmodel import col
 
 from database.models import AlertRule
 
 from ..auth import TokenPayload, require_admin
 from ..deps import DbSession
-from ..exceptions import ApiError
 from ..schemas.extended.alert_rules import AlertRuleResponse, AlertRuleUpdate
+from ..services.org_scope import alert_rules_for_org_stmt, require_alert_rule_in_org
 
 router = APIRouter(prefix="/admin/alert-rules", tags=["Admin — Alert Rules"])
 
@@ -36,14 +36,14 @@ def _to_response(rule: AlertRule) -> AlertRuleResponse:
     "",
     response_model=list[AlertRuleResponse],
     summary="List alert rules",
-    description="Return all alert_rules rows. Admin only.",
+    description="Return alert_rules rows for the caller's organization. Admin only.",
 )
 def list_alert_rules(
     session: DbSession,
-    _admin: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> list[AlertRuleResponse]:
     rows = session.exec(
-        select(AlertRule).order_by(AlertRule.rule_type, col(AlertRule.id))
+        alert_rules_for_org_stmt(admin.org_id).order_by(AlertRule.rule_type, col(AlertRule.id))
     ).all()
     return [_to_response(row) for row in rows]
 
@@ -58,11 +58,9 @@ def update_alert_rule(
     rule_id: int,
     body: AlertRuleUpdate,
     session: DbSession,
-    _admin: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> AlertRuleResponse:
-    rule = session.get(AlertRule, rule_id)
-    if rule is None:
-        raise ApiError(404, "alert_rule_not_found", f"Alert rule '{rule_id}' not found")
+    rule = require_alert_rule_in_org(session, rule_id, admin.org_id)
 
     rule.threshold = body.threshold
     rule.severity = body.severity

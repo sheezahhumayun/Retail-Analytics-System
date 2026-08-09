@@ -1,3 +1,5 @@
+import { isAdminDisplayRole } from "@/lib/auth/admin-role"
+
 export type NavLeaf = {
   label: string
   href: string
@@ -6,6 +8,9 @@ export type NavLeaf = {
 export type NavItem =
   | { label: string; href: string; children?: undefined }
   | { label: string; href?: undefined; children: NavLeaf[] }
+
+/** Top-nav dropdown label for routes gated by `app/admin/layout.tsx`. */
+export const ADMIN_NAV_LABEL = "Admin" as const
 
 export const NAV_ITEMS: NavItem[] = [
   { label: "Overview", href: "/" },
@@ -39,4 +44,12 @@ export const NAV_ITEMS: NavItem[] = [
     ],
   },
 ]
+
+/** Admin children match `/admin/cameras`, `/admin/zones-lines`, `/admin/users`. */
+export function navItemsForSessionRole(role: string | undefined | null): NavItem[] {
+  if (isAdminDisplayRole(role)) {
+    return NAV_ITEMS
+  }
+  return NAV_ITEMS.filter((item) => item.label !== ADMIN_NAV_LABEL)
+}
 

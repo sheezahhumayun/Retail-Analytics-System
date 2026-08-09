@@ -92,7 +92,7 @@ def create_stream_source(rtsp_url: str) -> VideoSource:
     )
 
 
-def _encode_jpeg_chunk(frame: np.ndarray) -> bytes:
+def _encode_jpeg_bytes(frame: np.ndarray) -> bytes:
     ok, jpeg = cv2.imencode(
         ".jpg",
         frame,
@@ -100,12 +100,40 @@ def _encode_jpeg_chunk(frame: np.ndarray) -> bytes:
     )
     if not ok:
         raise StreamOpenError("Failed to encode frame as JPEG")
+    return jpeg.tobytes()
+
+
+def _encode_jpeg_chunk(frame: np.ndarray) -> bytes:
+    jpeg = _encode_jpeg_bytes(frame)
     header = (
         f"--{MJPEG_BOUNDARY}\r\n"
         "Content-Type: image/jpeg\r\n"
         f"Content-Length: {len(jpeg)}\r\n\r\n"
     ).encode("ascii")
-    return header + jpeg.tobytes() + b"\r\n"
+    return header + jpeg + b"\r\n"
+
+
+def capture_snapshot_jpeg(rtsp_url: str) -> bytes:
+    """Open a live source, read one frame, and return raw JPEG bytes."""
+    source = create_stream_source(rtsp_url)
+    deadline = time.monotonic() + OPEN_FRAME_TIMEOUT_SEC
+    try:
+        with opencv_io():
+            source.open()
+        while time.monotonic() < deadline:
+            with opencv_io():
+                ok, frame = source.read()
+            if ok and frame is not None:
+                jpeg = _encode_jpeg_bytes(frame)
+                release_stream_source(source)
+                return jpeg
+            time.sleep(OPEN_FRAME_POLL_SEC)
+    except VideoSourceError as exc:
+        release_stream_source(source)
+        raise StreamOpenError(str(exc)) from exc
+
+    release_stream_source(source)
+    raise StreamOpenError("Could not read an initial frame from the camera stream")
 
 
 def open_stream_source(rtsp_url: str) -> tuple[VideoSource, bytes]:

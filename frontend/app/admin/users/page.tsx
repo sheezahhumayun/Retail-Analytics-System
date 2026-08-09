@@ -13,8 +13,30 @@ import {
   resetPassword,
   updateUser,
 } from '@/lib/api/users';
+import { ApiClientError } from '@/lib/api/client';
 import { useAuth } from '@/lib/auth/AuthContext';
 import type { User } from '@/lib/types';
+
+function getSaveUserErrorMessage(error: unknown): string {
+  if (error instanceof ApiClientError) {
+    if (error.code === 'validation_error' && Array.isArray(error.details)) {
+      const firstDetail = error.details[0];
+      if (
+        firstDetail &&
+        typeof firstDetail === 'object' &&
+        'msg' in firstDetail &&
+        typeof firstDetail.msg === 'string'
+      ) {
+        return firstDetail.msg;
+      }
+    }
+    return error.message;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return 'Failed to save user';
+}
 
 export default function AdminUsersPage() {
   const { user: currentUser, logout } = useAuth();
@@ -53,24 +75,28 @@ export default function AdminUsersPage() {
   };
 
   const handleSaveUser = async (user: User & { password?: string }) => {
-    if (editingUser) {
-      const updated = await updateUser(user.id, user);
-      if (updated) {
+    try {
+      if (editingUser) {
+        const updated = await updateUser(user.id, user);
         setUsers((prev) => prev.map((u) => (u.id === user.id ? updated : u)));
+        if (currentUser?.id === user.id && updated.status === "Disabled") {
+          await logout();
+        }
+      } else {
+        const created = await createUser({
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          assignedStore: user.assignedStore,
+          status: user.status,
+          password: user.password ?? 'demo',
+          id: user.id || undefined,
+        });
+        setUsers((prev) => [...prev, created]);
       }
-    } else {
-      const created = await createUser({
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        assignedStore: user.assignedStore,
-        status: user.status,
-        password: user.password ?? 'demo',
-        id: user.id || undefined,
-      });
-      setUsers((prev) => [...prev, created]);
+    } catch (error) {
+      throw new Error(getSaveUserErrorMessage(error));
     }
-    setShowAddModal(false);
   };
 
   const handleDeleteUser = async (userId: string) => {

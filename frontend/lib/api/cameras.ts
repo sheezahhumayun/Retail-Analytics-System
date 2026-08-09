@@ -62,6 +62,20 @@ export function getCameraStreamUrl(cameraId: string): string | null {
   return `/api/cameras/${encodeURIComponent(cameraId)}/stream?${params.toString()}`;
 }
 
+/** JPEG snapshot URL for admin reference-frame backgrounds. */
+export function getCameraSnapshotUrl(
+  cameraId: string,
+  options?: { fresh?: boolean },
+): string | null {
+  const token = getAccessToken();
+  if (!token) return null;
+  const params = new URLSearchParams({ token });
+  if (options?.fresh) {
+    params.set("t", String(Date.now()));
+  }
+  return `/api/cameras/${encodeURIComponent(cameraId)}/snapshot?${params.toString()}`;
+}
+
 async function loadStoreNames(): Promise<Map<string, string>> {
   if (storeNameMap) return storeNameMap;
   const stores = await apiRequest<{ id: string; name: string }[]>("/api/stores");
@@ -126,6 +140,22 @@ export async function getCameraStatus(id: string): Promise<CameraStatus | null> 
   ).catch(() => null);
   if (!status) return null;
   return (status.status as CameraStatus) ?? "offline";
+}
+
+export type CameraMeta = {
+  status: CameraStatus;
+  sourceType: CameraSourceType;
+};
+
+export async function getCameraMeta(id: string): Promise<CameraMeta | null> {
+  const status = await apiRequest<BackendCameraStatus>(
+    `/api/cameras/${id}/status`,
+  ).catch(() => null);
+  if (!status) return null;
+  return {
+    status: (status.status as CameraStatus) ?? "offline",
+    sourceType: (status.source_type ?? "live") as CameraSourceType,
+  };
 }
 
 export async function createCamera(data: CreateCameraData): Promise<AdminCamera> {

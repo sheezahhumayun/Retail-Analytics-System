@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import { X, AlertCircle, CheckCircle, Loader } from 'lucide-react';
 import type { AdminCamera } from '@/lib/types';
-import { testCamera } from '@/lib/api/cameras';
+import { testCamera, getCameraSnapshotUrl } from '@/lib/api/cameras';
+import { resolveSnapshotHint, SNAPSHOT_HINT_MESSAGES } from '@/lib/snapshot-preview-hint';
 import { ACTION_STATUS_COLORS } from '@/lib/constants';
 
 type TestState = 'idle' | 'testing' | 'success' | 'error';
@@ -21,6 +22,15 @@ export function TestCameraModal({ camera, isOpen, onClose, onTestComplete }: Tes
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [detectedResolution, setDetectedResolution] = useState<string>('—');
   const [detectedFps, setDetectedFps] = useState<number | null>(null);
+  const [previewUnavailable, setPreviewUnavailable] = useState(false);
+  const [testedCameraStatus, setTestedCameraStatus] = useState<AdminCamera['status'] | undefined>(
+    camera?.status,
+  );
+
+  const snapshotUrl =
+    state === 'success' && camera
+      ? getCameraSnapshotUrl(camera.id, { fresh: camera.sourceType === 'live' })
+      : null;
 
   useEffect(() => {
     if (!isOpen || !camera) {
@@ -35,6 +45,8 @@ export function TestCameraModal({ camera, isOpen, onClose, onTestComplete }: Tes
       setLatencyMs(null);
       setDetectedResolution('—');
       setDetectedFps(null);
+      setPreviewUnavailable(false);
+      setTestedCameraStatus(camera!.status);
 
       try {
         const result = await testCamera(camera!.id);
@@ -44,6 +56,7 @@ export function TestCameraModal({ camera, isOpen, onClose, onTestComplete }: Tes
           setError(result.error);
           setState('error');
           if (result.camera_status) {
+            setTestedCameraStatus(result.camera_status);
             onTestComplete?.(camera!.id, result.camera_status);
           }
           return;
@@ -54,6 +67,7 @@ export function TestCameraModal({ camera, isOpen, onClose, onTestComplete }: Tes
         setDetectedFps(result.fps);
         setState('success');
         if (result.camera_status) {
+          setTestedCameraStatus(result.camera_status);
           onTestComplete?.(camera!.id, result.camera_status);
         }
       } catch (err) {
@@ -71,6 +85,11 @@ export function TestCameraModal({ camera, isOpen, onClose, onTestComplete }: Tes
   }, [isOpen, camera]);
 
   if (!isOpen || !camera) return null;
+
+  const snapshotHint =
+    state === 'success'
+      ? resolveSnapshotHint(testedCameraStatus, camera.sourceType, previewUnavailable)
+      : null;
 
   const handleClose = () => {
     setState('idle');
@@ -121,12 +140,28 @@ export function TestCameraModal({ camera, isOpen, onClose, onTestComplete }: Tes
                 </div>
               </div>
 
-              <div className="rounded-lg border border-dashed border-border bg-muted/30 px-4 py-6 text-center">
-                <p className="text-sm font-medium text-foreground">Live preview not available</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {/* TODO: no backend endpoint yet - see PROJECT_STATUS.md */}
-                  No MJPEG/HLS/WebRTC stream endpoint exists yet.
-                </p>
+              <div className="rounded-lg border border-border overflow-hidden bg-muted/30 relative">
+                {snapshotUrl && !previewUnavailable ? (
+                  <img
+                    src={snapshotUrl}
+                    alt={`${camera.name} snapshot`}
+                    className="w-full aspect-video object-cover"
+                    onError={() => setPreviewUnavailable(true)}
+                  />
+                ) : snapshotHint ? (
+                  <div className="px-4 py-6 text-center">
+                    <p className="text-sm font-medium text-foreground">
+                      {SNAPSHOT_HINT_MESSAGES[snapshotHint]}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="px-4 py-6 text-center">
+                    <p className="text-sm font-medium text-foreground">Snapshot unavailable</p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Could not load the camera snapshot.
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div className="bg-muted/50 rounded-lg p-4 space-y-2">
@@ -162,8 +197,17 @@ export function TestCameraModal({ camera, isOpen, onClose, onTestComplete }: Tes
 
               <div className={`${ACTION_STATUS_COLORS.negativePanel} rounded-lg p-3`}>
                 <p className="text-xs text-red-700 dark:text-red-400">
-                  <strong>Troubleshooting:</strong> Check the RTSP URL, verify network connectivity,
-                  and ensure the camera is powered on.
+                  {camera.sourceType === 'recorded' ? (
+                    <>
+                      <strong>Recorded source:</strong>{' '}
+                      {SNAPSHOT_HINT_MESSAGES.source_unavailable}
+                    </>
+                  ) : (
+                    <>
+                      <strong>Troubleshooting:</strong> Check the RTSP URL, verify network connectivity,
+                      and ensure the camera is powered on.
+                    </>
+                  )}
                 </p>
               </div>
             </div>

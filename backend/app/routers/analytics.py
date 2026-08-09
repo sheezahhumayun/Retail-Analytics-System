@@ -6,8 +6,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
-from database.models import Camera
-
 from ..auth import TokenPayload, get_current_user
 from ..deps import DbSession, parse_date, parse_time, require_date_range
 from ..exceptions import ApiError
@@ -24,6 +22,11 @@ from ..schemas.analytics import (
     ZoneMetricBucket,
 )
 from ..services.analytics_modules import MODULE_HEATMAP, require_camera_module
+from ..services.org_scope import (
+    require_analytics_scope,
+    require_camera_in_org,
+    require_store_in_org,
+)
 from ..services.analytics_read import (
     prior_period_bounds,
     prior_period_comparison_info,
@@ -57,13 +60,20 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 )
 def traffic(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
     camera_id: Annotated[str | None, Query(description="Camera id (optional)")] = None,
     zone_id: Annotated[str | None, Query(description="Zone id (optional)")] = None,
     compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> TrafficResponse:
+    require_analytics_scope(
+        session,
+        user.org_id,
+        store_id=store_id,
+        camera_id=camera_id,
+        zone_id=zone_id,
+    )
     start, end = date_range
     current = read_traffic_for_scope(
         session,
@@ -125,7 +135,7 @@ def traffic(
 )
 def occupancy(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     camera_id: Annotated[str | None, Query()] = None,
     store_id: Annotated[str | None, Query()] = None,
     from_: Annotated[str | None, Query(alias="from")] = None,
@@ -133,6 +143,10 @@ def occupancy(
     limit: Annotated[int, Query(ge=1, le=500, description="Max trend points")] = 100,
     compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> OccupancyResponse:
+    if camera_id is not None:
+        require_camera_in_org(session, camera_id, user.org_id)
+    elif store_id is not None:
+        require_store_in_org(session, store_id, user.org_id)
     range_start = None
     range_end = None
     if from_ is not None and to is not None:
@@ -212,13 +226,20 @@ def occupancy(
 )
 def zone_analytics(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
     camera_id: Annotated[str | None, Query(description="Camera id (optional)")] = None,
     zone_id: Annotated[str | None, Query(description="Zone id (optional)")] = None,
     compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> ZoneAnalyticsResponse:
+    require_analytics_scope(
+        session,
+        user.org_id,
+        store_id=store_id,
+        camera_id=camera_id,
+        zone_id=zone_id,
+    )
     start, end = date_range
     
     # Single zone case - use original read_zone_analytics_period for backward compatibility
@@ -288,7 +309,7 @@ def zone_analytics(
 )
 def dwell_analytics(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
     camera_id: Annotated[str | None, Query(description="Camera id (optional)")] = None,
@@ -296,6 +317,13 @@ def dwell_analytics(
     compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> DwellResponse:
     start, end = date_range
+    require_analytics_scope(
+        session,
+        user.org_id,
+        store_id=store_id,
+        camera_id=camera_id,
+        zone_id=zone_id,
+    )
     
     # Single zone case - use original read_dwell_period for backward compatibility
     if zone_id is not None and camera_id is None:
@@ -377,7 +405,7 @@ def dwell_analytics(
 )
 def dwell_queues_analytics(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
     camera_id: Annotated[str | None, Query(description="Camera id (optional)")] = None,
@@ -385,6 +413,13 @@ def dwell_queues_analytics(
     compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> DwellResponse:
     start, end = date_range
+    require_analytics_scope(
+        session,
+        user.org_id,
+        store_id=store_id,
+        camera_id=camera_id,
+        zone_id=zone_id,
+    )
     
     # Single zone case - use original read_dwell_period for backward compatibility
     if zone_id is not None and camera_id is None:
@@ -464,15 +499,13 @@ def dwell_queues_analytics(
 )
 def heatmap(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     camera_id: Annotated[str, Query(description="Camera id")],
     date: Annotated[str, Query(description="Date YYYY-MM-DD")],
     from_time: Annotated[str, Query(description="Start time HH:MM or HH:MM:SS")] = "00:00",
     to_time: Annotated[str, Query(description="End time HH:MM or HH:MM:SS")] = "23:59",
 ) -> HeatmapResponse:
-    camera = session.get(Camera, camera_id)
-    if camera is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    camera = require_camera_in_org(session, camera_id, user.org_id)
     require_camera_module(camera, MODULE_HEATMAP)
 
     metric_date = parse_date(date, param="date")
@@ -493,7 +526,7 @@ def heatmap(
 )
 def queue_analytics(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
     camera_id: Annotated[str | None, Query(description="Camera id (optional)")] = None,
@@ -501,6 +534,13 @@ def queue_analytics(
     compare: Annotated[bool, Query(description="Include prior-period comparison")] = False,
 ) -> QueueAnalyticsResponse:
     start, end = date_range
+    require_analytics_scope(
+        session,
+        user.org_id,
+        store_id=store_id,
+        camera_id=camera_id,
+        zone_id=zone_id,
+    )
     
     # Single zone case - use original read_queue_period for backward compatibility
     if zone_id is not None and camera_id is None:

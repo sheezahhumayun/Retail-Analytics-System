@@ -9,6 +9,8 @@ import {
   getHeatmap,
   getHeatmapCameras,
 } from '@/lib/api/analytics';
+import { getCameraSnapshotUrl, getCameraMeta } from '@/lib/api/cameras';
+import type { CameraMeta } from '@/lib/api/cameras';
 import { ApiClientError } from '@/lib/api/client';
 import {
   filterHeatmapCameras,
@@ -34,6 +36,8 @@ export default function HeatmapPage() {
   const [floorZones, setFloorZones] = useState<FloorZone[]>([]);
   const [loading, setLoading] = useState(true);
   const [emptyMessage, setEmptyMessage] = useState<string | null>(null);
+  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
+  const [cameraMeta, setCameraMeta] = useState<CameraMeta | null>(null);
 
   const scopedCameras = useMemo(
     () => filterHeatmapCameras(allCameras, cameraId, storeCameraIds),
@@ -66,6 +70,27 @@ export default function HeatmapPage() {
       cancelled = true;
     };
   }, [storeId]);
+
+  useEffect(() => {
+    if (!cameraId) {
+      setSnapshotUrl(null);
+      setCameraMeta(null);
+      return;
+    }
+    setSnapshotUrl(getCameraSnapshotUrl(cameraId));
+
+    let cancelled = false;
+    async function loadMeta() {
+      const meta = await getCameraMeta(cameraId!);
+      if (!cancelled) {
+        setCameraMeta(meta);
+      }
+    }
+    loadMeta();
+    return () => {
+      cancelled = true;
+    };
+  }, [cameraId]);
 
   useEffect(() => {
     if (!cameraId) {
@@ -179,7 +204,14 @@ export default function HeatmapPage() {
             </div>
           </div>
         ) : (
-          <HeatmapCanvas blobs={blobs} zones={floorZones} opacity={opacity} />
+          <HeatmapCanvas
+            blobs={blobs}
+            zones={floorZones}
+            snapshotUrl={snapshotUrl}
+            cameraStatus={cameraMeta?.status}
+            cameraSourceType={cameraMeta?.sourceType}
+            opacity={opacity}
+          />
         )}
 
         <HeatmapLegend />

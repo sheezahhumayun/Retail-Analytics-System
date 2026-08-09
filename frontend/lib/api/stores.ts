@@ -39,7 +39,9 @@ async function loadScopeTree(): Promise<Organization> {
   }
 
   // Single list call (camera_id optional) — avoids N GET /api/zones fan-out.
-  const allZones = await apiRequest<BackendZoneShape[]>("/api/zones").catch(
+  const allZones = await apiRequest<BackendZoneShape[]>("/api/zones", {
+    query: { include_disabled: true },
+  }).catch(
     () => [] as BackendZoneShape[],
   );
   const zonesByCamera = new Map<string, BackendZoneShape[]>();

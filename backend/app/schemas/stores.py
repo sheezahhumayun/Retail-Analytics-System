@@ -19,3 +19,8 @@ class StoreCreate(BaseModel):
     org_id: str = Field(..., min_length=1, max_length=64)
     name: str = Field(..., min_length=1, max_length=255)
     address: str | None = Field(default=None, max_length=512)
+
+
+class StoreUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    address: str | None = Field(default=None, max_length=512)

@@ -6,9 +6,8 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from sqlmodel import select
 
-from database.models import Camera, CountingLine
+from database.models import CountingLine
 
 from ..auth import TokenPayload, get_current_user, require_admin
 from ..deps import DbSession
@@ -18,6 +17,11 @@ from ..schemas.extended.lines import (
     CountingLineResponse,
     CountingLineUpdate,
     Point,
+)
+from ..services.org_scope import (
+    counting_lines_for_org_stmt,
+    require_camera_in_org,
+    require_line_in_org,
 )
 
 router = APIRouter(prefix="/lines", tags=["Counting lines"])
@@ -32,6 +36,7 @@ def _to_response(row: CountingLine) -> CountingLineResponse:
         point_b=Point(**row.point_b),
         direction=row.direction,  # type: ignore[arg-type]
         created_at=row.created_at.isoformat(),
+        status=row.status,
     )
 
 
@@ -46,14 +51,24 @@ def _to_response(row: CountingLine) -> CountingLineResponse:
 )
 def list_lines(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     camera_id: Annotated[str | None, Query(description="Optional camera id filter")] = None,
+    include_disabled: Annotated[
+        bool,
+        Query(
+            description=(
+                "Include soft-deleted/disabled counting lines in the response. "
+                "Defaults to False so disabled lines don't reappear in normal "
+                "line pickers/lists after being disabled or deleted."
+            )
+        ),
+    ] = False,
 ) -> list[CountingLineResponse]:
-    stmt = select(CountingLine).order_by(CountingLine.name)
     if camera_id is not None:
-        if session.get(Camera, camera_id) is None:
-            raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
-        stmt = stmt.where(CountingLine.camera_id == camera_id)
+        require_camera_in_org(session, camera_id, user.org_id)
+    stmt = counting_lines_for_org_stmt(user.org_id, camera_id=camera_id)
+    if not include_disabled:
+        stmt = stmt.where(CountingLine.status != "disabled")
     rows = session.exec(stmt).all()
     return [_to_response(r) for r in rows]
 
@@ -68,12 +83,11 @@ def list_lines(
 def create_line(
     body: CountingLineCreate,
     session: DbSession,
-    _admin: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> CountingLineResponse:
     if session.get(CountingLine, body.id) is not None:
         raise ApiError(409, "line_exists", f"Counting line '{body.id}' already exists")
-    if session.get(Camera, body.camera_id) is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{body.camera_id}' not found")
+    require_camera_in_org(session, body.camera_id, admin.org_id)
     row = CountingLine(
         id=body.id,
         camera_id=body.camera_id,
@@ -99,10 +113,10 @@ def update_line(
     line_id: str,
     body: CountingLineUpdate,
     session: DbSession,
-    _admin: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> CountingLineResponse:
-    row = session.get(CountingLine, line_id)
-    if row is None:
+    row = require_line_in_org(session, line_id, admin.org_id)
+    if row.status == "disabled":
         raise ApiError(404, "line_not_found", f"Counting line '{line_id}' not found")
     if body.name is not None:
         row.name = body.name
@@ -122,14 +136,14 @@ def update_line(
     "/{line_id}",
     status_code=204,
     summary="Delete counting line",
-    description="Remove a counting line configuration. Admin only.",
+    description="Soft-delete a counting line configuration. Admin only.",
 )
 def delete_line(
     line_id: str,
     session: DbSession,
-    _admin: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> None:
-    row = session.get(CountingLine, line_id)
-    if row is None:
-        raise ApiError(404, "line_not_found", f"Counting line '{line_id}' not found")
-    session.delete(row)
+    row = require_line_in_org(session, line_id, admin.org_id)
+
+    row.status = "disabled"
+    session.add(row)

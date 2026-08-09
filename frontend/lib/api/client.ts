@@ -7,12 +7,16 @@ const API_BASE_URL =
 
 export const AUTH_STORAGE_KEY = "auth_session";
 
-export type SessionUser = Pick<User, "id" | "name" | "email" | "role">;
+export type AccountType = "org_user" | "superadmin";
+
+export type SessionUser = Pick<User, "id" | "name" | "email" | "role"> & {
+  accountType: AccountType;
+};
 
 export interface AuthSession {
   access_token: string;
   user: SessionUser;
-  org_id?: string;
+  org_id?: string | null;
 }
 
 export class ApiClientError extends Error {

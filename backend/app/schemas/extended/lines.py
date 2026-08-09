@@ -24,6 +24,7 @@ class CountingLineResponse(BaseModel):
     point_b: Point
     direction: LineDirection
     created_at: str
+    status: str = "offline"
 
 
 class CountingLineCreate(BaseModel):

@@ -6,15 +6,25 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from database.models import Camera, Store
+from database.models import Camera
 
 from ..auth import TokenPayload, require_admin
 from ..deps import DbSession
 from ..exceptions import ApiError
 from ..schemas.cameras import CameraProcessResponse, CameraResponse
 from ..schemas.extended.cameras import CameraTestResponse, CameraUpdate
-from ..services.camera_health import apply_probe_to_camera, probe_camera
-from ..services.camera_process import ProcessJobState, get_process_job, start_recorded_processing
+from ..services.camera_health import (
+    apply_probe_to_camera,
+    apply_recorded_file_check_to_camera,
+    probe_camera,
+)
+from ..services.camera_process import (
+    ProcessJobState,
+    ProcessingRunActiveError,
+    get_process_job,
+    start_recorded_processing,
+)
+from ..services.org_scope import require_camera_in_org, require_store_in_org
 from .cameras import _camera_response
 
 router = APIRouter(prefix="/cameras", tags=["Cameras"])
@@ -33,15 +43,12 @@ def update_camera(
     camera_id: str,
     body: CameraUpdate,
     session: DbSession,
-    _admin: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> CameraResponse:
-    camera = session.get(Camera, camera_id)
-    if camera is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    camera = require_camera_in_org(session, camera_id, admin.org_id)
 
     if body.store_id is not None:
-        if session.get(Store, body.store_id) is None:
-            raise ApiError(404, "store_not_found", f"Store '{body.store_id}' not found")
+        require_store_in_org(session, body.store_id, admin.org_id)
         camera.store_id = body.store_id
     if body.name is not None:
         camera.name = body.name
@@ -82,11 +89,9 @@ def update_camera(
 def disable_camera(
     camera_id: str,
     session: DbSession,
-    _admin: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> CameraResponse:
-    camera = session.get(Camera, camera_id)
-    if camera is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    camera = require_camera_in_org(session, camera_id, admin.org_id)
     camera.status = "disabled"
     session.add(camera)
     session.flush()
@@ -106,23 +111,21 @@ def disable_camera(
 def test_camera(
     camera_id: str,
     session: DbSession,
-    _admin: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> CameraTestResponse:
-    camera = session.get(Camera, camera_id)
-    if camera is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    camera = require_camera_in_org(session, camera_id, admin.org_id)
 
     result = probe_camera(camera)
     camera_status = None
-    if camera.source_type == "live":
-        # Re-check the live row (see camera_health.refresh_camera_status) so a
-        # manual disable that landed while this probe's network I/O was in
-        # flight isn't clobbered by the probe result below.
-        session.refresh(camera)
-        if camera.status != "disabled":
+    session.refresh(camera)
+    if camera.status not in ("disabled", "processing"):
+        if camera.source_type == "live":
             camera_status = apply_probe_to_camera(camera, result)
-            session.add(camera)
-            session.flush()
+        elif camera.source_type == "recorded":
+            camera_status = apply_recorded_file_check_to_camera(camera)
+            # Keep probe metrics from ``result``; status comes from file existence.
+        session.add(camera)
+        session.flush()
 
     return CameraTestResponse(
         status=result.status,
@@ -134,8 +137,8 @@ def test_camera(
     )
 
 
-def _process_response(camera_id: str) -> CameraProcessResponse:
-    job = get_process_job(camera_id)
+def _process_response(session: DbSession, camera_id: str) -> CameraProcessResponse:
+    job = get_process_job(session, camera_id)
     status_map = {
         ProcessJobState.IDLE: "idle",
         ProcessJobState.RUNNING: "running",
@@ -164,11 +167,9 @@ def _process_response(camera_id: str) -> CameraProcessResponse:
 def process_recorded_video(
     camera_id: str,
     session: DbSession,
-    _admin: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> CameraProcessResponse:
-    camera = session.get(Camera, camera_id)
-    if camera is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    camera = require_camera_in_org(session, camera_id, admin.org_id)
     if camera.source_type != "recorded":
         raise ApiError(
             400,
@@ -178,12 +179,15 @@ def process_recorded_video(
     if not camera.rtsp_url:
         raise ApiError(400, "missing_video_path", "No video file path configured for this camera")
 
-    job = get_process_job(camera_id)
-    if job.state == ProcessJobState.RUNNING:
-        return _process_response(camera_id)
-
-    start_recorded_processing(camera_id)
-    return _process_response(camera_id)
+    try:
+        start_recorded_processing(camera_id)
+    except ProcessingRunActiveError as exc:
+        raise ApiError(
+            409,
+            "processing_run_active",
+            "A processing run is already active for this camera",
+        ) from exc
+    return _process_response(session, camera_id)
 
 
 @router.get(
@@ -195,15 +199,13 @@ def process_recorded_video(
 def recorded_process_status(
     camera_id: str,
     session: DbSession,
-    _admin: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> CameraProcessResponse:
-    camera = session.get(Camera, camera_id)
-    if camera is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    camera = require_camera_in_org(session, camera_id, admin.org_id)
     if camera.source_type != "recorded":
         raise ApiError(
             400,
             "invalid_camera_source",
             "Processing status is only available for recorded-video cameras",
         )
-    return _process_response(camera_id)
+    return _process_response(session, camera_id)

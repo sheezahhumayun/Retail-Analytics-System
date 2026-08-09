@@ -20,9 +20,12 @@ def api_client():
     except Exception as exc:
         pytest.skip(f"PostgreSQL not available: {exc}")
 
-    with TestClient(app) as client:
+    client = TestClient(app)
+    try:
         yield client
-    reset_engine()
+    finally:
+        client.close()
+        reset_engine()
 
 
 @pytest.fixture(scope="module")
@@ -82,6 +85,7 @@ class TestAnalyticsModules:
             "/api/analytics/queues",
             headers=admin_headers,
             params={
+                "store_id": "store_main",
                 "zone_id": "queue_lane",
                 "from": "2026-01-01",
                 "to": "2026-01-02",
@@ -127,6 +131,7 @@ class TestAnalyticsModules:
                 "/api/analytics/queues",
                 headers=admin_headers,
                 params={
+                    "store_id": "store_main",
                     "zone_id": "queue_lane",
                     "from": "2026-01-01",
                     "to": "2026-01-02",

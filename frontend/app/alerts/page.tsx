@@ -10,11 +10,10 @@ import { getAlerts, updateAlert } from '@/lib/api/alerts';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { zonesForScope } from '@/lib/scope/scope-filters';
 import { useScope } from '@/lib/scope/ScopeContext';
+import { isAdminDisplayRole } from '@/lib/auth/admin-role';
 import { SEVERITY_COLORS } from '@/lib/constants';
 import type { Alert, AlertSeverity, AlertStatus } from '@/lib/types';
 import { AlertCircle, Settings2 } from 'lucide-react';
-
-const ADMIN_ROLE = 'System Administrator' as const;
 
 export default function AlertsPage() {
   const { user } = useAuth();
@@ -142,7 +141,7 @@ export default function AlertsPage() {
               Monitor and manage store events in real-time
             </p>
           </div>
-          {user?.role === ADMIN_ROLE ? (
+          {isAdminDisplayRole(user?.role) ? (
             <button
               type="button"
               onClick={() => setShowThresholdsModal(true)}

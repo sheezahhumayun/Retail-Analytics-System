@@ -1,8 +1,11 @@
 import { apiRequest } from "@/lib/api/client";
 import {
+  formatHistoricalEntityName,
   mapAlert,
   type BackendAlert,
   type BackendAlertList,
+  type BackendCamera,
+  type BackendZoneShape,
 } from "@/lib/api/mappers";
 import { getOrganization } from "@/lib/api/stores";
 import {
@@ -48,27 +51,48 @@ export function notifyOpenAlertCountChanged(): void {
   }
 }
 
-/** Name lookups from the cached org tree — no per-camera zone fan-out. */
+/** Name lookups including soft-deleted entities for historical alert display. */
 async function buildNameLookups(): Promise<{
   cameras: Map<string, string>;
   zones: Map<string, string>;
+  cameraStatuses: Map<string, string>;
+  zoneStatuses: Map<string, string>;
 }> {
   const cameraNames = new Map<string, string>();
   const zoneNames = new Map<string, string>();
+  const cameraStatuses = new Map<string, string>();
+  const zoneStatuses = new Map<string, string>();
+
   try {
-    const org = await getOrganization();
-    for (const store of org.stores) {
-      for (const camera of store.cameras) {
-        cameraNames.set(camera.id, camera.name);
-        for (const zone of camera.zones) {
-          zoneNames.set(zone.id, zone.name);
-        }
-      }
+    const [allCameras, allZones] = await Promise.all([
+      apiRequest<BackendCamera[]>("/api/cameras", { query: { include_disabled: true } }),
+      apiRequest<BackendZoneShape[]>("/api/zones", { query: { include_disabled: true } }),
+    ]);
+    for (const camera of allCameras) {
+      cameraNames.set(camera.id, camera.name);
+      cameraStatuses.set(camera.id, camera.status);
+    }
+    for (const zone of allZones) {
+      zoneNames.set(zone.id, zone.name);
+      zoneStatuses.set(zone.id, zone.status ?? "offline");
     }
   } catch {
-    // leave maps empty — mapper falls back to ids
+    try {
+      const org = await getOrganization();
+      for (const store of org.stores) {
+        for (const camera of store.cameras) {
+          cameraNames.set(camera.id, camera.name);
+          for (const zone of camera.zones) {
+            zoneNames.set(zone.id, zone.name);
+          }
+        }
+      }
+    } catch {
+      // leave maps empty — mapper falls back to ids
+    }
   }
-  return { cameras: cameraNames, zones: zoneNames };
+
+  return { cameras: cameraNames, zones: zoneNames, cameraStatuses, zoneStatuses };
 }
 
 export async function getAlerts({
@@ -86,7 +110,13 @@ export async function getAlerts({
   ]);
 
   return response.alerts.map((alert) =>
-    mapAlert(alert, lookups.cameras, lookups.zones),
+    mapAlert(
+      alert,
+      lookups.cameras,
+      lookups.zones,
+      lookups.cameraStatuses,
+      lookups.zoneStatuses,
+    ),
   );
 }
 
@@ -104,7 +134,13 @@ export async function updateAlert(
   notifyOpenAlertCountChanged();
 
   const lookups = await buildNameLookups();
-  return mapAlert(updated, lookups.cameras, lookups.zones);
+  return mapAlert(
+    updated,
+    lookups.cameras,
+    lookups.zones,
+    lookups.cameraStatuses,
+    lookups.zoneStatuses,
+  );
 }
 
 export async function getOpenAlertCount(): Promise<number> {

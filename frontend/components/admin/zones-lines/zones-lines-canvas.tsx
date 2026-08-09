@@ -1,8 +1,11 @@
 'use client';
 
 import { useRef, useEffect, useCallback, useState } from 'react';
-import type { DrawMode, LineShape, Point, Shape, ZoneShape, ZoneType } from '@/lib/types';
+import type { DrawMode, LineShape, Point, Shape, ZoneShape, ZoneType, CameraSourceType, CameraStatus } from '@/lib/types';
 import { ZONE_TYPE_COLORS, SHAPE_COLORS } from '@/lib/api/zones';
+import { getCameraSnapshotUrl } from '@/lib/api/cameras';
+import { resolveSnapshotHint } from '@/lib/snapshot-preview-hint';
+import { SnapshotPreviewHint } from '@/components/cameras/snapshot-preview-hint';
 import { ZoneNameForm } from './zone-name-form';
 import { LineSideForm } from './line-side-form';
 
@@ -32,6 +35,8 @@ function pickNextColor(shapes: Shape[]): string {
 
 interface ZonesLinesCanvasProps {
   cameraId: string;
+  cameraStatus?: CameraStatus;
+  cameraSourceType?: CameraSourceType;
   shapes: Shape[];
   onShapesChange: (shapes: Shape[]) => void;
   mode: DrawMode;
@@ -50,6 +55,8 @@ type PopupState =
 
 export function ZonesLinesCanvas({
   cameraId,
+  cameraStatus,
+  cameraSourceType,
   shapes,
   onShapesChange,
   mode,
@@ -67,6 +74,44 @@ export function ZonesLinesCanvas({
   const [mousePos, setMousePos] = useState<Point | null>(null);
   // Popup overlay for naming
   const [popup, setPopup] = useState<PopupState>({ kind: 'none' });
+  const [backgroundImage, setBackgroundImage] = useState<HTMLImageElement | null>(null);
+  const [snapshotUnavailable, setSnapshotUnavailable] = useState(false);
+
+  useEffect(() => {
+    const url = getCameraSnapshotUrl(cameraId);
+    if (!url) {
+      setBackgroundImage(null);
+      setSnapshotUnavailable(true);
+      return;
+    }
+
+    let cancelled = false;
+    setSnapshotUnavailable(false);
+    const img = new Image();
+    img.onload = () => {
+      if (!cancelled) {
+        setBackgroundImage(img);
+        setSnapshotUnavailable(false);
+      }
+    };
+    img.onerror = () => {
+      if (!cancelled) {
+        setBackgroundImage(null);
+        setSnapshotUnavailable(true);
+      }
+    };
+    img.src = url;
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cameraId]);
+
+  const snapshotHint = resolveSnapshotHint(
+    cameraStatus,
+    cameraSourceType,
+    snapshotUnavailable,
+  );
 
   // Notify parent about finish availability
   useEffect(() => {
@@ -95,47 +140,51 @@ export function ZonesLinesCanvas({
 
     ctx.clearRect(0, 0, W, H);
 
-    // Draw the store floor plan placeholder
-    ctx.fillStyle = '#1a1a2e';
-    ctx.fillRect(0, 0, W, H);
+    if (backgroundImage) {
+      ctx.drawImage(backgroundImage, 0, 0, W, H);
+    } else {
+      // Draw the store floor plan placeholder
+      ctx.fillStyle = '#1a1a2e';
+      ctx.fillRect(0, 0, W, H);
 
-    // Grid lines (subtle)
-    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-    ctx.lineWidth = 1;
-    for (let x = 0; x < W; x += W / 10) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      // Grid lines (subtle)
+      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < W; x += W / 10) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      }
+      for (let y = 0; y < H; y += H / 8) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+
+      // Simulated shelving aisles (faint rectangles)
+      const aisles = [
+        { x: 0.05, y: 0.1, w: 0.18, h: 0.65 },
+        { x: 0.27, y: 0.1, w: 0.18, h: 0.65 },
+        { x: 0.49, y: 0.1, w: 0.18, h: 0.65 },
+        { x: 0.71, y: 0.1, w: 0.18, h: 0.65 },
+      ];
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillStyle = 'rgba(255,255,255,0.03)';
+      ctx.lineWidth = 1.5;
+      for (const a of aisles) {
+        ctx.fillRect(a.x * W, a.y * H, a.w * W, a.h * H);
+        ctx.strokeRect(a.x * W, a.y * H, a.w * W, a.h * H);
+      }
+
+      // Checkout counter at bottom
+      ctx.fillStyle = 'rgba(255,255,255,0.04)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(0.05 * W, 0.82 * H, 0.84 * W, 0.1 * H);
+      ctx.strokeRect(0.05 * W, 0.82 * H, 0.84 * W, 0.1 * H);
+
+      // Label "Entrance" at top centre
+      ctx.fillStyle = 'rgba(255,255,255,0.18)';
+      ctx.font = `12px ui-sans-serif, system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('ENTRANCE', W * 0.5, 22);
+      ctx.fillText('CHECKOUT', W * 0.5, H - 6);
     }
-    for (let y = 0; y < H; y += H / 8) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-    }
-
-    // Simulated shelving aisles (faint rectangles)
-    const aisles = [
-      { x: 0.05, y: 0.1, w: 0.18, h: 0.65 },
-      { x: 0.27, y: 0.1, w: 0.18, h: 0.65 },
-      { x: 0.49, y: 0.1, w: 0.18, h: 0.65 },
-      { x: 0.71, y: 0.1, w: 0.18, h: 0.65 },
-    ];
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-    ctx.fillStyle = 'rgba(255,255,255,0.03)';
-    ctx.lineWidth = 1.5;
-    for (const a of aisles) {
-      ctx.fillRect(a.x * W, a.y * H, a.w * W, a.h * H);
-      ctx.strokeRect(a.x * W, a.y * H, a.w * W, a.h * H);
-    }
-
-    // Checkout counter at bottom
-    ctx.fillStyle = 'rgba(255,255,255,0.04)';
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-    ctx.fillRect(0.05 * W, 0.82 * H, 0.84 * W, 0.1 * H);
-    ctx.strokeRect(0.05 * W, 0.82 * H, 0.84 * W, 0.1 * H);
-
-    // Label "Entrance" at top centre
-    ctx.fillStyle = 'rgba(255,255,255,0.18)';
-    ctx.font = `12px ui-sans-serif, system-ui, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.fillText('ENTRANCE', W * 0.5, 22);
-    ctx.fillText('CHECKOUT', W * 0.5, H - 6);
 
     // ─── Render committed shapes ────────────────────────────────────────────
     for (const shape of shapes) {
@@ -264,7 +313,7 @@ export function ZonesLinesCanvas({
         ctx.setLineDash([]);
       }
     }
-  }, [shapes, cameraId, pendingZone, pendingLine, mousePos]);
+  }, [shapes, cameraId, pendingZone, pendingLine, mousePos, backgroundImage]);
 
   useEffect(() => {
     draw();
@@ -487,6 +536,8 @@ export function ZonesLinesCanvas({
           onCancel={cancelLine}
         />
       )}
+
+      {snapshotHint && <SnapshotPreviewHint kind={snapshotHint} />}
     </div>
   );
 }

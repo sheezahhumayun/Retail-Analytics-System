@@ -2,7 +2,7 @@
 
 import { Trash2, Edit2, Key } from 'lucide-react';
 import type { User } from '@/lib/types';
-import { ROLE_COLORS, getStatusColor } from '@/lib/api/users';
+import { getRoleColor, getStatusColor } from '@/lib/api/users';
 import { ACTION_STATUS_COLORS } from '@/lib/constants';
 
 interface UserTableProps {
@@ -33,7 +33,7 @@ export function UserTable({ users, onEdit, onDelete, onResetPassword }: UserTabl
               <td className="px-4 py-3 text-foreground text-sm">{user.email}</td>
               <td className="px-4 py-3">
                 <span
-                  className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${ROLE_COLORS[user.role]}`}
+                  className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${getRoleColor(user.role)}`}
                 >
                   {user.role}
                 </span>

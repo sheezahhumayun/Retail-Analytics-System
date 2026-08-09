@@ -10,6 +10,7 @@ from analytics.modules import QUEUE_ZONE_TYPES
 from sqlmodel import select
 
 from database import AlertRule
+from database.models import Store
 from database.session import session_scope
 
 if TYPE_CHECKING:
@@ -256,10 +257,11 @@ def _load_thresholds(
     return thresholds
 
 
-def _get_org_default_rule(session: Session, rule_type: str) -> AlertRule | None:
+def _get_org_default_rule(session: Session, rule_type: str, org_id: str) -> AlertRule | None:
     """Return the org-wide default row (store_id=NULL, zone_id=NULL) for a rule type."""
     stmt = select(AlertRule).where(
         AlertRule.rule_type == rule_type,
+        AlertRule.org_id == org_id,
         AlertRule.store_id.is_(None),  # type: ignore[union-attr]
         AlertRule.zone_id.is_(None),  # type: ignore[union-attr]
     )
@@ -272,13 +274,14 @@ def _upsert_alert_rule(
     rule_type: str,
     threshold: float,
     now: datetime,
+    org_id: str,
     store_id: str | None = None,
     zone_id: str | None = None,
     severity: str = "warning",
     enabled: bool = True,
 ) -> None:
     """Insert or update one alert_rules row (idempotent on rule_type + store_id + zone_id)."""
-    stmt = select(AlertRule).where(AlertRule.rule_type == rule_type)
+    stmt = select(AlertRule).where(AlertRule.rule_type == rule_type, AlertRule.org_id == org_id)
     if store_id is None:
         stmt = stmt.where(AlertRule.store_id.is_(None))  # type: ignore[union-attr]
     else:
@@ -293,6 +296,7 @@ def _upsert_alert_rule(
         session.add(
             AlertRule(
                 rule_type=rule_type,
+                org_id=org_id,
                 store_id=store_id,
                 zone_id=zone_id,
                 threshold=threshold,
@@ -314,6 +318,7 @@ def provision_zone_alert_rules(
     zone_id: str,
     zone_type: str,
     store_id: str | None = None,
+    org_id: str | None = None,
     session: Session | None = None,
 ) -> None:
     """Create per-zone alert_rules rows copied from current org-wide defaults.
@@ -324,7 +329,19 @@ def provision_zone_alert_rules(
     now = datetime.now(timezone.utc)
 
     def _provision(sess: Session) -> None:
-        dwell_default = _get_org_default_rule(sess, "DWELL_THRESHOLD")
+        resolved_org_id = org_id
+        if resolved_org_id is None and store_id is not None:
+            store = sess.get(Store, store_id)
+            if store is not None:
+                resolved_org_id = store.org_id
+        if resolved_org_id is None:
+            logger.warning(
+                "Cannot provision alert_rules for zone %s without org_id",
+                zone_id,
+            )
+            return
+
+        dwell_default = _get_org_default_rule(sess, "DWELL_THRESHOLD", resolved_org_id)
         if dwell_default is None:
             logger.warning(
                 "No org-wide DWELL_THRESHOLD default; skipping alert_rules for zone %s",
@@ -339,6 +356,7 @@ def provision_zone_alert_rules(
             severity=dwell_default.severity,
             enabled=dwell_default.enabled,
             zone_id=zone_id,
+            org_id=resolved_org_id,
             now=now,
         )
 
@@ -346,7 +364,7 @@ def provision_zone_alert_rules(
             return
 
         for rule_type in ("QUEUE_THRESHOLD", "QUEUE_THRESHOLD_DURATION"):
-            queue_default = _get_org_default_rule(sess, rule_type)
+            queue_default = _get_org_default_rule(sess, rule_type, resolved_org_id)
             if queue_default is None:
                 logger.warning(
                     "No org-wide %s default; skipping for zone %s",
@@ -361,6 +379,7 @@ def provision_zone_alert_rules(
                 severity=queue_default.severity,
                 enabled=queue_default.enabled,
                 zone_id=zone_id,
+                org_id=resolved_org_id,
                 now=now,
             )
 

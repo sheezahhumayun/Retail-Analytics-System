@@ -5,26 +5,37 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlmodel import select
 
-from database.models import Camera, Event, OccupancyMetric, Store
+from database.models import Camera, Event, OccupancyMetric
 
 from ..auth import TokenPayload, get_current_user, get_current_user_from_token, require_admin
 from ..deps import DbSession
 from ..exceptions import ApiError
+from ..services.org_scope import (
+    cameras_for_org_stmt,
+    require_camera_in_org,
+    require_store_in_org,
+)
+from ..services.camera_process import get_latest_completed_processing_run
 from ..services.camera_stream import (
     MJPEG_CONTENT_TYPE,
     StreamOpenError,
     async_iter_open_mjpeg_stream,
+    capture_snapshot_jpeg,
     open_stream_source,
 )
+from ..services.local_media_path import resolve_repo_data_path
 from ..schemas.cameras import (
     CameraCreate,
     CameraResponse,
     CameraStatusResponse,
 )
-from ..services.camera_health import refresh_camera_status
+from ..services.camera_health import (
+    refresh_camera_status,
+    refresh_recorded_camera_status,
+)
 from ..services.camera_ids import generate_camera_id
 
 router = APIRouter(prefix="/cameras", tags=["Cameras"])
@@ -38,7 +49,7 @@ router = APIRouter(prefix="/cameras", tags=["Cameras"])
 )
 def list_cameras(
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str | None, Query(description="Filter by store id")] = None,
     include_disabled: Annotated[
         bool,
@@ -51,11 +62,9 @@ def list_cameras(
         ),
     ] = False,
 ) -> list[CameraResponse]:
-    stmt = select(Camera).order_by(Camera.name)
     if store_id is not None:
-        if session.get(Store, store_id) is None:
-            raise ApiError(404, "store_not_found", f"Store '{store_id}' not found")
-        stmt = stmt.where(Camera.store_id == store_id)
+        require_store_in_org(session, store_id, user.org_id)
+    stmt = cameras_for_org_stmt(user.org_id, store_id=store_id)
     if not include_disabled:
         stmt = stmt.where(Camera.status != "disabled")
     cameras = list(session.exec(stmt).all())
@@ -75,11 +84,9 @@ def list_cameras(
 def create_camera(
     body: CameraCreate,
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(require_admin)],
+    admin: Annotated[TokenPayload, Depends(require_admin)],
 ) -> CameraResponse:
-    store = session.get(Store, body.store_id)
-    if store is None:
-        raise ApiError(404, "store_not_found", f"Store '{body.store_id}' not found")
+    require_store_in_org(session, body.store_id, admin.org_id)
     camera_id = generate_camera_id(session, body.name)
     camera = Camera(id=camera_id, **body.model_dump(), status="offline")
     session.add(camera)
@@ -116,14 +123,15 @@ def _camera_response(camera: Camera) -> CameraResponse:
 def camera_status(
     camera_id: str,
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
 ) -> CameraStatusResponse:
-    camera = session.get(Camera, camera_id)
-    if camera is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    camera = require_camera_in_org(session, camera_id, user.org_id)
 
-    if camera.source_type == "live" and camera.status != "disabled":
-        refresh_camera_status(session, camera)
+    if camera.status not in ("disabled", "processing"):
+        if camera.source_type == "live":
+            refresh_camera_status(session, camera)
+        elif camera.source_type == "recorded":
+            refresh_recorded_camera_status(session, camera)
 
     last_event = session.exec(
         select(Event)
@@ -176,11 +184,9 @@ def camera_status(
 def camera_stream(
     camera_id: str,
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user_from_token)],
+    user: Annotated[TokenPayload, Depends(get_current_user_from_token)],
 ) -> StreamingResponse:
-    camera = session.get(Camera, camera_id)
-    if camera is None:
-        raise ApiError(404, "camera_not_found", f"Camera '{camera_id}' not found")
+    camera = require_camera_in_org(session, camera_id, user.org_id)
     if camera.source_type != "live":
         raise ApiError(
             404,
@@ -207,4 +213,82 @@ def camera_stream(
         async_iter_open_mjpeg_stream(source, first_chunk, camera_id=camera.id),
         media_type=MJPEG_CONTENT_TYPE,
         headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get(
+    "/{camera_id}/snapshot",
+    summary="Camera reference-frame snapshot",
+    description=(
+        "Return a single JPEG snapshot for admin UI backgrounds. "
+        "Live cameras capture one fresh frame per request (not cached). "
+        "Recorded cameras serve the preview frame from the most recent completed "
+        "processing run. Authenticate with ``Authorization: Bearer`` or "
+        "``?token=<jwt>`` (required for ``<img>`` tags)."
+    ),
+    responses={
+        200: {
+            "content": {"image/jpeg": {}},
+            "description": "JPEG snapshot",
+        },
+        404: {"description": "Camera not found or recorded preview not available"},
+        503: {"description": "Live stream could not be opened"},
+    },
+)
+def camera_snapshot(
+    camera_id: str,
+    session: DbSession,
+    user: Annotated[TokenPayload, Depends(get_current_user_from_token)],
+) -> Response:
+    camera = require_camera_in_org(session, camera_id, user.org_id)
+
+    if camera.source_type == "live":
+        if not camera.rtsp_url:
+            raise ApiError(
+                400,
+                "no_stream_url",
+                f"Camera '{camera_id}' has no stream URL configured",
+            )
+        try:
+            jpeg = capture_snapshot_jpeg(camera.rtsp_url)
+        except StreamOpenError as exc:
+            raise ApiError(
+                503,
+                "stream_unavailable",
+                f"Could not capture camera snapshot: {exc}",
+            ) from exc
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    if camera.source_type != "recorded":
+        raise ApiError(
+            400,
+            "invalid_camera_source",
+            f"Camera '{camera_id}' has unsupported source_type '{camera.source_type}'",
+        )
+
+    run = get_latest_completed_processing_run(session, camera_id)
+    if run is None or not run.preview_frame_path:
+        raise ApiError(
+            404,
+            "preview_not_available",
+            "Preview not available yet — process this camera first",
+        )
+
+    resolved = resolve_repo_data_path(run.preview_frame_path)
+    if not resolved.is_file():
+        raise ApiError(
+            404,
+            "preview_not_available",
+            "Preview not available yet — process this camera first",
+        )
+
+    return FileResponse(
+        path=str(resolved),
+        media_type="image/jpeg",
+        filename=resolved.name,
+        headers={"Cache-Control": "public, max-age=60"},
     )

@@ -14,15 +14,17 @@ import {
   queueStatsFromRows,
   trafficStatsFromRows,
   zoneRowFromAnalytics,
+  formatHistoricalEntityName,
+  type BackendCamera,
   zoneRowNotTracked,
   zoneStatsFromRows,
-  type BackendCamera,
   type BackendDwellResponse,
   type BackendHeatmapResponse,
   type BackendOccupancyResponse,
   type BackendQueueResponse,
   type BackendTrafficResponse,
   type BackendZoneAnalyticsResponse,
+  type BackendZoneShape,
 } from "@/lib/api/mappers";
 import { getDefaultStoreId, getDefaultZoneId, getOrganization } from "@/lib/api/stores";
 import { getIntervalLabel } from "@/lib/analytics-data";
@@ -155,15 +157,12 @@ export interface ZonesResult {
 
 async function findZoneName(zone_id: string): Promise<string> {
   try {
-    const org = await getOrganization();
-    for (const store of org.stores) {
-      for (const camera of store.cameras) {
-        for (const zone of camera.zones) {
-          if (zone.id === zone_id) {
-            return zone.name;
-          }
-        }
-      }
+    const zones = await apiRequest<BackendZoneShape[]>("/api/zones", {
+      query: { include_disabled: true },
+    });
+    const zone = zones.find((item) => item.id === zone_id);
+    if (zone) {
+      return formatHistoricalEntityName(zone.name, zone.status);
     }
   } catch {
     // fall through to id
@@ -846,34 +845,40 @@ export async function getZonePerformance(
   const { from, to } = dateRangeForKey("week");
   const store_id = params.store_id ?? (await getDefaultStoreId());
 
-  const cameras = await apiRequest<BackendCamera[]>("/api/cameras").catch(() => []);
+  const [cameras, allZones] = await Promise.all([
+    apiRequest<BackendCamera[]>("/api/cameras", { query: { include_disabled: true } }).catch(
+      () => [] as BackendCamera[],
+    ),
+    apiRequest<BackendZoneShape[]>("/api/zones", { query: { include_disabled: true } }).catch(
+      () => [] as BackendZoneShape[],
+    ),
+  ]);
   const cameraById = new Map(cameras.map((camera) => [camera.id, camera]));
 
-  const zoneShapes: Array<{ id: string; name: string; cameraId: string }> = [];
-  try {
-    const org = await getOrganization();
-    for (const store of org.stores) {
-      if (params.store_id && store.id !== params.store_id) {
-        continue;
-      }
-      for (const camera of store.cameras) {
-        for (const zone of camera.zones) {
-          if (params.zone_id && zone.id !== params.zone_id) {
-            continue;
-          }
-          // Exclude queue-type zones (frontend ZoneShape.type already mapped to "checkout_queue")
-          if (zone.type === "checkout_queue") {
-            continue;
-          }
-          zoneShapes.push({ id: zone.id, name: zone.name, cameraId: camera.id });
-        }
-      }
+  const zoneShapes: Array<{ id: string; name: string; cameraId: string; status?: string }> = [];
+  for (const zone of allZones) {
+    if (params.zone_id && zone.id !== params.zone_id) {
+      continue;
     }
-  } catch {
-    return [];
+    if (zone.type === "checkout_queue") {
+      continue;
+    }
+    const camera = cameraById.get(zone.camera_id);
+    if (!camera) {
+      continue;
+    }
+    if (params.store_id && camera.store_id !== params.store_id) {
+      continue;
+    }
+    zoneShapes.push({
+      id: zone.id,
+      name: zone.name,
+      cameraId: zone.camera_id,
+      status: zone.status,
+    });
   }
 
-  const uniqueZones = new Map<string, { id: string; name: string; cameraId: string }>();
+  const uniqueZones = new Map<string, { id: string; name: string; cameraId: string; status?: string }>();
   for (const shape of zoneShapes) {
     uniqueZones.set(shape.id, shape);
   }
@@ -881,11 +886,12 @@ export async function getZonePerformance(
   const rows: ZoneRow[] = [];
   for (const shape of uniqueZones.values()) {
     const camera = cameraById.get(shape.cameraId);
+    const displayName = formatHistoricalEntityName(shape.name, shape.status);
     if (!camera || !cameraHasModule(camera, "zones")) {
       rows.push(
         zoneRowNotTracked(
           shape.id,
-          shape.name,
+          displayName,
           "Zone analytics not enabled for this camera",
         ),
       );
@@ -901,7 +907,7 @@ export async function getZonePerformance(
         analytics.comparison?.status === "ok" ? (analytics.prior_buckets ?? []) : [];
       const row = zoneRowFromAnalytics(
         shape.id,
-        shape.name,
+        displayName,
         analytics.buckets,
         priorBuckets,
       );
@@ -913,11 +919,11 @@ export async function getZonePerformance(
     } catch (err) {
       if (err instanceof ApiClientError && err.code === "analytics_module_disabled") {
         rows.push(
-          zoneRowNotTracked(shape.id, shape.name, err.message),
+          zoneRowNotTracked(shape.id, displayName, err.message),
         );
       } else {
         rows.push(
-          zoneRowNotTracked(shape.id, shape.name, "Unable to load zone analytics"),
+          zoneRowNotTracked(shape.id, displayName, "Unable to load zone analytics"),
         );
       }
     }

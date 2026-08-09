@@ -11,6 +11,9 @@ from ..auth import TokenPayload, get_current_user
 from ..deps import DbSession, require_date_range
 from ..exceptions import ApiError
 from ..schemas.extended.reports import ReportPayload, ReportType
+from ..services.analytics_modules import require_camera_module
+from ..services.org_scope import require_camera_in_org, require_store_in_org
+from ..services.report_eligibility import REPORT_TYPE_MODULE
 from ..services.reports import build_report, report_to_csv, report_to_pdf
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
@@ -30,7 +33,7 @@ _VALID_TYPES: set[str] = {"traffic", "occupancy", "zones", "dwell", "queues"}
 def get_report(
     report_type: str,
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
     camera_id: Annotated[str | None, Query(description="Optional camera filter")] = None,
@@ -39,6 +42,16 @@ def get_report(
 ) -> ReportPayload:
     if report_type not in _VALID_TYPES:
         raise ApiError(400, "invalid_report_type", f"Unknown report type: {report_type}")
+    require_store_in_org(session, store_id, user.org_id)
+    if camera_id is not None:
+        camera = require_camera_in_org(session, camera_id, user.org_id)
+        if camera.store_id != store_id:
+            raise ApiError(
+                400,
+                "invalid_scope",
+                f"Camera '{camera_id}' does not belong to store '{store_id}'",
+            )
+        require_camera_module(camera, REPORT_TYPE_MODULE[report_type])
     start, end = date_range
     return build_report(
         session,
@@ -59,7 +72,7 @@ def get_report(
 def export_report(
     report_type: str,
     session: DbSession,
-    _user: Annotated[TokenPayload, Depends(get_current_user)],
+    user: Annotated[TokenPayload, Depends(get_current_user)],
     store_id: Annotated[str, Query(description="Store id")],
     date_range: Annotated[tuple, Depends(require_date_range)],
     format: Annotated[Literal["csv", "pdf"], Query(description="Export format")],
@@ -68,6 +81,16 @@ def export_report(
 ) -> Response:
     if report_type not in _VALID_TYPES:
         raise ApiError(400, "invalid_report_type", f"Unknown report type: {report_type}")
+    require_store_in_org(session, store_id, user.org_id)
+    if camera_id is not None:
+        camera = require_camera_in_org(session, camera_id, user.org_id)
+        if camera.store_id != store_id:
+            raise ApiError(
+                400,
+                "invalid_scope",
+                f"Camera '{camera_id}' does not belong to store '{store_id}'",
+            )
+        require_camera_module(camera, REPORT_TYPE_MODULE[report_type])
     start, end = date_range
     payload = build_report(
         session,

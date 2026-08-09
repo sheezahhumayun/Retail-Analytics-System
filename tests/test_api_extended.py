@@ -7,9 +7,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import select
 
 from backend.app.main import app
-from database.models import Camera
+from database.models import Camera, CountingLine, ProcessingRun, User, Zone, ZoneMetric, ZoneShape
 from database.seed import ORG_ID, STORE_ID, seed_reference_data
 from database.session import create_all, reset_engine, session_scope
 
@@ -24,9 +25,12 @@ def api_client():
     except Exception as exc:
         pytest.skip(f"PostgreSQL not available: {exc}")
 
-    with TestClient(app) as client:
+    client = TestClient(app)
+    try:
         yield client
-    reset_engine()
+    finally:
+        client.close()
+        reset_engine()
 
 
 @pytest.fixture(scope="module")
@@ -116,6 +120,211 @@ class TestZoneShapes:
         assert resp.json()["name"] == "Renamed"
 
         assert api_client.delete(f"/api/zones/{zone_id}", headers=admin_headers).status_code == 204
+
+    def test_update_keeps_analytics_zone_in_sync(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        zone_id = f"zone_{uuid.uuid4().hex[:8]}"
+        initial_points = [[0, 0], [10, 0], [10, 10]]
+        updated_points = [[5, 5], [50, 5], [50, 50], [5, 50]]
+
+        create_resp = api_client.post(
+            "/api/zones",
+            headers=admin_headers,
+            json={
+                "id": zone_id,
+                "camera_id": "town",
+                "name": "Sync Test Zone",
+                "type": "general",
+                "polygon_points": initial_points,
+            },
+        )
+        assert create_resp.status_code == 201, create_resp.text
+
+        update_resp = api_client.put(
+            f"/api/zones/{zone_id}",
+            headers=admin_headers,
+            json={
+                "name": "Sync Test Zone Renamed",
+                "type": "checkout_queue",
+                "polygon_points": updated_points,
+            },
+        )
+        assert update_resp.status_code == 200, update_resp.text
+        updated = update_resp.json()
+        assert updated["name"] == "Sync Test Zone Renamed"
+        assert updated["type"] == "checkout_queue"
+        assert updated["polygon_points"] == updated_points
+
+        with session_scope() as session:
+            shape = session.get(ZoneShape, zone_id)
+            analytics = session.get(Zone, zone_id)
+            assert shape is not None
+            assert analytics is not None
+            assert shape.name == analytics.name == "Sync Test Zone Renamed"
+            assert shape.polygon_points == analytics.polygon_coords == updated_points
+            assert analytics.zone_type == "queue"
+
+        api_client.delete(f"/api/zones/{zone_id}", headers=admin_headers)
+
+    def test_delete_soft_disables_analytics_zone(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        zone_id = f"zone_{uuid.uuid4().hex[:8]}"
+        create_resp = api_client.post(
+            "/api/zones",
+            headers=admin_headers,
+            json={
+                "id": zone_id,
+                "camera_id": "town",
+                "name": "Delete Sync Zone",
+                "type": "entrance",
+                "polygon_points": [[0, 0], [10, 0], [10, 10]],
+            },
+        )
+        assert create_resp.status_code == 201, create_resp.text
+
+        with session_scope() as session:
+            assert session.get(ZoneShape, zone_id) is not None
+            assert session.get(Zone, zone_id) is not None
+
+        delete_resp = api_client.delete(f"/api/zones/{zone_id}", headers=admin_headers)
+        assert delete_resp.status_code == 204
+
+        with session_scope() as session:
+            shape = session.get(ZoneShape, zone_id)
+            analytics = session.get(Zone, zone_id)
+            assert shape is not None
+            assert analytics is not None
+            assert shape.status == "disabled"
+            assert analytics.status == "disabled"
+
+        list_resp = api_client.get("/api/zones", headers=admin_headers)
+        assert list_resp.status_code == 200
+        assert zone_id not in {z["id"] for z in list_resp.json()}
+
+        include_resp = api_client.get(
+            "/api/zones",
+            headers=admin_headers,
+            params={"include_disabled": True},
+        )
+        assert include_resp.status_code == 200
+        disabled = next(z for z in include_resp.json() if z["id"] == zone_id)
+        assert disabled["status"] == "disabled"
+
+    def test_delete_soft_disables_zone_preserves_zone_metrics(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        """Soft-deleting a queue zone must keep zone_metrics rows queryable."""
+        zone_id = f"zone_{uuid.uuid4().hex[:8]}"
+        yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+
+        create_resp = api_client.post(
+            "/api/zones",
+            headers=admin_headers,
+            json={
+                "id": zone_id,
+                "camera_id": "town",
+                "name": "Queue Metrics Soft Delete",
+                "type": "checkout_queue",
+                "polygon_points": [[0, 0], [10, 0], [10, 10]],
+            },
+        )
+        assert create_resp.status_code == 201, create_resp.text
+
+        with session_scope() as session:
+            zone = session.get(Zone, zone_id)
+            assert zone is not None
+            assert zone.zone_type == "queue"
+            session.add(
+                ZoneMetric(
+                    zone_id=zone_id,
+                    metric_date=yesterday,
+                    hour=12,
+                    visitors=42,
+                    avg_dwell=30.0,
+                    max_dwell=90.0,
+                    min_dwell=5.0,
+                    dwell_count=6,
+                )
+            )
+
+        delete_resp = api_client.delete(f"/api/zones/{zone_id}", headers=admin_headers)
+        assert delete_resp.status_code == 204, delete_resp.text
+
+        with session_scope() as session:
+            shape = session.get(ZoneShape, zone_id)
+            analytics = session.get(Zone, zone_id)
+            assert shape is not None
+            assert analytics is not None
+            assert shape.status == "disabled"
+            assert analytics.status == "disabled"
+            metrics = session.exec(
+                select(ZoneMetric).where(ZoneMetric.zone_id == zone_id)
+            ).all()
+            assert len(metrics) == 1
+            assert metrics[0].visitors == 42
+
+        list_resp = api_client.get("/api/zones", headers=admin_headers)
+        assert zone_id not in {z["id"] for z in list_resp.json()}
+
+        include_resp = api_client.get(
+            "/api/zones",
+            headers=admin_headers,
+            params={"include_disabled": True},
+        )
+        assert any(z["id"] == zone_id for z in include_resp.json())
+
+    def test_processing_run_excludes_disabled_zone(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        from backend.app.services.camera_process import claim_processing_run
+
+        camera_resp = api_client.post(
+            "/api/cameras",
+            headers=admin_headers,
+            json={
+                "store_id": STORE_ID,
+                "name": f"Recorded {uuid.uuid4().hex[:8]}",
+                "location": "Test",
+                "rtsp_url": "sample-data/checkout.mp4",
+                "source_type": "recorded",
+            },
+        )
+        assert camera_resp.status_code == 201, camera_resp.text
+        camera_id = camera_resp.json()["id"]
+
+        active_zone_id = f"zone_{uuid.uuid4().hex[:8]}"
+        disabled_zone_id = f"zone_{uuid.uuid4().hex[:8]}"
+        for zone_id, name in (
+            (active_zone_id, "Active Zone"),
+            (disabled_zone_id, "Disabled Zone"),
+        ):
+            resp = api_client.post(
+                "/api/zones",
+                headers=admin_headers,
+                json={
+                    "id": zone_id,
+                    "camera_id": camera_id,
+                    "name": name,
+                    "type": "general",
+                    "polygon_points": [[0, 0], [10, 0], [10, 10]],
+                },
+            )
+            assert resp.status_code == 201, resp.text
+
+        delete_resp = api_client.delete(
+            f"/api/zones/{disabled_zone_id}", headers=admin_headers
+        )
+        assert delete_resp.status_code == 204
+
+        run_id = claim_processing_run(camera_id)
+        with session_scope() as session:
+            run = session.get(ProcessingRun, run_id)
+            assert run is not None
+            snapshot_ids = {z["id"] for z in run.zones_snapshot}
+            assert active_zone_id in snapshot_ids
+            assert disabled_zone_id not in snapshot_ids
 
     def test_create_forbidden_for_user(self, api_client: TestClient, user_headers: dict):
         resp = api_client.post(
@@ -230,7 +439,7 @@ class TestZoneAlertRuleProvisioning:
 
         api_client.delete(f"/api/zones/{zone_id}", headers=admin_headers)
 
-    def test_delete_zone_cascades_alert_rules(
+    def test_delete_zone_soft_delete_preserves_alert_rules(
         self, api_client: TestClient, admin_headers: dict
     ):
         zone_id = f"zone_{uuid.uuid4().hex[:8]}"
@@ -239,7 +448,12 @@ class TestZoneAlertRuleProvisioning:
 
         delete = api_client.delete(f"/api/zones/{zone_id}", headers=admin_headers)
         assert delete.status_code == 204
-        assert len(self._zone_rules(api_client, admin_headers, zone_id)) == 0
+        assert len(self._zone_rules(api_client, admin_headers, zone_id)) >= 1
+
+        with session_scope() as session:
+            zone = session.get(Zone, zone_id)
+            assert zone is not None
+            assert zone.status == "disabled"
 
 
 class TestCountingLines:
@@ -294,6 +508,96 @@ class TestCountingLines:
 
     def test_not_found(self, api_client: TestClient, admin_headers: dict):
         assert api_client.get("/api/lines?camera_id=missing", headers=admin_headers).status_code == 404
+
+    def test_delete_soft_disables_line_preserves_row(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        line_id = f"line_{uuid.uuid4().hex[:8]}"
+        create = api_client.post(
+            "/api/lines",
+            headers=admin_headers,
+            json={
+                "id": line_id,
+                "camera_id": "entrance",
+                "name": "Soft Delete Line",
+                "point_a": {"x": 1, "y": 2},
+                "point_b": {"x": 3, "y": 4},
+                "direction": "left_is_inside",
+            },
+        )
+        assert create.status_code == 201, create.text
+
+        delete = api_client.delete(f"/api/lines/{line_id}", headers=admin_headers)
+        assert delete.status_code == 204
+
+        with session_scope() as session:
+            row = session.get(CountingLine, line_id)
+            assert row is not None
+            assert row.status == "disabled"
+
+        list_resp = api_client.get("/api/lines", headers=admin_headers)
+        assert line_id not in {line["id"] for line in list_resp.json()}
+
+        include_resp = api_client.get(
+            "/api/lines",
+            headers=admin_headers,
+            params={"include_disabled": True},
+        )
+        assert include_resp.status_code == 200
+        disabled = next(line for line in include_resp.json() if line["id"] == line_id)
+        assert disabled["status"] == "disabled"
+
+    def test_processing_run_excludes_disabled_line(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        from backend.app.services.camera_process import claim_processing_run
+
+        camera_resp = api_client.post(
+            "/api/cameras",
+            headers=admin_headers,
+            json={
+                "store_id": STORE_ID,
+                "name": f"Recorded {uuid.uuid4().hex[:8]}",
+                "location": "Test",
+                "rtsp_url": "sample-data/checkout.mp4",
+                "source_type": "recorded",
+            },
+        )
+        assert camera_resp.status_code == 201, camera_resp.text
+        camera_id = camera_resp.json()["id"]
+
+        active_line_id = f"line_{uuid.uuid4().hex[:8]}"
+        disabled_line_id = f"line_{uuid.uuid4().hex[:8]}"
+        for line_id, name in (
+            (active_line_id, "Active Line"),
+            (disabled_line_id, "Disabled Line"),
+        ):
+            resp = api_client.post(
+                "/api/lines",
+                headers=admin_headers,
+                json={
+                    "id": line_id,
+                    "camera_id": camera_id,
+                    "name": name,
+                    "point_a": {"x": 0, "y": 0},
+                    "point_b": {"x": 10, "y": 0},
+                    "direction": "left_is_inside",
+                },
+            )
+            assert resp.status_code == 201, resp.text
+
+        delete_resp = api_client.delete(
+            f"/api/lines/{disabled_line_id}", headers=admin_headers
+        )
+        assert delete_resp.status_code == 204
+
+        run_id = claim_processing_run(camera_id)
+        with session_scope() as session:
+            run = session.get(ProcessingRun, run_id)
+            assert run is not None
+            snapshot_ids = {line["id"] for line in run.lines_snapshot}
+            assert active_line_id in snapshot_ids
+            assert disabled_line_id not in snapshot_ids
 
 
 class TestCamerasExtended:
@@ -575,6 +879,41 @@ class TestReports:
 
 
 class TestUsersAdmin:
+    def test_create_user_admin_and_user_roles_round_trip(
+        self, api_client: TestClient, admin_headers: dict
+    ):
+        """Backend stores admin/user only; both roles persist and reload via GET."""
+        for backend_role in ("admin", "user"):
+            user_id = f"user_{uuid.uuid4().hex[:8]}"
+            create = api_client.post(
+                "/api/users",
+                headers=admin_headers,
+                json={
+                    "id": user_id,
+                    "email": f"{user_id}@example.com",
+                    "name": f"Role {backend_role}",
+                    "role": backend_role,
+                    "org_id": ORG_ID,
+                    "password": "secret123",
+                },
+            )
+            assert create.status_code == 201, create.text
+            assert create.json()["role"] == backend_role
+
+            listing = api_client.get("/api/users", headers=admin_headers)
+            assert listing.status_code == 200
+            row = next(u for u in listing.json() if u["id"] == user_id)
+            assert row["role"] == backend_role
+
+            api_client.delete(f"/api/users/{user_id}", headers=admin_headers)
+
+    def test_database_user_roles_are_admin_or_user_only(self):
+        with session_scope() as session:
+            roles = {row for row in session.exec(select(User.role)).all()}
+        assert roles.issubset({"admin", "user"})
+        assert "viewer" not in roles
+        assert "manager" not in roles
+
     def test_list_and_crud(self, api_client: TestClient, admin_headers: dict):
         user_id = f"user_{uuid.uuid4().hex[:8]}"
         create = api_client.post(

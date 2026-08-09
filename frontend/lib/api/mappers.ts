@@ -19,6 +19,7 @@ import type {
   Store,
   User,
   UserRole,
+  UserStatus,
   Zone,
   ZoneRow,
   ZoneShape,
@@ -32,12 +33,15 @@ import type { HeatBlob } from "@/lib/types";
 
 // ─── Backend response shapes ─────────────────────────────────────────────────
 
+export type BackendAccountType = "org_user" | "superadmin";
+
 export interface BackendUserInfo {
   id: string;
   email: string;
   name: string;
   role: "admin" | "user";
-  org_id: string;
+  org_id: string | null;
+  account_type?: BackendAccountType;
 }
 
 export interface BackendMeResponse extends BackendUserInfo {
@@ -256,6 +260,7 @@ export interface BackendZoneShape {
   type: string;
   polygon_points: number[][];
   created_at: string;
+  status?: string;
 }
 
 export interface BackendCountingLine {
@@ -266,6 +271,12 @@ export interface BackendCountingLine {
   point_b: Point;
   direction: "left_is_inside" | "right_is_inside";
   created_at: string;
+  status?: string;
+}
+
+/** Append "(deleted)" when an entity has been soft-deleted (`status=disabled`). */
+export function formatHistoricalEntityName(name: string, status?: string): string {
+  return status === "disabled" ? `${name} (deleted)` : name;
 }
 
 export interface BackendUser {
@@ -275,6 +286,7 @@ export interface BackendUser {
   role: "admin" | "user";
   org_id: string;
   store_id?: string | null;
+  status?: "active" | "disabled";
 }
 
 // ─── Role mapping ────────────────────────────────────────────────────────────
@@ -285,6 +297,16 @@ export function backendRoleToFrontend(role: "admin" | "user"): UserRole {
 
 export function frontendRoleToBackend(role: UserRole): "admin" | "user" {
   return role === "System Administrator" ? "admin" : "user";
+}
+
+export function frontendStatusToBackend(
+  status: UserStatus,
+): "active" | "disabled" {
+  return status === "Disabled" ? "disabled" : "active";
+}
+
+export function backendStatusToFrontend(status: string): UserStatus {
+  return status === "disabled" ? "Disabled" : "Active";
 }
 
 // ─── Date helpers ──────────────────────────────────────────────────────────
@@ -628,14 +650,20 @@ export function mapAlert(
   alert: BackendAlert,
   cameraNames: Map<string, string>,
   zoneNames: Map<string, string>,
+  cameraStatuses?: Map<string, string>,
+  zoneStatuses?: Map<string, string>,
 ): Alert {
+  const cameraId = alert.camera_id ?? "";
+  const zoneId = alert.zone_id ?? "";
+  const cameraName = cameraNames.get(cameraId) ?? cameraId ?? "Unknown camera";
+  const zoneName = zoneNames.get(zoneId) ?? zoneId ?? "—";
   return {
     id: String(alert.id),
     type: alert.alert_type as Alert["type"],
     severity: alert.severity as Alert["severity"],
-    camera: cameraNames.get(alert.camera_id ?? "") ?? alert.camera_id ?? "Unknown camera",
+    camera: formatHistoricalEntityName(cameraName, cameraStatuses?.get(cameraId)),
     cameraId: alert.camera_id ?? undefined,
-    zone: zoneNames.get(alert.zone_id ?? "") ?? alert.zone_id ?? "—",
+    zone: formatHistoricalEntityName(zoneName, zoneStatuses?.get(zoneId)),
     zoneId: alert.zone_id ?? undefined,
     timestamp: new Date(alert.timestamp),
     status: alert.status as Alert["status"],
@@ -765,6 +793,61 @@ function mapLiveCameraCountingLines(
     });
 }
 
+export type BackendProcessingZoneSnapshot = {
+  id: string;
+  name: string;
+  zone_type: string;
+  polygon_coords: unknown;
+};
+
+export type BackendProcessingLineSnapshot = {
+  id: string;
+  name: string;
+  point_a: { x: number; y: number };
+  point_b: { x: number; y: number };
+  direction: "left_is_inside" | "right_is_inside";
+};
+
+export function mapProcessingRunSnapshotsToOverlays(
+  zonesSnapshot: BackendProcessingZoneSnapshot[],
+  linesSnapshot: BackendProcessingLineSnapshot[],
+): Pick<Camera, "zones" | "countingLines"> {
+  const zones: Zone[] = zonesSnapshot.map((zone, index) => {
+    const points = normalizePolygonPoints(zone.polygon_coords)
+      .map((point) => `${point.x},${point.y}`)
+      .join(" ");
+    return {
+      id: zone.id,
+      label: zone.name,
+      points,
+      variant: LIVE_ZONE_VARIANTS[index % LIVE_ZONE_VARIANTS.length],
+    };
+  });
+
+  const countingLines: CountingLine[] = linesSnapshot.map((line) => {
+    const normalized = normalizePolygonPoints(
+      [
+        [line.point_a.x, line.point_a.y],
+        [line.point_b.x, line.point_b.y],
+      ],
+      640,
+      360,
+    );
+    const start = normalized[0] ?? { x: 0, y: 0 };
+    const end = normalized[1] ?? { x: 0, y: 0 };
+    return {
+      id: line.id,
+      label: line.name,
+      x1: start.x,
+      y1: start.y,
+      x2: end.x,
+      y2: end.y,
+    };
+  });
+
+  return { zones, countingLines };
+}
+
 export function mapLiveCamera(
   camera: BackendCamera,
   status?: BackendCameraStatus | null,
@@ -875,7 +958,7 @@ export function mapBackendUser(
     assignedStore: user.store_id
       ? storeNameMap.get(user.store_id) ?? user.store_id
       : "—",
-    status: "Active",
+    status: backendStatusToFrontend(user.status ?? "active"),
   };
 }
 
@@ -903,7 +986,7 @@ function parsePolygonVertex(
   return null;
 }
 
-function normalizePolygonPoints(
+export function normalizePolygonPoints(
   points: unknown,
   width = 640,
   height = 360,
@@ -945,6 +1028,7 @@ export function mapZoneShape(shape: BackendZoneShape): ZoneShape {
     points: normalizePolygonPoints(shape.polygon_points),
     color: ZONE_TYPE_COLORS[zoneType],
     cameraId: shape.camera_id,
+    status: shape.status ?? "offline",
   };
 }
 
@@ -967,6 +1051,7 @@ export function mapCountingLine(line: BackendCountingLine): LineShape {
     insideSide: line.direction === "right_is_inside" ? "right" : "left",
     color: "#34d399",
     cameraId: line.camera_id,
+    status: line.status ?? "offline",
   };
 }
 
@@ -1027,7 +1112,7 @@ export async function buildOrganizationFromBackend(
       name: camera.name,
       zones: (zonesByCamera.get(camera.id) ?? []).map((zone) => ({
         id: zone.id,
-        name: zone.name,
+        name: formatHistoricalEntityName(zone.name, zone.status),
         type: zone.type,
       })),
     })),

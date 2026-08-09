@@ -31,7 +31,7 @@ export type AuthUser = {
 type AuthContextValue = {
   user: AuthUser | null;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<SessionUser>;
   logout: () => Promise<void>;
 };
 
@@ -77,7 +77,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (email: string, password: string) => {
     const session = await apiLogin(email, password);
+    if (session.accountType === "superadmin") {
+      await apiLogout();
+      setUser(null);
+      return session;
+    }
     setUser(sessionToAuthUser(session));
+    return session;
   }, []);
 
   const logout = useCallback(async () => {

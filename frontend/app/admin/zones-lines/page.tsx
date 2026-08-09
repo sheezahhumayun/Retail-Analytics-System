@@ -14,8 +14,9 @@ import {
   syncCameraShapes,
 } from '@/lib/api/zones';
 import { deleteCountingLine } from '@/lib/api/lines';
+import { getCameraMeta } from '@/lib/api/cameras';
 import type { Shape } from '@/lib/types';
-import type { DrawMode } from '@/lib/types';
+import type { DrawMode, CameraSourceType, CameraStatus } from '@/lib/types';
 
 const SELECTED_CAMERA_STORAGE_KEY = 'admin-zones-lines-selected-camera';
 
@@ -45,7 +46,7 @@ export default function AdminZonesLinesPage() {
   const savedShapesRef = useRef<Shape[]>([]);
   const selectedCameraRef = useRef('');
 
-  const [camerasList, setCamerasList] = useState<{ id: string; label: string }[]>([]);
+  const [camerasList, setCamerasList] = useState<{ id: string; label: string; status: CameraStatus; sourceType: CameraSourceType }[]>([]);
   const [selectedCamera, setSelectedCamera] = useState('');
   const [shapes, setShapes] = useState<Shape[]>([]);
   const [savedShapes, setSavedShapes] = useState<Shape[]>([]);
@@ -78,7 +79,7 @@ export default function AdminZonesLinesPage() {
         const cameraId = readStoredCameraId(cameras);
         persistSelectedCamera(cameraId);
 
-        const allShapes = await getAllShapes();
+        const allShapes = await getAllShapes({ includeDisabled: true });
         if (!cancelled) {
           setCamerasList(cameras);
           setSelectedCamera(cameraId);
@@ -103,7 +104,30 @@ export default function AdminZonesLinesPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!selectedCamera) return;
+
+    let cancelled = false;
+    getCameraMeta(selectedCamera).then((meta) => {
+      if (cancelled || !meta) return;
+      setCamerasList((prev) =>
+        prev.map((camera) =>
+          camera.id === selectedCamera
+            ? { ...camera, status: meta.status, sourceType: meta.sourceType }
+            : camera,
+        ),
+      );
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCamera]);
+
+  const selectedCameraMeta = camerasList.find((camera) => camera.id === selectedCamera);
+
   const cameraShapes = shapes.filter((s) => s.cameraId === selectedCamera);
+  const editableCameraShapes = cameraShapes.filter((s) => s.status !== 'disabled');
 
   const handleShapesChange = useCallback((updated: Shape[]) => {
     const cameraId =
@@ -119,7 +143,7 @@ export default function AdminZonesLinesPage() {
 
   async function handleDeleteShape(id: string) {
     const shape = shapesRef.current.find((item) => item.id === id);
-    if (!shape) return;
+    if (!shape || shape.status === 'disabled') return;
 
     try {
       if (shape.kind === 'zone') {
@@ -127,9 +151,15 @@ export default function AdminZonesLinesPage() {
       } else {
         await deleteCountingLine(id);
       }
-      setShapes((prev) => prev.filter((s) => s.id !== id));
-      setSavedShapes((prev) => prev.filter((s) => s.id !== id));
-      if (selectedShapeId === id) setSelectedShapeId(null);
+      const cameraId = selectedCameraRef.current;
+      if (cameraId) {
+        const refreshedForCamera = await getShapesForCamera(cameraId, { includeDisabled: true });
+        const refreshedAll = await getAllShapes({ includeDisabled: true });
+        setShapes(refreshedAll);
+        setSavedShapes(refreshedAll);
+        if (selectedShapeId === id) setSelectedShapeId(null);
+        void refreshedForCamera;
+      }
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Failed to delete shape');
       setSaveState('error');
@@ -149,8 +179,8 @@ export default function AdminZonesLinesPage() {
     try {
       await syncCameraShapes(cameraId, current, baseline);
 
-      const refreshedForCamera = await getShapesForCamera(cameraId);
-      const refreshedAll = await getAllShapes();
+      const refreshedForCamera = await getShapesForCamera(cameraId, { includeDisabled: true });
+      const refreshedAll = await getAllShapes({ includeDisabled: true });
 
       const missingNew = current.filter(
         (shape) =>
@@ -267,7 +297,9 @@ export default function AdminZonesLinesPage() {
             <div className="flex-1 min-w-0">
               <ZonesLinesCanvas
                 cameraId={selectedCamera}
-                shapes={cameraShapes}
+                cameraStatus={selectedCameraMeta?.status}
+                cameraSourceType={selectedCameraMeta?.sourceType}
+                shapes={editableCameraShapes}
                 onShapesChange={handleShapesChange}
                 mode={mode}
                 onModeChange={setMode}
