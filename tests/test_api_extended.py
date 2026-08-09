@@ -73,7 +73,7 @@ class TestAuthMe:
 
 class TestOrganizations:
     def test_list(self, api_client: TestClient, user_headers: dict):
-        resp = api_client.get("/api/organizations", headers=user_headers)
+        resp = api_client.get("/api/organizations/scoped", headers=user_headers)
         assert resp.status_code == 200
         orgs = resp.json()
         assert any(o["id"] == ORG_ID for o in orgs)

@@ -30,6 +30,7 @@ from .routers import (
     events,
     lines,
     organizations,
+    organizations_admin,
     processing_runs,
     reports,
     stores,
@@ -67,6 +68,7 @@ api = settings.api_prefix
 app.include_router(auth.router, prefix=api)
 app.include_router(auth_me.router, prefix=api)
 app.include_router(organizations.router, prefix=api)
+app.include_router(organizations_admin.router, prefix=api)
 app.include_router(stores.router, prefix=api)
 app.include_router(cameras.router, prefix=api)
 app.include_router(cameras_extended.router, prefix=api)

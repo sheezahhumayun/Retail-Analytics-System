@@ -1,7 +1,79 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-08-09 (Phase 1 multi-tenancy — superadmins table + unified login — DONE; Phase 0 organization-scoping enforcement — DONE; user disable — DONE; reference-frame snapshots — shipped; batch-test flakiness deferred)
+**Last updated:** 2026-08-09 (Phase 2 multi-tenancy — organization status + CRUD + cascade delete — DONE; Phase 1 superadmins table + unified login — DONE; Phase 0 organization-scoping enforcement — DONE; user disable — DONE; reference-frame snapshots — shipped; batch-test flakiness deferred)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
+
+---
+
+## 2026-08-09 — Phase 2: Multi-tenancy — organization status + CRUD + cascade delete — DONE
+
+Superadmin-only organization lifecycle management: create, list, get-by-id, toggle
+(active/disabled), and irreversible cascade delete. Org-disabled state blocks login and new
+processing-run starts (not in-flight runs — deferred to Phase 3). Org admin management reuses
+existing user create/update/delete/disable endpoints via a new dual-caller auth dependency.
+
+### DONE
+
+- **`organizations.status` column** (migration `017_organization_status`, `active`/`disabled`
+  convention matching `users.status`)
+- **Superadmin-only organization CRUD** (`backend/app/routers/organizations_admin.py`, all routes
+  via `Depends(get_current_superadmin)`): create, list, get-by-id, toggle (active/disabled), and
+  full cascade delete
+- **Cascade delete** (`backend/app/services/org_delete.py`) — deletes all org-scoped data in
+  FK-safe order across 16 tables (`processing_runs`, `events`, `alerts`, `alert_rules`,
+  `dwell_events`, `zone_metrics`, `queue_metrics`, `tracks`, `visitor_metrics`,
+  `occupancy_metrics`, `zone_shapes`, `zones`, `counting_lines`, `cameras`, `stores`, `users`,
+  then the org row). Irreversible, gated by a required `{"confirm": "<org_id>"}` body match — no
+  soft-delete option. Verified end-to-end with real before/after row counts across all 16 tables,
+  zero FK violations
+- **Org-disabled state blocks login** (**401** `account_disabled`, checked in both `login` and
+  `get_current_user`) and **blocks starting new processing runs** for that org's cameras — does
+  not kill already-running processes (deferred to Phase 3 by design, no Popen-handle/kill
+  mechanism exists yet)
+- **Org admin management reuses the existing user create/update/delete/disable mechanism** — no
+  new mechanism invented. New `require_user_admin_or_superadmin` dependency
+  (`backend/app/auth.py`) allows either an org-scoped admin or a superadmin to call
+  `create_user`/`update_user`/`delete_user`; superadmin bypasses `org_id` scoping and the
+  self-delete guard, org admin behavior unchanged
+- **Route change:** the org-user organization list moved from `GET /api/organizations` to
+  `GET /api/organizations/scoped` (bare path now serves superadmin CRUD); confirmed via grep
+  that only `frontend/lib/api/stores.ts` and `tests/test_api_extended.py` were affected callers,
+  both updated
+- **Store CRUD:** confirmed already complete from earlier work (PUT/DELETE existed, POST already
+  validates `org_id` against caller's org) — the "store CRUD fixes needed" item from the original
+  Phase 2 scope was based on stale documentation and required no new work
+- **Manually verified:** org create/list/get via superadmin token, org-user token correctly gets
+  **403** on superadmin routes, toggle disables/re-enables login and processing-run start (real
+  HTTP responses captured both ways), cascade delete leaves zero orphaned rows across all touched
+  tables, confirm-field mismatch on delete correctly rejected
+
+### KNOWN INERT DETAIL (harmless, documented, not a bug to fix)
+
+The **409** `org_disabled` check added in `cameras_extended.py`'s `process_recorded_video` is
+currently unreachable — `get_current_user` already blocks disabled-org requests with **401**
+before that code path is reached. Left in place as defense-in-depth; not causing any incorrect
+behavior.
+
+### NOT IN SCOPE for Phase 2 (explicitly deferred, not forgotten)
+
+**Superadmin frontend UI** — currently only a "not yet available" placeholder exists on
+superadmin login; all Phase 2 work was verified via API calls and scripts, not through an
+actual screen. This is a future item, not part of Phase 2's original scope.
+
+### IN PROGRESS
+
+None — Phase 2 fully closed.
+
+### TODO (carried forward, unchanged)
+
+- Continuous live analytics (unscoped)
+- Superadmin frontend UI (new item, unscoped)
+
+### NEXT
+
+**Phase 3** — background worker org-awareness + subprocess-kill mechanism, so disabling an org
+actually force-kills in-progress processing runs (currently the Popen handle isn't even stored —
+confirmed net-new work).
 
 ---
 

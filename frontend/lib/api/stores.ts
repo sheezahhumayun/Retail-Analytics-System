@@ -18,7 +18,7 @@ async function loadScopeTree(): Promise<Organization> {
     throw new Error("Not authenticated");
   }
 
-  const orgs = await apiRequest<BackendOrganization[]>("/api/organizations");
+  const orgs = await apiRequest<BackendOrganization[]>("/api/organizations/scoped");
   const org = orgs[0];
   if (!org) {
     throw new Error("No organization found for this deployment");

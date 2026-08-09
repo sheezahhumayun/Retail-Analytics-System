@@ -6,9 +6,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from database.models import Camera
+from database.models import Camera, Organization, Store
 
-from ..auth import TokenPayload, require_admin
+from ..auth import ORG_STATUS_DISABLED, TokenPayload, require_admin
 from ..deps import DbSession
 from ..exceptions import ApiError
 from ..schemas.cameras import CameraProcessResponse, CameraResponse
@@ -176,6 +176,11 @@ def process_recorded_video(
             "invalid_camera_source",
             "Processing is only available for recorded-video cameras",
         )
+    store = session.get(Store, camera.store_id)
+    if store is not None:
+        org = session.get(Organization, store.org_id)
+        if org is not None and org.status == ORG_STATUS_DISABLED:
+            raise ApiError(409, "org_disabled", "Organization is disabled")
     if not camera.rtsp_url:
         raise ApiError(400, "missing_video_path", "No video file path configured for this camera")
 

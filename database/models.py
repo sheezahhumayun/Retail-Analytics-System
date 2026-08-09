@@ -15,6 +15,7 @@ class Organization(SQLModel, table=True):
 
     id: str = Field(primary_key=True, max_length=64)
     name: str = Field(max_length=255, nullable=False)
+    status: str = Field(default="active", max_length=32)
 
 
 class Store(SQLModel, table=True):

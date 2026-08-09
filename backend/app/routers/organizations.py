@@ -17,7 +17,7 @@ router = APIRouter(prefix="/organizations", tags=["Organizations"])
 
 
 @router.get(
-    "",
+    "/scoped",
     response_model=list[OrganizationResponse],
     summary="List organizations",
     description="Return organizations visible to the authenticated user with nested store list.",

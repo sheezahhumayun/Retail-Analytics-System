@@ -20,7 +20,13 @@ from database.models import Organization, Store, Superadmin, User
 
 
 
-from ..auth import TokenPayload, normalize_role, require_admin
+from ..auth import (
+    TokenPayload,
+    UserAdminCaller,
+    normalize_role,
+    require_admin,
+    require_user_admin_or_superadmin,
+)
 
 from ..deps import DbSession
 
@@ -118,11 +124,11 @@ def create_user(
 
     session: DbSession,
 
-    admin: Annotated[TokenPayload, Depends(require_admin)],
+    caller: Annotated[UserAdminCaller, Depends(require_user_admin_or_superadmin)],
 
 ) -> UserResponse:
 
-    if body.org_id != admin.org_id:
+    if not caller.is_superadmin and body.org_id != caller.payload.org_id:
         raise ApiError(404, "org_not_found", f"Organization '{body.org_id}' not found")
 
     if session.get(User, body.id) is not None:
@@ -135,7 +141,7 @@ def create_user(
 
     if body.store_id is not None:
 
-        require_store_in_org(session, body.store_id, admin.org_id)
+        require_store_in_org(session, body.store_id, body.org_id)
 
 
 
@@ -205,11 +211,16 @@ def update_user(
 
     session: DbSession,
 
-    admin: Annotated[TokenPayload, Depends(require_admin)],
+    caller: Annotated[UserAdminCaller, Depends(require_user_admin_or_superadmin)],
 
 ) -> UserResponse:
 
-    user = require_user_in_org(session, user_id, admin.org_id)
+    if caller.is_superadmin:
+        user = session.get(User, user_id)
+        if user is None:
+            raise ApiError(404, "user_not_found", f"User '{user_id}' not found")
+    else:
+        user = require_user_in_org(session, user_id, caller.payload.org_id)
 
 
 
@@ -233,7 +244,7 @@ def update_user(
 
     if body.store_id is not None:
 
-        require_store_in_org(session, body.store_id, admin.org_id)
+        require_store_in_org(session, body.store_id, user.org_id)
 
         user.store_id = body.store_id
 
@@ -273,15 +284,20 @@ def delete_user(
 
     session: DbSession,
 
-    admin: Annotated[TokenPayload, Depends(require_admin)],
+    caller: Annotated[UserAdminCaller, Depends(require_user_admin_or_superadmin)],
 
 ) -> None:
 
-    if user_id == admin.sub:
+    if not caller.is_superadmin and user_id == caller.payload.sub:
 
         raise ApiError(400, "cannot_delete_self", "Cannot delete your own user account")
 
-    user = require_user_in_org(session, user_id, admin.org_id)
+    if caller.is_superadmin:
+        user = session.get(User, user_id)
+        if user is None:
+            raise ApiError(404, "user_not_found", f"User '{user_id}' not found")
+    else:
+        user = require_user_in_org(session, user_id, caller.payload.org_id)
 
     session.delete(user)
 
