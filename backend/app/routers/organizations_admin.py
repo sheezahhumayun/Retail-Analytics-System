@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -17,7 +18,10 @@ from ..schemas.extended.organizations_admin import (
     OrganizationCreate,
     OrganizationDeleteConfirm,
 )
+from ..services.camera_process import kill_processing_runs_for_org
 from ..services.org_delete import delete_organization_cascade
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/organizations", tags=["Admin — Organizations"])
 
@@ -93,14 +97,24 @@ def toggle_organization(
     org = session.get(Organization, org_id)
     if org is None:
         raise ApiError(404, "org_not_found", f"Organization '{org_id}' not found")
-    org.status = (
+    new_status = (
         ORG_STATUS_DISABLED
         if org.status == ORG_STATUS_ACTIVE
         else ORG_STATUS_ACTIVE
     )
+    org.status = new_status
     session.add(org)
     session.flush()
     session.refresh(org)
+    if new_status == ORG_STATUS_DISABLED:
+        session.commit()
+        killed = kill_processing_runs_for_org(org_id)
+        if killed:
+            logger.info(
+                "Disabled organization %s; cancelled %d in-flight processing run(s)",
+                org_id,
+                killed,
+            )
     return _to_response(org)
 
 

@@ -108,15 +108,23 @@ def _wait_for_latest_run(camera_id: str, *, timeout_sec: float = 5.0) -> Process
 
 
 def _subprocess_success(*_args, **_kwargs):
-    return type(
-        "Completed",
-        (),
-        {"returncode": 0, "stdout": "ok", "stderr": ""},
-    )()
+    class _MockProc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return ("ok", "")
+
+        def kill(self):
+            pass
+
+        def poll(self):
+            return 0
+
+    return _MockProc()
 
 
 class TestProcessingRuns:
-    @patch("backend.app.services.camera_process.subprocess.run", side_effect=_subprocess_success)
+    @patch("backend.app.services.camera_process.subprocess.Popen", side_effect=_subprocess_success)
     def test_snapshots_match_zones_at_run_start(
         self,
         _mock_run,
@@ -143,7 +151,7 @@ class TestProcessingRuns:
         assert snap["name"] == expected_name
         assert snap["zone_type"] == expected_type
 
-    @patch("backend.app.services.camera_process.subprocess.run", side_effect=_subprocess_success)
+    @patch("backend.app.services.camera_process.subprocess.Popen", side_effect=_subprocess_success)
     def test_deleted_zone_does_not_change_run_snapshot(
         self,
         _mock_run,
@@ -185,12 +193,25 @@ class TestProcessingRuns:
         spawn_count = {"value": 0}
         lock = threading.Lock()
 
-        def counting_run(*_args, **_kwargs):
+        def counting_popen(*_args, **_kwargs):
             with lock:
                 spawn_count["value"] += 1
-            if not release.wait(timeout=5):
-                raise TimeoutError("subprocess mock timed out waiting for release")
-            return _subprocess_success()
+
+            class _MockProc:
+                returncode = 0
+
+                def communicate(self, timeout=None):
+                    if not release.wait(timeout=5):
+                        raise TimeoutError("subprocess mock timed out waiting for release")
+                    return ("ok", "")
+
+                def kill(self):
+                    pass
+
+                def poll(self):
+                    return None
+
+            return _MockProc()
 
         results: list[int] = []
 
@@ -198,7 +219,7 @@ class TestProcessingRuns:
             resp = processing_api_client.post(f"/api/cameras/{camera_id}/process", headers=processing_admin_headers)
             results.append(resp.status_code)
 
-        with patch("backend.app.services.camera_process.subprocess.run", side_effect=counting_run):
+        with patch("backend.app.services.camera_process.subprocess.Popen", side_effect=counting_popen):
             t1 = threading.Thread(target=post_process)
             t2 = threading.Thread(target=post_process)
             t1.start()
@@ -265,7 +286,7 @@ class TestProcessingRuns:
         )
         assert process_resp.status_code == 200, process_resp.text
 
-    @patch("backend.app.services.camera_process.subprocess.run", side_effect=_subprocess_success)
+    @patch("backend.app.services.camera_process.subprocess.Popen", side_effect=_subprocess_success)
     def test_video_range_request_returns_206(
         self,
         _mock_run,
@@ -317,7 +338,7 @@ class TestProcessingRuns:
         assert resp.json()["error"]["code"] == "source_video_unavailable"
         assert "no longer available" in resp.json()["error"]["message"].lower()
 
-    @patch("backend.app.services.camera_process.subprocess.run", side_effect=_subprocess_success)
+    @patch("backend.app.services.camera_process.subprocess.Popen", side_effect=_subprocess_success)
     def test_list_and_detail_endpoints(
         self,
         _mock_run,

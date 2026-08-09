@@ -1,7 +1,84 @@
 # Retail Analytics CV Platform — Project Status
 
-**Last updated:** 2026-08-09 (Phase 2 multi-tenancy — organization status + CRUD + cascade delete — DONE; Phase 1 superadmins table + unified login — DONE; Phase 0 organization-scoping enforcement — DONE; user disable — DONE; reference-frame snapshots — shipped; batch-test flakiness deferred)
+**Last updated:** 2026-08-09 (Phase 3 multi-tenancy — background worker org-awareness + subprocess kill on org disable — DONE; Phase 2 organization status + CRUD + cascade delete — DONE; Phase 1 superadmins table + unified login — DONE; Phase 0 organization-scoping enforcement — DONE; user disable — DONE; reference-frame snapshots — shipped; batch-test flakiness deferred)
 **Reference roadmap:** Retail_Analytics_Build_Roadmap.md
+
+---
+
+## 2026-08-09 — Phase 3: Multi-tenancy — background worker org-awareness + subprocess kill on org disable — DONE
+
+Final phase of the multi-tenancy project. Disabling an organization now force-kills in-flight
+recorded-video processing runs (not just blocks future logins and new run starts). Process handles
+are tracked in-process so the kill path can terminate OS subprocesses and finalize DB rows.
+
+### DONE
+
+- **Recorded-video processing** (`backend/app/services/camera_process.py`) switched from
+  `subprocess.run` to `subprocess.Popen`; the handle is now tracked in a new `_processing_procs`
+  registry keyed by `camera_id`, guarded by the existing `_workers_lock`
+- **New `kill_processing_runs_for_org(org_id)`** — finds in-flight processes belonging to a
+  disabled org's cameras, terminates (then force-kills if needed) each one **outside** the lock,
+  and marks the corresponding running `ProcessingRun` rows failed with message
+  `"Cancelled: organization disabled"`
+- **Wired into the org toggle endpoint** (`backend/app/routers/organizations_admin.py`) —
+  disabling an org now actually kills its in-progress processing runs, not just blocks future
+  logins/starts
+- **`_finish_run` guarded against a race** between a naturally-completing worker thread and the
+  kill path (checks `run.status != "running"` before writing — whichever writer legitimately wins
+  based on real DB state, no lost updates)
+- **Found and fixed a real Windows-specific bug during review:** `Popen.terminate()` / `.kill()`
+  do **not** raise `ProcessLookupError` on Windows when the target has already exited (confirmed
+  via real traceback — it's a silent no-op or, in a race, `PermissionError`); widened the catch
+  to `OSError`
+- **Per-target error isolation** in the kill loop so one failed termination doesn't abort killing
+  the rest of an org's in-flight runs
+- **Manually verified end-to-end** with a real subprocess: real PID captured, org toggled to
+  disabled, DB row transitioned `running` → `failed` with the correct message, and `tasklist`
+  confirmed the OS process was actually gone (`tests/scripts/verify_phase3_kill_processing.py`)
+- **Full test suite:** no new failures (backend 122 passed / 3 pre-existing failures, inference
+  211 passed / 1 pre-existing failure); `test_processing_runs.py` **7/7** passing with updated
+  `Popen` mocks
+
+### DOCUMENTATION CORRECTION
+
+An earlier claim that `tests/scripts/run-events-demo.py` and the backend's recorded-video
+processing share the same underlying execution path was found to be **inaccurate** during Phase
+3 investigation — they share core analytics classes (`EventBus`, `AnalyticsEngine`,
+`AnalyticsDbWriter`, detector/tracker) only when the demo is run with `--persist-db`, but have
+genuinely different entry points: the backend's `inference/pipeline/process_recorded.py` always
+reads geometry/thresholds from Postgres and always persists, while the demo reads from JSON
+config and persists only when flagged.
+
+### MULTI-TENANCY PROJECT: COMPLETE
+
+All four phases done and verified:
+
+- **Phase 0:** org-scoping enforcement
+- **Phase 1:** superadmin auth
+- **Phase 2:** organization CRUD
+- **Phase 3:** background worker org-awareness
+
+### NOTED FOR FUTURE WORK (explicitly deferred, not started)
+
+**Unified pipeline entry point** — runs whichever analytics modules an admin has selected per
+camera, working identically whether the camera is recorded or live — to be revisited once
+continuous live analytics scoping begins. The relationship between `run-events-demo.py` (used
+for early manual CV testing) and the backend's current `process_recorded.py` was clarified
+during Phase 3 (see documentation correction above) but no consolidation work has been done.
+
+### IN PROGRESS
+
+None — multi-tenancy project fully closed.
+
+### TODO (carried forward, unchanged)
+
+- Continuous live analytics (unscoped — needs its own dedicated scoping conversation before any
+  implementation)
+- Superadmin frontend UI (unscoped)
+
+### NEXT
+
+Continuous live analytics scoping (unscoped — separate conversation before implementation).
 
 ---
 

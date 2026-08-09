@@ -19,11 +19,14 @@ from sqlmodel import Session, select
 from database.models import Camera, CountingLine, ProcessingRun, Zone
 from database.session import session_scope
 
+from .org_scope import cameras_for_org_stmt
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 logger = logging.getLogger(__name__)
 
 _processing_workers: dict[str, threading.Thread] = {}
+_processing_procs: dict[str, subprocess.Popen[str]] = {}
 _workers_lock = threading.Lock()
 
 
@@ -39,6 +42,7 @@ class ProcessingRunActiveError(Exception):
 
 
 RESTART_INTERRUPT_MESSAGE = "interrupted by server restart"
+ORG_DISABLE_CANCEL_MESSAGE = "Cancelled: organization disabled"
 
 
 @dataclass
@@ -167,6 +171,8 @@ def _finish_run(
             run = session.get(ProcessingRun, run_id)
             if run is None:
                 return
+            if run.status != "running":
+                return
             run.status = status
             run.finished_at = finished_at
             run.message = message
@@ -182,6 +188,7 @@ def _unregister_worker(camera_id: str, thread: threading.Thread) -> None:
         current = _processing_workers.get(camera_id)
         if current is thread:
             _processing_workers.pop(camera_id, None)
+            _processing_procs.pop(camera_id, None)
 
 
 def join_processing_worker(camera_id: str, *, timeout: float | None = None) -> None:
@@ -209,13 +216,85 @@ def _parse_subprocess_result(stdout: str) -> str | None:
     return None
 
 
+def _terminate_proc(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            return
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def kill_processing_runs_for_org(org_id: str) -> int:
+    """Terminate in-flight recorded-video workers for ``org_id`` and mark runs failed."""
+    with session_scope() as session:
+        org_camera_ids = {
+            camera.id for camera in session.exec(cameras_for_org_stmt(org_id)).all()
+        }
+
+    with _workers_lock:
+        targets = [
+            (camera_id, proc)
+            for camera_id, proc in list(_processing_procs.items())
+            if camera_id in org_camera_ids
+        ]
+
+    if not targets:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    killed = 0
+    with session_scope() as session:
+        for camera_id, proc in targets:
+            try:
+                _terminate_proc(proc)
+                run = session.exec(
+                    select(ProcessingRun).where(
+                        ProcessingRun.camera_id == camera_id,
+                        ProcessingRun.status == "running",
+                    )
+                ).first()
+                if run is not None:
+                    run.status = "failed"
+                    run.finished_at = now
+                    run.message = ORG_DISABLE_CANCEL_MESSAGE
+                    session.add(run)
+                    killed += 1
+            except Exception:
+                logger.exception(
+                    "Failed to cancel processing run for camera %s in org %s",
+                    camera_id,
+                    org_id,
+                )
+
+    if killed:
+        logger.info(
+            "Cancelled %d processing run(s) for disabled organization %s",
+            killed,
+            org_id,
+        )
+    return killed
+
+
 def _run_subprocess(run_id: str, camera_id: str) -> None:
     python = _inference_python()
     status = "failed"
     message = "Processing failed"
     preview_frame_path: str | None = None
+    proc: subprocess.Popen[str] | None = None
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             [
                 str(python),
                 "-m",
@@ -226,20 +305,26 @@ def _run_subprocess(run_id: str, camera_id: str) -> None:
                 run_id,
             ],
             cwd=str(REPO_ROOT),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=3600,
-            check=False,
         )
-        if completed.returncode != 0:
-            stderr = (completed.stderr or completed.stdout or "Processing failed").strip()
-            message = stderr[-2000:]
+        with _workers_lock:
+            _processing_procs[camera_id] = proc
+        try:
+            stdout, stderr = proc.communicate(timeout=3600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            message = "Processing timed out after 1 hour"
         else:
-            status = "completed"
-            message = "Video processed successfully"
-            preview_frame_path = _parse_subprocess_result(completed.stdout or "")
-    except subprocess.TimeoutExpired:
-        message = "Processing timed out after 1 hour"
+            if proc.returncode != 0:
+                stderr_text = (stderr or stdout or "Processing failed").strip()
+                message = stderr_text[-2000:]
+            else:
+                status = "completed"
+                message = "Video processed successfully"
+                preview_frame_path = _parse_subprocess_result(stdout or "")
     except Exception as exc:
         message = str(exc)
     finally:
