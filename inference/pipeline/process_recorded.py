@@ -157,99 +157,102 @@ def process_recorded_camera(
             store_id=store_id,
             camera_store_map={camera_id: store_id},
             zones=pipeline_zones,
-            enabled_modules=enabled,
+            camera_modules={camera_id: enabled},
         )
     )
     db_writer.subscribe(bus)
 
-    engine = AnalyticsEngine(
-        bus,
-        AnalyticsEngineConfig(
-            camera_ids=[camera_id],
-            zones=pipeline_zones,
-            store_id=store_id,
-            db_writer=db_writer,
-            enabled_modules=enabled,
-            dwell_thresholds=dwell_thresholds,
-            queue_length_thresholds=queue_length_thresholds,
-            queue_duration_thresholds=queue_duration_thresholds,
-        ),
-    )
-
-    counter = None
-    if counting_line is not None and needs_counting:
-        counter = LineCounter(counting_line, event_bus=bus)
-
-    zone_detector = ZoneDetector(pipeline_zones) if needs_zone_detector else None
-    tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
-
-    heatmap_engine: HeatmapEngine | None = None
-    heatmap_store: HeatmapStore | None = None
-    if needs_heatmap:
-        heatmap_store = HeatmapStore(str(REPO_ROOT / "data" / "heatmaps"), timezone="UTC")
-
-    frames_processed = 0
-    events_published = 0
-    preview_frame_path: str | None = None
-
-    with create_detector(backend=backend) as detector:
-        src = warmup_source(
-            str(video_path),
-            target_fps=target_fps,
-            detector=detector,
-            camera_id=camera_id,
+    try:
+        engine = AnalyticsEngine(
+            bus,
+            AnalyticsEngineConfig(
+                camera_ids=[camera_id],
+                zones=pipeline_zones,
+                store_id=store_id,
+                db_writer=db_writer,
+                enabled_modules=enabled,
+                dwell_thresholds=dwell_thresholds,
+                queue_length_thresholds=queue_length_thresholds,
+                queue_duration_thresholds=queue_duration_thresholds,
+            ),
         )
-        try:
-            for frame, ts in iter_frames(src, duration=None, preview=False):
-                if preview_frame_path is None and run_id is not None:
-                    preview_frame_path = _save_preview_frame(camera_id, run_id, frame)
 
-                if heatmap_engine is None and heatmap_store is not None:
-                    h, w = frame.shape[:2]
-                    heatmap_engine = HeatmapEngine(
-                        camera_id,
-                        w,
-                        h,
-                        grid_scale=4,
-                        store=heatmap_store,
-                        timezone="UTC",
-                    )
-                    heatmap_engine.set_reference_frame(frame)
+        counter = None
+        if counting_line is not None and needs_counting:
+            counter = LineCounter(counting_line, event_bus=bus)
 
-                dets = detector.detect(frame, camera_id=camera_id, timestamp=ts)
-                tracks = tracker.update(dets)
-                if counter is not None:
-                    counter.update(tracks)
-                if zone_detector is not None:
-                    for ze in zone_detector.update(tracks):
-                        engine.process_zone_event(ze)
+        zone_detector = ZoneDetector(pipeline_zones) if needs_zone_detector else None
+        tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
+
+        heatmap_engine: HeatmapEngine | None = None
+        heatmap_store: HeatmapStore | None = None
+        if needs_heatmap:
+            heatmap_store = HeatmapStore(str(REPO_ROOT / "data" / "heatmaps"), timezone="UTC")
+
+        frames_processed = 0
+        events_published = 0
+        preview_frame_path: str | None = None
+
+        with create_detector(backend=backend) as detector:
+            src = warmup_source(
+                str(video_path),
+                target_fps=target_fps,
+                detector=detector,
+                camera_id=camera_id,
+            )
+            try:
+                for frame, ts in iter_frames(src, duration=None, preview=False):
+                    if preview_frame_path is None and run_id is not None:
+                        preview_frame_path = _save_preview_frame(camera_id, run_id, frame)
+
+                    if heatmap_engine is None and heatmap_store is not None:
+                        h, w = frame.shape[:2]
+                        heatmap_engine = HeatmapEngine(
+                            camera_id,
+                            w,
+                            h,
+                            grid_scale=4,
+                            store=heatmap_store,
+                            timezone="UTC",
+                        )
+                        heatmap_engine.set_reference_frame(frame)
+
+                    dets = detector.detect(frame, camera_id=camera_id, timestamp=ts)
+                    tracks = tracker.update(dets)
+                    if counter is not None:
+                        counter.update(tracks)
+                    if zone_detector is not None:
+                        for ze in zone_detector.update(tracks):
+                            engine.process_zone_event(ze)
+                    if heatmap_engine is not None:
+                        heatmap_engine.update(tracks, ts)
+                    engine.close_stale_dwell_sessions(ts)
+                    frames_processed += 1
+            finally:
                 if heatmap_engine is not None:
-                    heatmap_engine.update(tracks, ts)
-                engine.close_stale_dwell_sessions(ts)
-                frames_processed += 1
-        finally:
-            if heatmap_engine is not None:
-                heatmap_engine.flush()
-            src.release()
+                    heatmap_engine.flush()
+                src.release()
 
-    events_published = len(bus.event_log)
-    processed_at = datetime.now(timezone.utc)
+        events_published = len(bus.event_log)
+        processed_at = datetime.now(timezone.utc)
 
-    with session_scope() as session:
-        camera = session.get(Camera, camera_id)
-        if camera is not None:
-            camera.last_processed_at = processed_at
-            session.add(camera)
-            session.commit()
+        with session_scope() as session:
+            camera = session.get(Camera, camera_id)
+            if camera is not None:
+                camera.last_processed_at = processed_at
+                session.add(camera)
+                session.commit()
 
-    return {
-        "camera_id": camera_id,
-        "status": "completed",
-        "frames_processed": frames_processed,
-        "events_published": events_published,
-        "processed_at": processed_at.isoformat(),
-        "preview_frame_path": preview_frame_path,
-    }
+        return {
+            "camera_id": camera_id,
+            "status": "completed",
+            "frames_processed": frames_processed,
+            "events_published": events_published,
+            "processed_at": processed_at.isoformat(),
+            "preview_frame_path": preview_frame_path,
+        }
+    finally:
+        db_writer.close()
 
 
 def main() -> int:

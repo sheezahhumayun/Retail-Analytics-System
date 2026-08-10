@@ -423,8 +423,8 @@ export default function SuperadminOrganizationDetailPage() {
               </div>
             </section>
 
-            <section className="space-y-4">
-              <div className="flex items-center justify-between">
+            <section className="bg-card border border-border rounded-lg">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-border">
                 <div>
                   <h2 className="text-xl font-semibold text-foreground">Users</h2>
                   <p className="text-muted-foreground mt-1 text-sm">
@@ -441,7 +441,7 @@ export default function SuperadminOrganizationDetailPage() {
                 </button>
               </div>
 
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-3 gap-4 flex items-center justify-between px-4 py-3 border-b border-border">
                 <div className="bg-card border border-border rounded-lg p-4">
                   <p className="text-sm text-muted-foreground">Total Users</p>
                   <p className="text-2xl font-bold text-foreground">{users.length}</p>

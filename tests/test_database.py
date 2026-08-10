@@ -15,6 +15,7 @@ from analytics.events.adapters import crossing_to_analytics
 from analytics.zones.types import Zone, ZoneEvent, ZoneEventType, ZoneType
 from database.cleanup import prune_raw_events
 from database.models import (
+    Camera,
     DwellEventRow,
     Event,
     OccupancyMetric,
@@ -26,6 +27,7 @@ from database.models import (
 )
 from database.seed import ORG_ID, STORE_ID, seed_reference_data
 from database.session import create_all, reset_engine, session_scope
+from analytics.modules import MODULE_ENTRY_EXIT, MODULE_OCCUPANCY
 from database.writer import AnalyticsDbWriter, DbWriterConfig, visitors_by_hour_yesterday
 
 pytestmark = pytest.mark.database
@@ -96,13 +98,15 @@ def db_ready():
 @pytest.fixture
 def writer(db_ready) -> AnalyticsDbWriter:
     _ensure_test_zone()
-    return AnalyticsDbWriter(
+    w = AnalyticsDbWriter(
         DbWriterConfig(
             store_id=STORE_ID,
             camera_store_map={TEST_CAMERA_ID: STORE_ID, "town": STORE_ID},
             zones=[GENERAL_ZONE],
         )
     )
+    yield w
+    w.close()
 
 
 class TestAnalyticsDbWriter:
@@ -319,8 +323,105 @@ class TestAnalyticsDbWriter:
                 zones=[GENERAL_ZONE],
             )
         )
-        assert reloaded._camera_occupancy[TEST_CAMERA_ID] == 7
-        assert reloaded._store_occupancy == 7
+        try:
+            assert reloaded._camera_occupancy[TEST_CAMERA_ID] == 7
+            assert reloaded._store_occupancy == 7
+        finally:
+            reloaded.close()
+
+    def test_shared_writer_per_camera_module_gating(self, db_ready):
+        camera_a = "live_gating_a"
+        camera_b = "live_gating_b"
+        base = TEST_METRIC_TS.timestamp()
+
+        shared = AnalyticsDbWriter(
+            DbWriterConfig(
+                store_id=STORE_ID,
+                camera_store_map={},
+                camera_modules={},
+            )
+        )
+        try:
+            with session_scope() as session:
+                for cam_id in (camera_a, camera_b):
+                    session.merge(
+                        Camera(
+                            id=cam_id,
+                            store_id=STORE_ID,
+                            name=cam_id,
+                            source_type="live",
+                            rtsp_url="sample-data/entrance.mp4",
+                            status="online",
+                        )
+                    )
+
+            shared.add_camera(
+                camera_a,
+                STORE_ID,
+                frozenset({MODULE_ENTRY_EXIT, MODULE_OCCUPANCY}),
+            )
+            shared.add_camera(camera_b, STORE_ID, frozenset())
+
+            bus = EventBus()
+            shared.subscribe(bus)
+
+            with session_scope() as session:
+                vm_before = session.exec(
+                    select(VisitorMetric).where(
+                        VisitorMetric.store_id == STORE_ID,
+                        VisitorMetric.metric_date == TEST_METRIC_TS.date(),
+                        VisitorMetric.hour == TEST_METRIC_TS.hour,
+                    )
+                ).first()
+                entries_before = vm_before.entries if vm_before else 0
+
+            bus.publish(
+                crossing_to_analytics(
+                    CrossingEvent(
+                        camera_id=camera_a,
+                        track_id=88101,
+                        event_type=EventType.ENTRY,
+                        timestamp=base,
+                        line_name="door",
+                    )
+                )
+            )
+            bus.publish(
+                crossing_to_analytics(
+                    CrossingEvent(
+                        camera_id=camera_b,
+                        track_id=88102,
+                        event_type=EventType.ENTRY,
+                        timestamp=base + 1,
+                        line_name="door",
+                    )
+                )
+            )
+
+            with session_scope() as session:
+                vm_after = session.exec(
+                    select(VisitorMetric).where(
+                        VisitorMetric.store_id == STORE_ID,
+                        VisitorMetric.metric_date == TEST_METRIC_TS.date(),
+                        VisitorMetric.hour == TEST_METRIC_TS.hour,
+                    )
+                ).one()
+                assert vm_after.entries - entries_before == 1
+
+                events_a = session.exec(
+                    select(func.count())
+                    .select_from(Event)
+                    .where(Event.camera_id == camera_a, Event.event_type == "ENTRY")
+                ).one()
+                events_b = session.exec(
+                    select(func.count())
+                    .select_from(Event)
+                    .where(Event.camera_id == camera_b, Event.event_type == "ENTRY")
+                ).one()
+                assert events_a >= 1
+                assert events_b >= 1
+        finally:
+            shared.close()
 
 
 class TestRetention:

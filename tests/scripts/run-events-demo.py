@@ -124,133 +124,140 @@ def main() -> int:
         from database import AnalyticsDbWriter, DbWriterConfig, seed_reference_data
 
         seed_reference_data()
+        from analytics.modules import ALL_ANALYTICS_MODULES
+
         db_writer = AnalyticsDbWriter(
             DbWriterConfig(
                 store_id=args.store_id,
                 camera_store_map={camera_id: args.store_id},
                 zones=zones,
+                camera_modules={camera_id: frozenset(ALL_ANALYTICS_MODULES)},
             )
         )
         db_writer.subscribe(bus)
         print(f"Database persistence enabled (store_id={args.store_id})")
 
-    engine = AnalyticsEngine(
-        bus,
-        AnalyticsEngineConfig(
-            camera_ids=[camera_id],
-            zones=zones,
-            store_id=args.store_id if args.persist_db else None,
-            dwell_thresholds=dwell_thresholds,
-            queue_length_thresholds=queue_length_thresholds,
-            queue_duration_thresholds=queue_duration_thresholds,
-            db_writer=db_writer,
-        ),
-    )
-
-    counter = None
-    if args.line_config or DEFAULT_LINE_PATH.is_file():
-        line_path = Path(args.line_config) if args.line_config else DEFAULT_LINE_PATH
-        line = CountingLine.load_json(line_path)
-        if line.camera_id != camera_id:
-            line = CountingLine.from_dict({**line.to_dict(), "camera_id": camera_id})
-        counter = LineCounter(line, event_bus=bus)
-        print(f"Counting line: {line_path}")
-
-    zone_detector = ZoneDetector(zones) if zones else None
-    tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
-    sampler = PersonDetectionSampler(
-        bus,
-        camera_id,
-        sample_interval_seconds=args.detection_sample_seconds,
-    )
-
-    last_ts = 0.0
-    with create_detector(backend=args.backend) as detector:
-        src_kwargs: dict = {}
-        if is_live_source_spec(args.source):
-            src_kwargs["event_bus"] = bus
-        src = warmup_source(
-            args.source,
-            target_fps=args.target_fps,
-            detector=detector,
-            camera_id=camera_id,
-            **src_kwargs,
+    try:
+        engine = AnalyticsEngine(
+            bus,
+            AnalyticsEngineConfig(
+                camera_ids=[camera_id],
+                zones=zones,
+                store_id=args.store_id if args.persist_db else None,
+                dwell_thresholds=dwell_thresholds,
+                queue_length_thresholds=queue_length_thresholds,
+                queue_duration_thresholds=queue_duration_thresholds,
+                db_writer=db_writer,
+            ),
         )
 
-        for frame, ts in iter_frames(
-            src,
-            duration=duration,
-            preview=args.preview,
-            preview_window="events",
-        ):
-            last_ts = ts
-            dets = detector.detect(frame, camera_id=camera_id, timestamp=ts)
-            sampler.maybe_publish(dets)
-            tracks = tracker.update(dets)
-            if counter is not None:
-                counter.update(tracks)
-            if zone_detector is not None:
-                for ze in zone_detector.update(tracks):
-                    engine.process_zone_event(ze)
-            engine.close_stale_dwell_sessions(ts)
+        counter = None
+        if args.line_config or DEFAULT_LINE_PATH.is_file():
+            line_path = Path(args.line_config) if args.line_config else DEFAULT_LINE_PATH
+            line = CountingLine.load_json(line_path)
+            if line.camera_id != camera_id:
+                line = CountingLine.from_dict({**line.to_dict(), "camera_id": camera_id})
+            counter = LineCounter(line, event_bus=bus)
+            print(f"Counting line: {line_path}")
 
-        print_processing_stats(src, target_fps=args.target_fps, last_ts=last_ts)
-        src.release()
+        zone_detector = ZoneDetector(zones) if zones else None
+        tracker = Tracker(camera_id=camera_id, min_confirmation_frames=2)
+        sampler = PersonDetectionSampler(
+            bus,
+            camera_id,
+            sample_interval_seconds=args.detection_sample_seconds,
+        )
 
-    counts = Counter(e.event_type for e in bus.event_log)
-    print(f"\n{camera_id}: {len(bus.event_log)} bus event(s)")
-    for etype, count in sorted(counts.items()):
-        print(f"  {etype}: {count}")
+        last_ts = 0.0
+        with create_detector(backend=args.backend) as detector:
+            src_kwargs: dict = {}
+            if is_live_source_spec(args.source):
+                src_kwargs["event_bus"] = bus
+            src = warmup_source(
+                args.source,
+                target_fps=args.target_fps,
+                detector=detector,
+                camera_id=camera_id,
+                **src_kwargs,
+            )
 
-    occ = engine.camera_occupancy(camera_id)
-    if occ is not None:
-        print("\nOccupancy (from bus):", json.dumps(occ.to_dict(), indent=2))
+            for frame, ts in iter_frames(
+                src,
+                duration=duration,
+                preview=args.preview,
+                preview_window="events",
+            ):
+                last_ts = ts
+                dets = detector.detect(frame, camera_id=camera_id, timestamp=ts)
+                sampler.maybe_publish(dets)
+                tracks = tracker.update(dets)
+                if counter is not None:
+                    counter.update(tracks)
+                if zone_detector is not None:
+                    for ze in zone_detector.update(tracks):
+                        engine.process_zone_event(ze)
+                engine.close_stale_dwell_sessions(ts)
 
-    if zones:
-        print("\nZone snapshots:")
-        for zid, snap in engine.zone_snapshots().items():
-            print(f"  {zid}:", json.dumps(snap.to_dict()))
+            print_processing_stats(src, target_fps=args.target_fps, last_ts=last_ts)
+            src.release()
 
-        print("\nDwell snapshots:")
-        for zid, snap in engine.dwell_snapshots().items():
-            print(f"  {zid}:", json.dumps(snap.to_dict()))
+        counts = Counter(e.event_type for e in bus.event_log)
+        print(f"\n{camera_id}: {len(bus.event_log)} bus event(s)")
+        for etype, count in sorted(counts.items()):
+            print(f"  {etype}: {count}")
 
-        print("\nQueue snapshots:")
-        for zid, snap in engine.queue_snapshots().items():
-            print(f"  {zid}:", json.dumps(snap.to_dict()))
+        occ = engine.camera_occupancy(camera_id)
+        if occ is not None:
+            print("\nOccupancy (from bus):", json.dumps(occ.to_dict(), indent=2))
 
-    if args.persist_db and db_writer is not None:
-        from database import session_scope, visitors_by_hour_yesterday
-        from database.writer import event_count
-        from sqlalchemy import func
-        from sqlmodel import select
-        from database.models import DwellEventRow, Event, OccupancyMetric, ZoneMetric
+        if zones:
+            print("\nZone snapshots:")
+            for zid, snap in engine.zone_snapshots().items():
+                print(f"  {zid}:", json.dumps(snap.to_dict()))
 
-        with session_scope() as session:
-            print("\nDatabase row counts:")
-            for label, model in [
-                ("events", Event),
-                ("dwell_events", DwellEventRow),
-                ("zone_metrics", ZoneMetric),
-                ("occupancy_metrics", OccupancyMetric),
-            ]:
-                count = session.exec(select(func.count()).select_from(model)).one()
-                print(f"  {label}: {count}")
-            print(f"  total bus events persisted: {event_count(session)}")
-            yesterday = visitors_by_hour_yesterday(session, args.store_id)
-            print(f"\nVisitors by hour yesterday ({args.store_id}):")
-            for row in yesterday:
-                print(f"  hour {row['hour']:02d}: {row['entries']} entries")
+            print("\nDwell snapshots:")
+            for zid, snap in engine.dwell_snapshots().items():
+                print(f"  {zid}:", json.dumps(snap.to_dict()))
 
-    if args.log_events:
-        print("\nEvent log:")
-        for ev in bus.event_log:
-            print(json.dumps(ev.to_log_dict()))
+            print("\nQueue snapshots:")
+            for zid, snap in engine.queue_snapshots().items():
+                print(f"  {zid}:", json.dumps(snap.to_dict()))
 
-    if isinstance(src, RTSPVideoSource) and counts.get("CAMERA_OFFLINE"):
-        print("\nCAMERA_OFFLINE observed (stream reconnect exhausted).")
+        if args.persist_db and db_writer is not None:
+            from database import session_scope, visitors_by_hour_yesterday
+            from database.writer import event_count
+            from sqlalchemy import func
+            from sqlmodel import select
+            from database.models import DwellEventRow, Event, OccupancyMetric, ZoneMetric
 
-    return 0
+            with session_scope() as session:
+                print("\nDatabase row counts:")
+                for label, model in [
+                    ("events", Event),
+                    ("dwell_events", DwellEventRow),
+                    ("zone_metrics", ZoneMetric),
+                    ("occupancy_metrics", OccupancyMetric),
+                ]:
+                    count = session.exec(select(func.count()).select_from(model)).one()
+                    print(f"  {label}: {count}")
+                print(f"  total bus events persisted: {event_count(session)}")
+                yesterday = visitors_by_hour_yesterday(session, args.store_id)
+                print(f"\nVisitors by hour yesterday ({args.store_id}):")
+                for row in yesterday:
+                    print(f"  hour {row['hour']:02d}: {row['entries']} entries")
+
+        if args.log_events:
+            print("\nEvent log:")
+            for ev in bus.event_log:
+                print(json.dumps(ev.to_log_dict()))
+
+        if isinstance(src, RTSPVideoSource) and counts.get("CAMERA_OFFLINE"):
+            print("\nCAMERA_OFFLINE observed (stream reconnect exhausted).")
+
+        return 0
+    finally:
+        if db_writer is not None:
+            db_writer.close()
 
 
 if __name__ == "__main__":

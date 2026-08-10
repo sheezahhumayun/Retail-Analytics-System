@@ -157,10 +157,16 @@ def log_database_pool_settings() -> None:
         MAX_OVERFLOW,
     )
     _start_camera_health_worker(settings.camera_health_interval_seconds)
+    from .services.live_analytics_worker import _start_live_analytics_worker
+
+    _start_live_analytics_worker(settings.live_analytics_reconcile_interval_seconds)
 
 
 @app.on_event("shutdown")
-def shutdown_camera_health_worker() -> None:
+def shutdown_background_workers() -> None:
+    from .services.live_analytics_worker import _stop_live_analytics_worker
+
+    _stop_live_analytics_worker()
     _stop_camera_health_worker()
 
 

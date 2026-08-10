@@ -148,11 +148,20 @@ def toggle_organization(
     if new_status == ORG_STATUS_DISABLED:
         session.commit()
         killed = kill_processing_runs_for_org(org_id)
+        from ..services.live_analytics_worker import stop_live_workers_for_org
+
+        stopped_live = stop_live_workers_for_org(org_id)
         if killed:
             logger.info(
                 "Disabled organization %s; cancelled %d in-flight processing run(s)",
                 org_id,
                 killed,
+            )
+        if stopped_live:
+            logger.info(
+                "Disabled organization %s; stopped %d live analytics camera(s)",
+                org_id,
+                stopped_live,
             )
     return _to_response(org)
 

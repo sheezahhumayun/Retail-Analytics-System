@@ -3623,3 +3623,82 @@ management — all built and verified, both API and UI.
 
 - **TODO (heatmap storage):** local-disk NPZ under `data/heatmaps/` will not survive multi-instance / containerized deployment — move heatmap hour buckets to object storage or DB-stored blobs before any multi-replica rollout.
 - **Deferred:** MediaMTX relay + WebRTC live playback — considered during Live Cameras streaming work (2026-08-05). Would fix the one-RTSP-connection-per-viewer limitation from Phase 1a and enable proper WebRTC playback instead of MJPEG, and would let a future live-inference worker (Track 3, not yet built) share one camera pull instead of opening its own connection. Decision: defer to Module 17 (Dockerization & Deployment), since it's a new always-running service and belongs with that infra work, not bolted onto the display feature. Not started.
+
+---
+
+## 2026-08-10 — AnalyticsDbWriter per-event DB session bug — DONE
+
+### DONE — AnalyticsDbWriter per-event DB session bug fixed (was highest-priority deferred TODO)
+
+- **`AnalyticsDbWriter` now holds one `Session` for its instance lifetime** (opened in
+  `__init__`, before `_reload_occupancy_from_db`), instead of opening a fresh `session_scope()`
+  in every `on_event` / `on_dwell_event` / `on_queue_sample` / `on_zone_event` call
+- **New `close()` method** releases the held connection at run end; wired into `try`/`finally`
+  around the pipeline in `inference/pipeline/process_recorded.py` and
+  `tests/scripts/run-events-demo.py` (`--persist-db`), so it releases even on a mid-run crash,
+  not just the happy path
+- **Found and fixed a second, nested connection leak during investigation:**
+  `get_occupancy_severity` → `_load_occupancy_rule` opened its own `session_scope()` on every
+  `OCCUPANCY_THRESHOLD` event, nested inside `on_event`'s transaction — now accepts an
+  optional `session` and reuses the writer's
+- **Verified against the real failure pattern, not just a synthetic test:** 3 sequential
+  recorded-video runs via the actual backend subprocess launch path (`python -m
+  inference.pipeline.process_recorded`) — peak connections flat at **6** (baseline 4 + 2), clean
+  return to **4** after each run, all 3 succeeded with no exhaustion. Documented pre-fix behavior
+  was a monotonic climb to **~86 connections in ~64s**, requiring a Postgres restart
+- **`tests/test_database.py`:** **8/8 passing** with updated fixture teardown (`writer.close()`);
+  no assertions weakened
+
+### TODO (carried forward, remaining)
+
+- Continuous live analytics (unscoped)
+- Pipeline-file reconciliation (deferred until live analytics scoping begins)
+
+---
+
+## 2026-08-10 — Continuous live analytics — DONE
+
+### DONE — Continuous live analytics (was the last unscoped priority-queue item)
+
+- **Architecture:** one shared `AnalyticsDbWriter` (extended with
+  `camera_modules: dict[camera_id, frozenset]` for per-camera module gating,
+  `add_camera`/`remove_camera` for dynamic registration) and one shared detector instance
+  across all live cameras; per-camera lightweight I/O thread (`RTSPVideoSource`,
+  latest-frame-overwrite, no backlog) feeding one shared processing thread that round-robins
+  detect→track→analytics per camera
+- **Automatic lifecycle:** periodic reconciliation (`live_analytics_reconcile_interval_seconds`,
+  default 30s) queries eligible cameras (`source_type=live`, not disabled, org active) and
+  diffs against the running registry — no camera-CRUD hooks needed, same pattern as the
+  existing camera-health worker
+- **Immediate stop wired into org-disable** (`stop_live_workers_for_org`), alongside the
+  existing recorded-run kill from Phase 3
+- **Target scale:** ~10 concurrent live cameras per org
+- **Manually verified with real evidence:** two concurrently-running live cameras with
+  different `analytics_modules` produced correctly different event sets (proves per-camera
+  gating on the shared writer actually works); org-disable confirmed to actually stop I/O
+  threads and release video sources (thread joins + release logs, not just registry state); a
+  Postgres connection-exhaustion incident during testing was fully root-caused rather than
+  worked around — 150 leftover seed/test live cameras being reconciled simultaneously, plus
+  two real bugs found and fixed: a nested `session_scope()` amplification in reconcile (3× per
+  camera on top of an already-open session) and a double-start race condition (fixed with a
+  reconcile lock)
+- **`test_store_level_excludes_queue_zones` confirmed pre-existing/environmental** via
+  git-stash before/after (same failure with and without the writer changes) — newly surfaced
+  during this work, not previously documented; add to the known-flaky list (dev-DB-state-dependent,
+  distinct mechanism from the connection-pool-exhaustion flakiness already documented)
+
+### NOT DONE (explicitly deferred, per earlier decision)
+
+- **Pipeline-file consolidation** (single file for recorded + live processing) — kept as two
+  separate files for now, revisit as its own future cleanup item
+
+### TODO (carried forward)
+
+- Stale README admin password docs
+- Two pre-existing frontend type errors
+- General test-suite batch flakiness (now including the newly-documented
+  `test_store_level_excludes_queue_zones`)
+- Pipeline-file consolidation (unscoped)
+- Superadmin frontend for org admin/user management is done — org-level services UI could later
+  grow beyond the single Retail Analytics toggle if more services are added
+

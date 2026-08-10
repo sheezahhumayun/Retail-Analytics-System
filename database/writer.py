@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone as dt_timezone
 from typing import Any
@@ -35,7 +36,7 @@ from .models import (
     VisitorMetric,
     ZoneMetric,
 )
-from .session import session_scope
+from .session import get_engine, session_scope
 
 
 def _utc_from_datetime(value: datetime) -> datetime:
@@ -59,8 +60,9 @@ class DbWriterConfig:
     timezone: str = "UTC"
     persist_person_detected: bool = False
     enabled_modules: frozenset[str] = field(
-        default_factory=lambda: frozenset(ALL_ANALYTICS_MODULES)
+        default_factory=lambda: frozenset(ALL_ANALYTICS_MODULES),
     )
+    camera_modules: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 class AnalyticsDbWriter:
@@ -73,12 +75,19 @@ class AnalyticsDbWriter:
     def __init__(self, config: DbWriterConfig) -> None:
         self._config = config
         self._tz = _normalize_timezone(config.timezone)
-        self._enabled_modules = frozenset(normalize_modules(config.enabled_modules))
+        self._default_modules = frozenset(normalize_modules(config.enabled_modules))
+        self._camera_modules: dict[str, frozenset[str]] = {
+            camera_id: frozenset(normalize_modules(modules))
+            for camera_id, modules in config.camera_modules.items()
+        }
         self._queue_zone_ids = {
             z.zone_id for z in config.zones if is_queue_zone(z)
         }
         self._camera_occupancy: dict[str, int] = {}
         self._store_occupancy: int = 0
+        self._closed = False
+        self._lock = threading.Lock()
+        self._session = Session(get_engine())
         self._reload_occupancy_from_db()
 
     def _reload_occupancy_from_db(self) -> None:
@@ -86,30 +95,37 @@ class AnalyticsDbWriter:
         camera_ids = set(self._config.camera_store_map.keys())
         if not camera_ids:
             return
-        with session_scope() as session:
-            for camera_id in camera_ids:
-                row = session.exec(
-                    select(OccupancyMetric)
-                    .where(OccupancyMetric.camera_id == camera_id)
-                    .order_by(col(OccupancyMetric.timestamp).desc(), col(OccupancyMetric.id).desc())
-                ).first()
-                if row is not None:
-                    self._camera_occupancy[camera_id] = row.current_occupancy
+        session = self._session
+        for camera_id in camera_ids:
+            row = session.exec(
+                select(OccupancyMetric)
+                .where(OccupancyMetric.camera_id == camera_id)
+                .order_by(col(OccupancyMetric.timestamp).desc(), col(OccupancyMetric.id).desc())
+            ).first()
+            if row is not None:
+                self._camera_occupancy[camera_id] = row.current_occupancy
 
-            store_id = self._config.store_id
-            if store_id:
-                store_row = session.exec(
-                    select(OccupancyMetric)
-                    .where(
-                        OccupancyMetric.store_id == store_id,
-                        OccupancyMetric.camera_id.is_(None),  # type: ignore[union-attr]
-                    )
-                    .order_by(col(OccupancyMetric.timestamp).desc(), col(OccupancyMetric.id).desc())
-                ).first()
-                if store_row is not None:
-                    self._store_occupancy = store_row.current_occupancy
-                else:
-                    self._store_occupancy = sum(self._camera_occupancy.values())
+        store_id = self._config.store_id
+        if store_id:
+            store_row = session.exec(
+                select(OccupancyMetric)
+                .where(
+                    OccupancyMetric.store_id == store_id,
+                    OccupancyMetric.camera_id.is_(None),  # type: ignore[union-attr]
+                )
+                .order_by(col(OccupancyMetric.timestamp).desc(), col(OccupancyMetric.id).desc())
+            ).first()
+            if store_row is not None:
+                self._store_occupancy = store_row.current_occupancy
+            else:
+                self._store_occupancy = sum(self._camera_occupancy.values())
+
+    def close(self) -> None:
+        """Release the held DB connection back to the pool."""
+        if self._closed:
+            return
+        self._session.close()
+        self._closed = True
 
     @property
     def config(self) -> DbWriterConfig:
@@ -118,6 +134,57 @@ class AnalyticsDbWriter:
     def subscribe(self, bus) -> None:
         bus.subscribe(self.on_event)
 
+    def unsubscribe(self, bus) -> None:
+        bus.unsubscribe(self.on_event)
+
+    def _modules_for_camera(self, camera_id: str) -> frozenset[str]:
+        with self._lock:
+            if camera_id in self._camera_modules:
+                return self._camera_modules[camera_id]
+            return self._default_modules
+
+    def add_camera(
+        self,
+        camera_id: str,
+        store_id: str,
+        modules: frozenset[str],
+        *,
+        zones: list[Zone] | None = None,
+    ) -> None:
+        """Register a camera on a running shared writer (live analytics worker)."""
+        normalized = frozenset(normalize_modules(modules))
+        with self._lock:
+            self._config.camera_store_map[camera_id] = store_id
+            self._camera_modules[camera_id] = normalized
+            if zones:
+                existing_ids = {zone.zone_id for zone in self._config.zones}
+                for zone in zones:
+                    if zone.zone_id not in existing_ids:
+                        self._config.zones.append(zone)
+                        existing_ids.add(zone.zone_id)
+                    if is_queue_zone(zone):
+                        self._queue_zone_ids.add(zone.zone_id)
+
+        occupancy_value: int | None = None
+        with session_scope() as session:
+            row = session.exec(
+                select(OccupancyMetric)
+                .where(OccupancyMetric.camera_id == camera_id)
+                .order_by(col(OccupancyMetric.timestamp).desc(), col(OccupancyMetric.id).desc())
+            ).first()
+            if row is not None:
+                occupancy_value = row.current_occupancy
+        if occupancy_value is not None:
+            with self._lock:
+                self._camera_occupancy[camera_id] = occupancy_value
+
+    def remove_camera(self, camera_id: str) -> None:
+        """Unregister a camera from a running shared writer."""
+        with self._lock:
+            self._config.camera_store_map.pop(camera_id, None)
+            self._camera_modules.pop(camera_id, None)
+            self._camera_occupancy.pop(camera_id, None)
+
     def on_event(self, event: AnalyticsEvent) -> None:
         if (
             event.event_type == AnalyticsEventType.PERSON_DETECTED.value
@@ -125,15 +192,19 @@ class AnalyticsDbWriter:
         ):
             return
 
-        with session_scope() as session:
-            self._insert_event(session, event)
-            self._apply_event_aggregates(session, event)
+        try:
+            self._insert_event(self._session, event)
+            self._apply_event_aggregates(self._session, event)
             if event.track_id is not None:
-                self._upsert_track(session, event)
+                self._upsert_track(self._session, event)
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
 
     def on_dwell_event(self, dwell: DwellEvent) -> None:
-        with session_scope() as session:
-            session.add(
+        try:
+            self._session.add(
                 DwellEventRow(
                     zone_id=dwell.zone_id,
                     track_id=str(dwell.track_id),
@@ -144,7 +215,9 @@ class AnalyticsDbWriter:
             )
             exit_dt = datetime.fromtimestamp(dwell.exit_timestamp, tz=dt_timezone.utc)
             metric_date, hour = _local_parts(exit_dt, self._tz)
-            zm = self._get_or_create_zone_metric(session, dwell.zone_id, metric_date, hour)
+            zm = self._get_or_create_zone_metric(
+                self._session, dwell.zone_id, metric_date, hour
+            )
             count = zm.dwell_count + 1
             zm.dwell_count = count
             zm.avg_dwell = ((zm.avg_dwell * (count - 1)) + dwell.dwell_seconds) / count
@@ -153,7 +226,11 @@ class AnalyticsDbWriter:
                 zm.min_dwell = dwell.dwell_seconds
             else:
                 zm.min_dwell = min(zm.min_dwell, dwell.dwell_seconds)
-            session.add(zm)
+            self._session.add(zm)
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
 
     def on_queue_sample(
         self,
@@ -166,8 +243,8 @@ class AnalyticsDbWriter:
         if zone_id not in self._queue_zone_ids:
             return
         ts = datetime.fromtimestamp(timestamp, tz=dt_timezone.utc)
-        with session_scope() as session:
-            session.add(
+        try:
+            self._session.add(
                 QueueMetric(
                     zone_id=zone_id,
                     timestamp=ts,
@@ -175,6 +252,10 @@ class AnalyticsDbWriter:
                     estimated_wait=estimated_wait,
                 )
             )
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
 
     def on_zone_event(self, event: ZoneEvent) -> None:
         """Record zone enter traffic and optional queue samples."""
@@ -182,10 +263,16 @@ class AnalyticsDbWriter:
             return
         ts = datetime.fromtimestamp(event.timestamp, tz=dt_timezone.utc)
         metric_date, hour = _local_parts(ts, self._tz)
-        with session_scope() as session:
-            zm = self._get_or_create_zone_metric(session, event.zone_id, metric_date, hour)
+        try:
+            zm = self._get_or_create_zone_metric(
+                self._session, event.zone_id, metric_date, hour
+            )
             zm.visitors += 1
-            session.add(zm)
+            self._session.add(zm)
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
 
     def _insert_event(self, session: Session, event: AnalyticsEvent) -> None:
         session.add(
@@ -203,14 +290,16 @@ class AnalyticsDbWriter:
         et = event.event_type
         ts = _utc_from_datetime(event.timestamp)
 
+        modules = self._modules_for_camera(event.camera_id)
+
         if et in (AnalyticsEventType.ENTRY.value, AnalyticsEventType.EXIT.value):
-            if MODULE_ENTRY_EXIT in self._enabled_modules:
+            if MODULE_ENTRY_EXIT in modules:
                 self._update_visitor_metrics(session, event, ts)
-            if MODULE_OCCUPANCY in self._enabled_modules:
+            if MODULE_OCCUPANCY in modules:
                 self._update_occupancy_metrics(session, event, ts)
 
         if et == AnalyticsEventType.ZONE_ENTER.value and event.zone_id is not None:
-            if MODULE_ZONES in self._enabled_modules:
+            if MODULE_ZONES in modules:
                 metric_date, hour = _local_parts(ts, self._tz)
                 zm = self._get_or_create_zone_metric(session, event.zone_id, metric_date, hour)
                 zm.visitors += 1
@@ -284,7 +373,7 @@ class AnalyticsDbWriter:
             zone_id = event.zone_id
         elif event.event_type == AnalyticsEventType.OCCUPANCY_THRESHOLD.value:
             store_id = str(event.metadata.get("store_id", self._config.store_id))
-            severity = get_occupancy_severity(store_id)
+            severity = get_occupancy_severity(store_id, session=self._session)
             camera_id = None
             zone_id = None
         else:
