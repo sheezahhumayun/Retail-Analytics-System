@@ -1,5 +1,99 @@
 # Retail Analytics
 
+## Getting Started (Fresh Clone)
+
+Follow these steps in order. Commands assume Windows PowerShell at the repo root unless noted.
+
+### 1. Environment file
+
+```powershell
+copy .env.example .env
+```
+
+`.env.example` already ships with working defaults for local development (Postgres on port 5433, a demo JWT secret, and the shared demo password) — you don't need to edit anything to get running.
+
+### 2. Start PostgreSQL
+
+```powershell
+docker compose -f docker/docker-compose.yml up -d
+```
+
+This maps host port **5433** → container port 5432 (avoids clashing with a local Postgres install on 5432).
+
+### 3. Backend venv
+
+```powershell
+python -m venv backend\.venv
+backend\.venv\Scripts\pip install -r backend\requirements.txt -r database\requirements.txt
+```
+
+### 4. Inference venv
+
+The inference venv is **required** — the backend spawns the live-analytics worker and camera-processing jobs using this environment (it contains `torch`, `ultralytics`, and `trackers`, which the backend venv intentionally does not). Skipping this step means live camera processing will fail silently in the background.
+
+```powershell
+python -m venv inference\.venv
+inference\.venv\Scripts\pip install -r inference\requirements.txt
+```
+
+This installs `torch` transitively via `ultralytics` and can take a while on first run (large download, CPU wheels by default — no GPU/CUDA setup is preconfigured in this repo).
+
+### 5. Run database migrations
+
+```powershell
+backend\.venv\Scripts\alembic -c database/alembic.ini upgrade head
+```
+
+### 6. Seed the database
+
+Two options:
+
+```powershell
+# Minimal seed — one org, one store, 3 cameras, no zones/lines configured
+backend\.venv\Scripts\python -m database.seed
+
+# Recommended for exploring the dashboard — multi-store, multiple cameras,
+# zones, counting lines, and heatmap data already populated
+backend\.venv\Scripts\python -m database.seed --demo
+```
+
+The minimal seed does **not** include zone or counting-line configuration (those live in `tests/videos/*.json`, which is gitignored). If you use the minimal seed, most zone/queue/dwell features will show no data until you draw zones/lines yourself with `line_editor` / `polygon_editor` (see Testing section below), or you can just use `--demo` instead for a fully populated dashboard.
+
+### 7. Start the backend
+
+```powershell
+.\scripts\dev-backend.ps1
+```
+
+Swagger UI: http://127.0.0.1:8000/docs
+
+### 8. Start the frontend
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Dashboard: http://localhost:3000
+
+> Note: both `package-lock.json` and `pnpm-lock.yaml` are present in `frontend/`. Use `npm install` unless your team has standardized on pnpm.
+
+### 9. Log in
+
+| Email | Password | Role |
+|---|---|---|
+| `admin@demo-retail.local` | `demo` | admin |
+| `user@demo-retail.local` | `demo` | user |
+
+(With `--demo` seed, an additional `analyst@demo-retail.local` / `demo` user is also created, scoped to a second store.)
+
+There is currently **no seeded superadmin account** — superadmin-only routes (organization management) require running `tests/scripts/seed_superadmin_manual_test.py` separately, which creates `superadmin@test.local` / `superadmin-test-pass`. This is a manual test script, not part of the standard seed flow.
+
+### A note on YOLO model weights
+
+Model weights (`yolov8n.pt`) are **not committed to this repo**. The default `ultralytics` backend auto-downloads them on first inference run — this requires network access on first use. The alternative `--backend onnx` path has no auto-download; you'd need to export `inference/models/yolov8n.onnx` manually before using it.
+
 ## Project Structure
 
 | Module | Purpose |
@@ -311,3 +405,12 @@ backend\.venv\Scripts\python -m pytest tests/test_api.py -v
 | Detection FPS baseline log | `tests/videos/detection_baseline.txt` |
 | Heatmap overlays | `tests/videos/*_heatmap.png` (or `-o` path) |
 | Heatmap hour buckets | `data/heatmaps/{camera_id}/{date}/{hour}.npz` |
+
+## Known Limitations / Not Yet Implemented
+
+- **Camera and processing status can lag in the UI.** Processing succeeds correctly in the backend, but the frontend doesn't always reflect current status immediately — under investigation.
+- **Occupancy-style stat cards on the Live Cameras page are being removed** (grid view and camera detail view) — pending cleanup.
+- **Superadmin account management has no UI or API.** The only way to create a superadmin account today is the seed script or the manual test script mentioned above — there's no create/edit/disable/delete flow yet.
+- **The live-analytics worker assumes a single backend instance.** Running multiple backend instances for production scaling would currently cause every camera to be processed redundantly by each instance, since there's no per-instance partitioning or leader election yet. Fine for local/single-instance use; not yet safe for horizontally-scaled production deployment.
+- **Dockerfiles for backend/frontend/inference are present but empty.** Only Postgres runs via Docker Compose today — the backend, inference, and frontend still need to be run manually via the steps above, not `docker compose up` end to end.
+- **`ONNX` detection backend requires a manually exported model file** (`inference/models/yolov8n.onnx`) — there's no automated export step in setup.
