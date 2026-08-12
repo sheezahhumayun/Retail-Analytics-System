@@ -12,7 +12,7 @@ from ..auth import ORG_STATUS_DISABLED, TokenPayload, require_admin
 from ..deps import DbSession
 from ..exceptions import ApiError
 from ..schemas.cameras import CameraProcessResponse, CameraResponse
-from ..schemas.extended.cameras import CameraTestResponse, CameraUpdate
+from ..schemas.extended.cameras import CameraTestResponse, CameraUpdate, CameraProcessRequest
 from ..services.camera_health import (
     apply_probe_to_camera,
     apply_recorded_file_check_to_camera,
@@ -132,6 +132,7 @@ def test_camera(
         latency_ms=result.latency_ms,
         resolution=result.resolution,
         fps=result.fps,
+        duration_seconds=result.duration_seconds,
         message=result.message,
         camera_status=camera_status,
     )
@@ -168,6 +169,7 @@ def process_recorded_video(
     camera_id: str,
     session: DbSession,
     admin: Annotated[TokenPayload, Depends(require_admin)],
+    body: CameraProcessRequest | None = None,
 ) -> CameraProcessResponse:
     camera = require_camera_in_org(session, camera_id, admin.org_id)
     if camera.source_type != "recorded":
@@ -185,7 +187,8 @@ def process_recorded_video(
         raise ApiError(400, "missing_video_path", "No video file path configured for this camera")
 
     try:
-        start_recorded_processing(camera_id)
+        recording_start = body.recording_start if body is not None else None
+        start_recorded_processing(camera_id, recording_start=recording_start)
     except ProcessingRunActiveError as exc:
         raise ApiError(
             409,

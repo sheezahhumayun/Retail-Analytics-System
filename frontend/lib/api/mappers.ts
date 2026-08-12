@@ -24,12 +24,17 @@ import type {
   ZoneRow,
   ZoneShape,
   ZoneType,
+  FloorZone,
 } from "@/lib/types";
-import { FLOOR_ZONES } from "@/lib/heatmap-data";
 import { ZONE_TYPE_COLORS } from "@/lib/zones-lines-data";
 import { getIntervalLabel as intervalLabelForRange } from "@/lib/analytics-data";
 import type { DateRangeKey } from "@/lib/types";
 import type { HeatBlob } from "@/lib/types";
+import {
+  densityRange,
+  densityToIntensity,
+  intensityToColor,
+} from "@/lib/heatmap-colors";
 
 // ─── Backend response shapes ─────────────────────────────────────────────────
 
@@ -619,32 +624,22 @@ export function queueStatsFromRows(rows: DataRow[]): StatSummary[] {
   ];
 }
 
-const HEAT_COLORS = ["#00aaff", "#ffcc00", "#ff8800", "#ff5500", "#ff2200", "#ff1100"];
-
 export function densityToHeatBlobs(density: number[][]): HeatBlob[] {
   if (!density.length || !density[0]?.length) return [];
-  let max = 0;
-  for (const row of density) {
-    for (const value of row) {
-      if (value > max) max = value;
-    }
-  }
-  if (max <= 0) return [];
+
+  const range = densityRange(density);
+  if (!range) return [];
 
   const rows = density.length;
   const cols = density[0].length;
-  const threshold = max * 0.35;
   const blobs: HeatBlob[] = [];
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const value = density[r][c];
-      if (value < threshold) continue;
-      const intensity = Math.min(1, value / max);
-      const colorIndex = Math.min(
-        HEAT_COLORS.length - 1,
-        Math.floor(intensity * HEAT_COLORS.length),
-      );
+      if (value <= 0) continue;
+
+      const intensity = densityToIntensity(value, range);
       blobs.push({
         id: `h-${r}-${c}`,
         cx: ((c + 0.5) / cols) * 100,
@@ -652,7 +647,7 @@ export function densityToHeatBlobs(density: number[][]): HeatBlob[] {
         rx: (100 / cols) * 1.6,
         ry: (100 / rows) * 1.6,
         intensity,
-        color: HEAT_COLORS[colorIndex],
+        color: intensityToColor(intensity),
       });
     }
   }
@@ -873,9 +868,6 @@ export function mapLiveCamera(
     location: camera.location ?? "",
     status: mapLiveStatus(status?.status ?? camera.status),
     frameUrl: null,
-    occupancy: status?.current_occupancy ?? 0,
-    entriesToday: 0,
-    exitsToday: 0,
     boundingBoxes: [],
     zones: mapLiveCameraZones(camera.id, zones),
     countingLines: mapLiveCameraCountingLines(camera.id, lines),
@@ -1045,6 +1037,46 @@ export function mapZoneShape(shape: BackendZoneShape): ZoneShape {
   };
 }
 
+export function parseFrameDimensions(
+  resolution?: string | null,
+  fallbackWidth = 640,
+  fallbackHeight = 360,
+): { width: number; height: number } {
+  if (resolution && /^\d+x\d+$/i.test(resolution)) {
+    const [w, h] = resolution.split("x").map(Number);
+    if (w > 0 && h > 0) {
+      return { width: w, height: h };
+    }
+  }
+  return { width: fallbackWidth, height: fallbackHeight };
+}
+
+/** Zone overlays for the heatmap canvas (polygon vertices in 0–100% frame space). */
+export function mapHeatmapFloorZones(
+  shapes: BackendZoneShape[],
+  frameWidth: number,
+  frameHeight: number,
+): FloorZone[] {
+  return shapes
+    .filter((shape) => shape.status !== "disabled")
+    .map((shape) => {
+      const points = normalizePolygonPoints(
+        shape.polygon_points,
+        frameWidth,
+        frameHeight,
+      );
+      if (points.length < 3) {
+        return null;
+      }
+      return {
+        id: shape.id,
+        label: shape.name,
+        points,
+      };
+    })
+    .filter((zone): zone is FloorZone => zone !== null);
+}
+
 export function mapCountingLine(line: BackendCountingLine): LineShape {
   const normalized = normalizePolygonPoints(
     [
@@ -1138,5 +1170,5 @@ export async function buildOrganizationFromBackend(
   };
 }
 
-export { FLOOR_ZONES };
+
 export { getIntervalLabel as fetchIntervalLabel } from "@/lib/analytics-data";

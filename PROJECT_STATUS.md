@@ -185,6 +185,10 @@ any org-scoped lookup runs.
   instead of failing silently; modal only closes on success
 - **Seed script:** `tests/scripts/seed_superadmin_manual_test.py` (idempotent, real password
   hashing)
+  **STATUS UPDATE (2026-08-12):** Superadmin account CRUD (create/edit/disable/delete via API/UI)
+  — descoped, will NOT be built in this version of the app. The seed script above remains the only
+  supported way to create superadmin accounts. Leaving this entry intact for history; this note
+  supersedes any prior planning intent for account-management CRUD.
 - **Manually verified end-to-end:** superadmin login/notice, org-admin login unaffected, direct
   **403** on org-scoped endpoints with a superadmin token, generic **401** for unknown email,
   **409** on duplicate email during user creation (both create and edit paths), no stale-session
@@ -3702,3 +3706,311 @@ management — all built and verified, both API and UI.
 - Superadmin frontend for org admin/user management is done — org-level services UI could later
   grow beyond the single Retail Analytics toggle if more services are added
 
+---
+
+## 2026-08-11 — Postgres connection exhaustion (`get_engine()` singleton bug) — DONE
+
+### DONE
+
+- Root-caused and fixed Postgres connection exhaustion ("too many clients already" occurring
+  during ordinary manual use, not just stress testing). Root cause: `database/session.py`
+  `get_engine()` compared `str(_engine.url) != url` to decide whether to reuse the cached engine.
+  SQLAlchemy masks the password in `str(engine.url)` as `"***"`, so this comparison was always
+  True after the first call — every `get_engine()` call (every HTTP request via `get_db()`, every
+  camera-health-worker tick, every live-worker reconcile/org-poll cycle, every
+  `AnalyticsDbWriter.add_camera()` call) created a brand new SQLAlchemy Engine with its own
+  up-to-20-connection pool, and old engines were never disposed.
+- Fix: store the raw URL used to build the engine in a separate module-level `_engine_url`
+  variable and compare against that instead of the masked `str(_engine.url)`; `dispose()` the old
+  engine before replacing it if a new one is genuinely needed; added a `threading.Lock()` around
+  the check-and-create logic to prevent concurrent threads from racing past the check and creating
+  multiple engines simultaneously.
+- Verified against the real running uvicorn process (not just TestClient): Postgres connection
+  count measured before, during, and after 30 sequential real HTTP requests to `GET /api/cameras`
+  stayed flat at 6 connections throughout, with clean Postgres logs (no "too many clients" errors).
+  Confirms the leak is fixed under real request handling, including background threads.
+- Full pytest suite confirmed passing post-fix: `tests/test_api.py` (backend venv) 30 passed;
+  `tests/test_database.py` (inference venv) 9 passed.
+- Along the way, diagnosed (via OS-level TCP socket mapping to the Postgres port, since
+  `pg_stat_activity` itself was unreachable while connections were exhausted) that a second, separate
+  contributing factor exists: a duplicate/orphaned `live_analytics_worker` OS process can survive
+  `uvicorn --reload` cycles because the Popen handle tracking it lives only in the backend worker
+  process that spawned it — if that process is replaced by a reload without shutdown running
+  cleanly, the old live-analytics worker subprocess has no handle left to terminate it and
+  survives as an orphan. This is a real but separate bug (see TODO below); it was not the primary
+  cause of the 100/100 connection exhaustion (the `get_engine()` leak alone was sufficient to
+  explain it) but compounds the problem over multiple reload cycles.
+
+### TODO (not yet fixed)
+
+- Orphan `live_analytics_worker` processes surviving `uvicorn --reload`: needs a fix (likely a
+  PID-file lock on startup so a new worker can detect and terminate any stale prior worker before
+  spawning a new one). Scheduled as the next work item.
+- Original items #1 (stale/missing camera status in UI) and #3–#5 from the prior planning list
+  remain open. Note: investigation found that when Postgres connections are exhausted, the
+  frontend's `getLiveCameras()` silently falls back to stale data on per-camera `/status` fetch
+  failure (catches the error and reuses `camera.status` from the earlier `GET /api/cameras` list
+  response, no retry, no visible error), and the admin cameras page only logs fetch failures to
+  console with no retry/polling at all. With the connection leak now fixed, some of the reported
+  staleness may resolve on its own — needs to be re-tested against a healthy, long-running backend
+  before concluding whether a separate frontend fix is still required. Independent of connection
+  health, the admin cameras page still has no polling and processing-run status is only fetched on
+  click/modal-open, which are real structural gaps worth addressing regardless.
+
+---
+
+## 2026-08-11 — Orphaned `live_analytics_worker` cleanup (PID file) — DONE
+
+### DONE
+
+- Fixed orphaned `live_analytics_worker` processes surviving backend restarts (`uvicorn --reload`
+  cycles in dev, and by design also crash/redeploy scenarios in production). Root cause: the
+  `Popen` handle tracking the spawned worker subprocess only lived in the memory of the backend
+  worker process that spawned it — on reload, a new backend process has no way to find or
+  terminate a previous worker if that worker's parent didn't shut down cleanly, leaving it
+  orphaned and holding its own Postgres connection pool indefinitely.
+- Fix: added a PID file (`data/run/live_analytics_worker.pid`) and lock file
+  (`data/run/live_analytics_worker.lock`) in `backend/app/services/camera_process.py`. Before
+  spawning a new live-analytics worker, startup now calls `_cleanup_stale_live_analytics_worker()`,
+  which: acquires the lock file atomically (to guard against overlapping starts, e.g. rolling
+  deploys), reads the PID file if present, verifies the PID is both alive **and** its command
+  line actually contains `"inference.pipeline.live_analytics_worker"` (mandatory cmdline check —
+  PID-alone checks are unsafe since Windows was observed to reuse PIDs within ~1 second), and if
+  both checks pass, terminates it using the same TERM-then-KILL-with-timeout semantics as the
+  existing `_terminate_proc`. The new worker's PID is written to the PID file after spawning; the
+  file is removed on clean shutdown. The entire cleanup function is wrapped so any internal failure
+  (corrupt PID file, lock timeout, etc.) is logged and skipped rather than blocking or crashing
+  startup — this runs in the same startup path that previously had a critical crash bug, so it was
+  built to fail safe. `data/run/` added to `.gitignore`.
+- Verified: real orphan scenario (spawned worker, PID file pointed at it, triggered a fresh
+  startup) — cleanup correctly found the old PID, verified its command line, terminated it, and
+  only one worker remained afterward. Also verified graceful handling of a stale PID pointing at
+  a dead process, a corrupted (non-numeric) PID file, and clean removal of the PID file on normal
+  shutdown — all confirmed with real logged output, no crashes in any case. Full pytest suite
+  (`tests/test_api.py`) passed 30/30 afterward. Postgres connection count remained
+  healthy/bounded (6) throughout testing.
+- Note: this was verified by directly exercising `_cleanup_stale_live_analytics_worker()` and
+  `start_live_analytics_subprocess()` in a standalone script, not yet through a full live
+  `uvicorn --reload` cycle via `dev-backend.ps1` (the first attempt at that hit an unrelated
+  stale process already holding port 8000, which was cleared but not re-attempted). The underlying
+  functions are the same ones the real startup path calls, so this is considered solid, but a real
+  `--reload`-triggered end-to-end check is still a reasonable follow-up if any oddities are
+  observed in normal dev use.
+- This closes out the second (and final) contributing cause of the "too many clients already"
+  Postgres exhaustion reported as happening during ordinary manual use (the first and primary
+  cause, the `get_engine()` singleton bug, was fixed and documented in the prior 2026-08-11
+  entry).
+
+### TODO (not yet fixed)
+
+- Recommended follow-up (optional, low priority): do one real `dev-backend.ps1 --reload` cycle
+  end-to-end and confirm the same cleanup behavior in logs, purely as a final real-world
+  confirmation alongside the already-passing script-level verification.
+- Original items #1 (stale/missing camera status in UI) and #3–#5 from the prior planning list
+  remain open, unchanged from the last entry. Item #1 in particular should now be re-tested against
+  a healthy, long-running backend now that **both** connection-exhaustion causes are fixed, to see
+  how much of the reported staleness (if any) remains — still needs to be actually re-tested, not
+  assumed resolved.
+
+---
+
+## 2026-08-11 — Dashboard analytics staleness investigation (recorded-video timestamps) — DONE (investigation only)
+
+### DONE (investigation only, no code changed yet)
+
+- Diagnosed why recorded-video and file-replay-based "live" camera analytics don't appear on
+  dashboard/analytics pages. Root cause: `process_recorded.py` timestamps every event/occupancy/metric
+  using elapsed **video time** (`frame_index / fps` — seconds since the clip started), not real
+  calendar time. That raw seconds value is passed directly into
+  `datetime.fromtimestamp(seconds, utc)`, which interprets it as seconds since the Unix epoch — so
+  all recorded-run data lands in the database dated `1970-01-01`, while dashboards query for "today"
+  and correctly find nothing. Confirmed live via a real end-to-end test: a file-looped camera
+  (`verify_live_a`) wrote 173 fresh `visitor_metrics` entries during the test window, but all
+  bucketed under `metric_date=1970-01-01`; the API correctly returned 0 for "today" and 32/173 for
+  a query scoped to `1970-01-01`, proving the API and DB are behaving correctly given the bad input
+  timestamp — this is a **write-path bug**, not a read-path or display bug.
+- A partial fix pattern already exists but is isolated to a demo script:
+  `tests/scripts/demo_source.py`'s `analytics_timestamp()` function anchors media-time to a real
+  `recording_start` datetime, but it's only wired into `run-heatmap-demo.py`'s heatmap bucket path
+  — not into `process_recorded.py`, not into `AnalyticsDbWriter`, not into the live worker's
+  file-loop path, and not exposed via the API or frontend at all.
+- Also confirmed real RTSP live cameras (not file-replay) are unaffected — they use real
+  wall-clock time and wrote/displayed correctly during the same test.
+- Also confirmed the dashboard/analytics pages (Overview, all `/analytics/*` pages, heatmap, zone
+  performance) have **no background polling** anywhere — same shape as the previously-found
+  admin/cameras gap. This is a separate, smaller issue layered on top of the timestamp bug: even
+  once timestamps are fixed, these pages still won't refresh in the background without a separate
+  fix.
+- Also confirmed demo seed data (`org_demo`) includes rows dated far in the future (`2099-*`), which
+  can pollute "most recent" queries (e.g. current occupancy) for cameras/stores that share IDs with
+  demo fixtures. Not a bug in application code, but worth being aware of when testing against
+  `org_demo`.
+
+### TODO (not yet fixed)
+
+- Implement recording-start-anchored timestamping for recorded-video processing: user selects a
+  start date/time when clicking "Process Video"; end date/time is auto-computed from video duration
+  and not user-editable; all events/occupancy/metrics for that run get written with real calendar
+  timestamps anchored to that range instead of 1970. Requires: timestamp-anchoring logic in
+  `process_recorded.py`'s write path (adapting the existing `analytics_timestamp()` pattern), a new
+  `recording_start` param on `POST /api/cameras/{id}/process` threaded through to the subprocess
+  CLI, a way to expose video duration to the frontend (not currently exposed by any API), and a
+  new frontend modal replacing the current no-input "Process Video" button.
+- The file-loop "live" camera pattern (e.g. `verify_live_a`, used for local testing without real
+  RTSP) has the same 1970-anchoring issue and is not covered by the above fix as scoped (that fix
+  targets user-initiated recorded-video processing) — flagging as a related but separate gap if this
+  pattern is used beyond testing.
+- No background polling on any dashboard/analytics page (Overview, all `/analytics/*` pages, heatmap,
+  zone performance; zone performance's date/time controls are also not wired to its data fetch at
+  all — separate small bug). Lower priority than the timestamp fix, since fixing timestamps first
+  will make it much easier to tell what's actually stale from a real gap vs. simply needing a
+  refresh.
+
+---
+
+## 2026-08-12 — Heatmap pipeline, zone overlays, traffic analytics, and UI timestamp fixes — DONE
+
+### DONE
+
+- Fixed heatmap accumulator merge crash (`"Cannot merge accumulators with different frame specs"`).
+  Root cause: reprocessing a camera with a different-resolution video produces a differently-shaped
+  heatmap accumulator than what's already stored on disk for that camera/hour, and the old merge
+  logic crashed instead of handling the mismatch. Fix: on spec mismatch, overwrite the stored bucket
+  with a **WARNING** logged (documenting old/new spec dimensions), instead of crashing the run.
+  Same-spec merge behavior (summing density across multiple runs in the same hour — confirmed as
+  intended: e.g. a 10:40 run and a 10:50 run in the same hour should both contribute) is unchanged.
+  Verified: real `store.mp4` → `town.mp4` reprocess (640×361 → 640×360) completes successfully;
+  same-spec reprocessing still correctly sums density across runs.
+- Added heatmap generation to **LIVE** camera processing. Root cause: live processing had no
+  heatmap code path at all — no `HeatmapEngine`, no NPZ writes — confirmed via investigation that
+  actively-online live cameras with the heatmap module enabled had zero heatmap files ever written.
+  Fix: `inference/pipeline/live_analytics_worker.py` now creates a `HeatmapEngine` per camera (only
+  when the heatmap module is enabled), calls `update()` per frame using real wall-clock timestamps,
+  and flushes on UTC hour-roll and on graceful worker/camera shutdown. Verified end-to-end on a real
+  (non-file-loop) live RTSP camera: after the fix, NPZ files appear on disk with real density data,
+  matching what the heatmap API returns, and the graceful-shutdown flush was confirmed to persist
+  in-progress hour data rather than losing it. Note: the file-loop "live" camera pattern used for
+  local testing (not real RTSP) still has a separate, pre-existing 1970-epoch timestamp issue,
+  unrelated to this fix.
+- Replaced hardcoded placeholder zone shapes on the heatmap page with the camera's real configured
+  zone polygons. Root cause: the heatmap page always rendered 5 fake floor-plan boxes
+  (Entrance/Checkout/Electronics/Apparel/Back Wall) regardless of which camera was selected or what
+  zones it actually has, never calling the real zones API. Fix: heatmap zone overlay now fetches real
+  zone polygons (same endpoint/pattern already used on the admin zones/lines page), converts from
+  image-pixel coordinates to the canvas's percentage coordinate space, and renders actual zone
+  shapes; cameras with no configured zones show a clear "No zones configured for this camera"
+  state instead of a crash or leftover placeholder. Verified via real API calls showing actual zone
+  polygon coordinates instead of placeholder labels, for both the zones-present and zones-absent
+  cases.
+- Improved heatmap color gradient/contrast. Root cause: density values were normalized against only
+  the single hottest cell (max-only), a 35%-of-max cutoff silently dropped most real data from
+  rendering, and color was a single hue with opacity driven by intensity, making low-to-mid activity
+  look muddy and indistinguishable. Fix: new 8-stop perceptual gradient (cool blue through to hot
+  red-orange) with proper per-view min/max normalization across all non-zero cells (no more dropped
+  data), plus a matching legend bar. Verified against real data (2,018 real non-zero cells rendered
+  across the full color range, vs. 57 same-hue blobs before) and confirmed visually correct by manual
+  user testing.
+- Fixed zone-scoped traffic analytics returning empty despite real zone activity. Root cause:
+  line-crossing ENTRY/EXIT events never had a `zone_id` attached at write time, but the zone-filtered
+  traffic query required `zone_id` to be set specifically on ENTRY/EXIT rows — a data-model mismatch
+  that made zone-scoped traffic always return empty. Fix: zone-scoped traffic now counts
+  `ZONE_ENTER`/`ZONE_EXIT` events instead (which do correctly carry `zone_id`, and are already used
+  by the working `ZoneMetric`/`ZoneAnalytics` aggregation elsewhere in the app, confirming this was
+  the right existing pattern to reuse rather than a new one). Camera-level (all-zones) traffic path
+  was confirmed unchanged. Verified with an exact hour-by-hour match between the API response and a
+  direct DB count for a real zone (210 entries / 160 exits, matching exactly).
+- Confirmed (deliberately, not fixed) that "All zones" aggregation on the Zones analytics page
+  correctly and intentionally excludes queue/checkout/waiting-type zones by design — individual
+  queue zones still show their own data correctly. This is confirmed intended product behavior, not a
+  bug, per explicit product decision during investigation.
+- Fixed a `ProcessingRun` timestamp display bug where recorded-video processing times appeared
+  several hours off from the user's real local time (e.g. a 12:20 PM Pakistan-time run displaying as
+  7:20 AM). Root cause: `ProcessingRun.started_at`/`finished_at` serialize as naive datetimes (no
+  timezone suffix) from the API, which JavaScript's `Date` parser incorrectly interprets as local
+  time instead of UTC — while other fields like `Camera.last_processed_at` correctly serialize as
+  timezone-aware and displayed correctly, causing the same processing run's timestamp to visibly
+  disagree with itself depending on which UI element/data source was showing it. Fix: added a shared
+  frontend datetime utility (`frontend/lib/format-datetime.ts`) that treats naive ISO strings as UTC
+  and formats them in the browser's real local timezone, applied to all 3 confirmed display
+  locations (camera table, camera modal, processing run history). Backend/API storage and
+  transmission remain unchanged (still UTC internally, as intended) — this was a display-only fix.
+  Verified with real data in Asia/Karachi timezone and confirmed the API response format is
+  unaffected.
+- Broader sweep confirmed the naive-datetime bug is currently confined to `ProcessingRun`'s API
+  serialization; two other fields (`ZoneShape` and `AlertRule` `created_at`/`updated_at`) have the
+  same underlying backend inconsistency but are not currently displayed anywhere in the UI, so they
+  have zero current user-facing impact. Logged as a known backend inconsistency for future cleanup
+  (see TODO).
+- Diagnosed (separately from the above) why heatmap data appeared "missing" for both a recorded run
+  and a live camera around midday Pakistan time, even after the timestamp display fix: the heatmap
+  page's date/time range filter defaults to 09:00–18:00, but this range was being sent to the API
+  as if it were already UTC, with no conversion from the user's local time. Since Pakistan is UTC+5,
+  activity around local noon falls in UTC hour 07, outside the default UTC 09:00–18:00 window — so
+  real, correctly-generated heatmap data was being filtered out by the query itself, not missing from
+  generation. Confirmed via direct DB/file evidence that the data existed on disk with correct
+  timestamps the whole time.
+- Removed occupancy-style stat cards (Occupancy / Entries / Exits) from the Live Cameras page grid
+  view. The expanded/detail camera modal never had these cards, so no change was needed there.
+  Cleaned up now-unused related code (a local `Stat` component, unused icon imports, and unused
+  fields in the `Camera` type/mapper). Verified via typecheck and test suite; visual confirmation
+  pending user's own browser check.
+- Fixed heatmap time picker to correctly treat user input as browser-local time and convert to UTC
+  before querying, including handling for local ranges that cross a UTC day boundary (split into
+  multiple API calls, merged client-side). Verified with precise boundary testing: default local
+  09:00–18:00 (Pakistan, UTC+5) correctly resolves to UTC 04:00–13:00 and includes real data in
+  UTC hour 07; a narrowed local afternoon-only range correctly **excludes** that same hour, confirming
+  the conversion is precise, not just widened to catch everything. Caveat: this assumes
+  `STORE_TIMEZONE=UTC` (the current default) — if that setting is ever changed to a non-UTC value for
+  a real deployment, a corresponding backend read-path change would be needed too.
+
+### TODO (not yet fixed)
+
+- Backend root fix for naive-vs-aware datetime serialization inconsistency: `ProcessingRun`
+  (confirmed real bug, patched on the frontend for current usages), plus `ZoneShape` and `AlertRule`
+  (same inconsistency exists but currently has zero UI impact since neither is displayed anywhere
+  yet). Recommended durable fix: normalize all API datetime serialization to always emit UTC-aware
+  ISO strings. Deferred — not urgent since current usages are already patched around on the
+  frontend.
+- New investigation opened: a new organization (with real cameras and zones configured) opens the
+  alert thresholds/rules page and sees a completely empty page — no rule list, no default rules, no
+  visible form. Not yet diagnosed whether this is a missing empty-state UI, a broken rule-creation
+  flow, an API/auth issue, or missing default-rule provisioning for newly created orgs.
+  Investigation in progress.
+- No background polling on Admin → Cameras page (stale until manual refresh).
+- No background polling on any dashboard/analytics page (Overview, Traffic, Occupancy, Zones,
+  Dwell, Heatmap, Zone Performance).
+- Zone Performance page's own date/time controls are not wired to its data fetch at all (separate
+  small bug, distinct from the heatmap time-filter issue above).
+- Superadmin account CRUD (create/edit/disable/delete via API/UI) — **STATUS UPDATE:** descoped,
+  will NOT be built in this version of the app. The only way to create a superadmin account remains
+  the seed script / manual test script mentioned in earlier entries. Leaving the original entry
+  intact for history; this note supersedes it for current planning purposes.
+- Known architectural limitation, unchanged from earlier entry: the live-analytics worker assumes a
+  single backend instance, with no per-instance partitioning or leader election — not scheduled,
+  explicitly deferred.
+
+---
+
+## 2026-08-12 — Alert thresholds for new organizations — DONE
+
+### DONE
+
+- Fixed alert thresholds showing completely empty for new organizations. Root cause: organization
+  creation (`POST /organizations`) never seeded org-wide default `alert_rules` rows, which the
+  existing per-zone auto-provisioning logic (built earlier in the Alerting System work, Phase 6)
+  depends on — new orgs' zones silently got no alert rules at all because there was no org-wide
+  default to copy from, and the frontend modal rendered a blank content area for an empty rule list
+  with no explanation. Fix: organization creation now automatically seeds the four standard org-wide
+  default rules (`DWELL_THRESHOLD`=60s, `QUEUE_THRESHOLD`=5, `QUEUE_THRESHOLD_DURATION`=120s,
+  `OCCUPANCY_THRESHOLD`=30), matching existing seed values used elsewhere in the app, non-fatal to
+  org creation if it fails. A one-time idempotent backfill script
+  (`tests/scripts/backfill_alert_rules_for_existing_orgs.py`) was run against existing organizations
+  that predated this fix, seeding their org-wide defaults and retroactively provisioning per-zone
+  rules for their existing zones. Frontend also now shows a clear "No alert rules configured for
+  this organization yet" message instead of a blank modal for the (now much rarer) genuinely-empty
+  case. Verified end to end with real API calls: new org creation produces exactly 4 correctly-scoped
+  org-wide rows; new zone creation on a fresh org now correctly provisions a per-zone rule; backfill
+  confirmed via real before/after DB counts for two existing organizations (one goes from 0→4 rows
+  having no zones yet, the other from 0→6 rows covering its 2 existing zones); backfill script
+  confirmed idempotent (safe re-run reports nothing left to do). Existing alert-rules test suite (7
+  tests) and frontend tests (28 tests) pass unchanged.

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -497,3 +498,21 @@ def test_real_rtsp_open():
         assert ok and frame is not None
     finally:
         src.release()
+
+
+def test_anchor_timestamp_live_returns_input():
+    anchor_timestamp = inference.anchor_timestamp
+    assert anchor_timestamp(123.5, True, None) == 123.5
+    start = datetime.fromisoformat("2026-08-11T09:00:00+00:00")
+    assert anchor_timestamp(123.5, True, start) == 123.5
+
+
+def test_anchor_timestamp_file_with_recording_start():
+    anchor_timestamp = inference.anchor_timestamp
+    start = datetime.fromisoformat("2026-08-11T09:00:00+00:00")
+    assert anchor_timestamp(30.0, False, start) == start.timestamp() + 30.0
+
+
+def test_anchor_timestamp_file_without_recording_start():
+    anchor_timestamp = inference.anchor_timestamp
+    assert anchor_timestamp(42.0, False, None) == 42.0

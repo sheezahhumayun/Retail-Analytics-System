@@ -291,6 +291,27 @@ def _load_thresholds_from_session(
     return thresholds
 
 
+ORG_WIDE_DEFAULT_ALERT_RULES: tuple[tuple[str, float], ...] = (
+    ("DWELL_THRESHOLD", 60.0),
+    ("QUEUE_THRESHOLD", 5.0),
+    ("QUEUE_THRESHOLD_DURATION", 120.0),
+    ("OCCUPANCY_THRESHOLD", 30.0),
+)
+
+
+def seed_org_wide_default_alert_rules(session: Session, org_id: str) -> None:
+    """Insert org-wide default alert_rules for an organization (idempotent)."""
+    now = datetime.now(timezone.utc)
+    for rule_type, threshold in ORG_WIDE_DEFAULT_ALERT_RULES:
+        _upsert_alert_rule(
+            session,
+            rule_type=rule_type,
+            threshold=threshold,
+            now=now,
+            org_id=org_id,
+        )
+
+
 def _get_org_default_rule(session: Session, rule_type: str, org_id: str) -> AlertRule | None:
     """Return the org-wide default row (store_id=NULL, zone_id=NULL) for a rule type."""
     stmt = select(AlertRule).where(

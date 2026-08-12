@@ -159,7 +159,7 @@ export default function HeatmapPage() {
           <div>
             <h1 className="text-xl font-semibold text-foreground text-balance">Store Heatmap</h1>
             <p className="mt-0.5 text-sm text-muted-foreground">
-              Visitor density across the floor plan — select a camera, date, and time range.
+              Visitor density across the floor plan — select a camera, date, and local time range.
             </p>
           </div>
           <div className="shrink-0 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground">

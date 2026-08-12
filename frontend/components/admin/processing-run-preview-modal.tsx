@@ -16,6 +16,7 @@ import {
   type ProcessingRunSummary,
 } from '@/lib/api/processing-runs';
 import type { OverlayState } from '@/lib/types';
+import { formatUtcDateTime } from '@/lib/format-datetime';
 
 export function ProcessingRunPreviewModal({
   cameraId,
@@ -73,13 +74,14 @@ export function ProcessingRunPreviewModal({
   }, [cameraId, isOpen]);
 
   useEffect(() => {
-    if (!isOpen || !selectedRunId) return;
+    if (!isOpen || selectedRunId === null) return;
+    const runId = selectedRunId;
 
     let cancelled = false;
 
     async function loadRunDetail() {
       try {
-        const detail = await getProcessingRun(cameraId, selectedRunId);
+        const detail = await getProcessingRun(cameraId, runId);
         if (cancelled) return;
         const mapped = mapProcessingRunSnapshotsToOverlays(
           detail.zones_snapshot,
@@ -146,8 +148,8 @@ export function ProcessingRunPreviewModal({
               >
                 {runs.map((run) => (
                   <option key={run.id} value={run.id}>
-                    {new Date(run.started_at).toLocaleString()}
-                    {run.finished_at ? ` — ${new Date(run.finished_at).toLocaleString()}` : ''}
+                    {formatUtcDateTime(run.started_at)}
+                    {run.finished_at ? ` — ${formatUtcDateTime(run.finished_at)}` : ''}
                   </option>
                 ))}
               </select>

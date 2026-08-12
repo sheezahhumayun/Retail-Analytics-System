@@ -155,6 +155,8 @@ class HeatmapStore:
                 continue
             if merged is None:
                 merged = acc.copy()
+            elif acc.spec != merged.spec:
+                continue
             else:
                 merged.merge_inplace(acc)
         return merged if merged is not None else base_spec

@@ -3,15 +3,15 @@
 import { Trash2, Edit2, Check, X, Zap, Play } from 'lucide-react';
 import type { AdminCamera } from '@/lib/types';
 import { ProcessingRunPreviewModal } from '@/components/admin/processing-run-preview-modal';
+import { ProcessVideoModal } from '@/components/admin/process-video-modal';
 import {
   ANALYTICS_MODULES_LABELS,
   getStatusColor,
   getStatusLabel,
-  processCameraVideo,
-  getCameraProcessStatus,
 } from '@/lib/api/cameras';
 import { ApiClientError } from '@/lib/api/client';
 import { ACTION_STATUS_COLORS } from '@/lib/constants';
+import { formatUtcDateTime } from '@/lib/format-datetime';
 import { useState } from 'react';
 
 interface CameraTableProps {
@@ -56,41 +56,13 @@ export function CameraTable({
   onTestCamera,
   onCameraUpdated,
 }: CameraTableProps) {
-  const [processingId, setProcessingId] = useState<string | null>(null);
+  const [processCamera, setProcessCamera] = useState<AdminCamera | null>(null);
   const [processError, setProcessError] = useState<{ cameraId: string; message: string } | null>(null);
   const [previewCamera, setPreviewCamera] = useState<AdminCamera | null>(null);
 
-  const handleProcess = async (camera: AdminCamera) => {
-    setProcessingId(camera.id);
+  const handleProcess = (camera: AdminCamera) => {
     setProcessError(null);
-    try {
-      let status = await processCameraVideo(camera.id);
-      while (status.status === 'running') {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        status = await getCameraProcessStatus(camera.id);
-      }
-      if (status.status === 'completed') {
-        onCameraUpdated?.({
-          ...camera,
-          lastProcessedAt: status.finished_at ?? new Date().toISOString(),
-        });
-      } else if (status.status === 'failed') {
-        setProcessError({
-          cameraId: camera.id,
-          message: formatProcessErrorMessage(status.message),
-        });
-      }
-    } catch (err) {
-      const message =
-        err instanceof ApiClientError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : 'Failed to start processing';
-      setProcessError({ cameraId: camera.id, message });
-    } finally {
-      setProcessingId(null);
-    }
+    setProcessCamera(camera);
   };
 
   return (
@@ -121,7 +93,7 @@ export function CameraTable({
                     <RecordedBadge camera={camera} />
                     {camera.lastProcessedAt && (
                       <p className="text-xs text-muted-foreground">
-                        {new Date(camera.lastProcessedAt).toLocaleString()}
+                        {formatUtcDateTime(camera.lastProcessedAt)}
                       </p>
                     )}
                     {camera.lastProcessedAt && (
@@ -169,9 +141,8 @@ export function CameraTable({
                   {camera.sourceType === 'recorded' ? (
                     <button
                       onClick={() => handleProcess(camera)}
-                      disabled={processingId === camera.id}
                       title="Process video"
-                      className="p-1.5 hover:bg-muted rounded transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50"
+                      className="p-1.5 hover:bg-muted rounded transition-colors text-muted-foreground hover:text-foreground"
                     >
                       <Play className="w-4 h-4" />
                     </button>
@@ -215,6 +186,17 @@ export function CameraTable({
           ))}
         </tbody>
       </table>
+      {processCamera && (
+        <ProcessVideoModal
+          camera={processCamera}
+          isOpen={Boolean(processCamera)}
+          onClose={() => setProcessCamera(null)}
+          onComplete={(updated) => {
+            onCameraUpdated?.(updated);
+            setProcessCamera(null);
+          }}
+        />
+      )}
       {previewCamera && (
         <ProcessingRunPreviewModal
           cameraId={previewCamera.id}

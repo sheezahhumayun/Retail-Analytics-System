@@ -2,9 +2,9 @@ import { apiRequest, ApiClientError } from "@/lib/api/client";
 import {
   densityToHeatBlobs,
   dwellStatsFromSessions,
-  FLOOR_ZONES,
   mapComparisonInfo,
   mapDwellSessions,
+  mapHeatmapFloorZones,
   mapOccupancyTrend,
   mapQueueSamples,
   mapTrafficBuckets,
@@ -28,6 +28,10 @@ import {
 } from "@/lib/api/mappers";
 import { getDefaultStoreId, getDefaultZoneId, getOrganization } from "@/lib/api/stores";
 import { getIntervalLabel } from "@/lib/analytics-data";
+import {
+  localHeatmapRangeToUtcSegments,
+  type UtcHeatmapQuerySegment,
+} from "@/lib/heatmap-query";
 import { dateRangeForKey } from "@/lib/scope/date-range";
 import type {
   AnalyticsDataResult,
@@ -127,8 +131,11 @@ export interface DwellParams extends DateRangeParams {
 
 export interface HeatmapParams {
   camera_id: string;
+  /** Local calendar date (YYYY-MM-DD) from the date picker. */
   date: string;
+  /** Local wall-clock start time (HH:MM) from the time picker. */
   from_time: string;
+  /** Local wall-clock end time (HH:MM) from the time picker. */
   to_time: string;
 }
 
@@ -396,22 +403,102 @@ export async function getQueueZoneDwellAverageSeconds(
   return response.avg_dwell_seconds ?? null;
 }
 
+function mergeHeatmapResponses(
+  responses: BackendHeatmapResponse[],
+): BackendHeatmapResponse {
+  const [first, ...rest] = responses;
+  if (!first) {
+    throw new Error("mergeHeatmapResponses requires at least one response");
+  }
+  if (rest.length === 0) {
+    return first;
+  }
+
+  const mergedDensity = first.density.map((row) => [...row]);
+  const mergedTrajectory = first.trajectory.map((row) => [...row]);
+
+  for (const response of rest) {
+    if (
+      response.spec.width !== first.spec.width ||
+      response.spec.height !== first.spec.height ||
+      response.spec.grid_scale !== first.spec.grid_scale
+    ) {
+      continue;
+    }
+    for (let r = 0; r < mergedDensity.length; r++) {
+      for (let c = 0; c < mergedDensity[r].length; c++) {
+        mergedDensity[r][c] += response.density[r][c];
+        mergedTrajectory[r][c] += response.trajectory[r][c];
+      }
+    }
+  }
+
+  const totalHits =
+    mergedDensity.flat().reduce((sum, value) => sum + value, 0) +
+    mergedTrajectory.flat().reduce((sum, value) => sum + value, 0);
+
+  return {
+    ...first,
+    density: mergedDensity,
+    trajectory: mergedTrajectory,
+    total_hits: totalHits,
+  };
+}
+
+async function fetchHeatmapSegment(
+  camera_id: string,
+  segment: UtcHeatmapQuerySegment,
+): Promise<BackendHeatmapResponse> {
+  return apiRequest<BackendHeatmapResponse>("/api/analytics/heatmap", {
+    query: {
+      camera_id,
+      date: segment.date,
+      from_time: segment.from_time,
+      to_time: segment.to_time,
+    },
+  });
+}
+
 export async function getHeatmap({
   camera_id,
   date,
   from_time,
   to_time,
 }: HeatmapParams): Promise<HeatmapResult> {
-  const response = await apiRequest<BackendHeatmapResponse>(
-    "/api/analytics/heatmap",
-    {
-      query: {
-        camera_id,
-        date,
-        from_time,
-        to_time,
-      },
-    },
+  const utcSegments = localHeatmapRangeToUtcSegments(date, from_time, to_time);
+
+  const [zoneShapes, ...segmentResults] = await Promise.all([
+    apiRequest<BackendZoneShape[]>("/api/zones", {
+      query: { camera_id },
+    }),
+    ...utcSegments.map((segment) =>
+      fetchHeatmapSegment(camera_id, segment).catch((err) => {
+        if (err instanceof ApiClientError && err.status === 404) {
+          return null;
+        }
+        throw err;
+      }),
+    ),
+  ]);
+
+  const heatmapResults = segmentResults.filter(
+    (result): result is BackendHeatmapResponse => result !== null,
+  );
+
+  if (heatmapResults.length === 0) {
+    throw new ApiClientError(
+      `No heatmap data for camera '${camera_id}' on ${date}.`,
+      "heatmap_not_found",
+      404,
+    );
+  }
+
+  const response = mergeHeatmapResponses(heatmapResults);
+
+  const floor_zones = mapHeatmapFloorZones(
+    zoneShapes,
+    response.spec.width,
+    response.spec.height,
   );
 
   return {
@@ -420,7 +507,7 @@ export async function getHeatmap({
     from_time,
     to_time,
     blobs: densityToHeatBlobs(response.density),
-    floor_zones: FLOOR_ZONES,
+    floor_zones,
   };
 }
 

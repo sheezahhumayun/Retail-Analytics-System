@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import socket
 import time
 from pathlib import Path
@@ -16,6 +17,8 @@ from .opencv_rtsp import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+DEFAULT_SOURCE_FPS_FALLBACK = 30.0
 
 
 def recorded_source_file_exists(rtsp_url: str | None) -> bool:
@@ -41,12 +44,13 @@ def test_camera_stream(rtsp_url: str | None, *, timeout: float = 5.0) -> CameraT
                 message=f"Local video file not found: {rtsp_url}",
             )
         latency_ms = int((time.perf_counter() - started) * 1000)
-        resolution, fps = _probe_video_optional(path)
+        resolution, fps, duration_seconds = _probe_video_optional(path)
         return CameraTestResponse(
             status="success",
             latency_ms=latency_ms,
             resolution=resolution,
             fps=fps,
+            duration_seconds=duration_seconds,
             message="Local file is readable",
         )
 
@@ -98,7 +102,7 @@ def _default_port(scheme: str) -> int:
     return 80
 
 
-def _probe_video_optional(path: Path) -> tuple[str | None, float | None]:
+def _probe_video_optional(path: Path) -> tuple[str | None, float | None, float | None]:
     try:
         import cv2  # type: ignore[import-untyped]
 
@@ -106,16 +110,22 @@ def _probe_video_optional(path: Path) -> tuple[str | None, float | None]:
             cap = cv2.VideoCapture(str(path))
             try:
                 if not cap.isOpened():
-                    return None, None
+                    return None, None, None
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                fps = float(cap.get(cv2.CAP_PROP_FPS)) or None
+                fps = float(cap.get(cv2.CAP_PROP_FPS))
+                if not math.isfinite(fps) or fps <= 0:
+                    fps = DEFAULT_SOURCE_FPS_FALLBACK
                 resolution = f"{width}x{height}" if width and height else None
-                return resolution, fps
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                duration_seconds = None
+                if frame_count > 0 and fps > 0:
+                    duration_seconds = frame_count / fps
+                return resolution, fps, duration_seconds
             finally:
                 cap.release()
     except ImportError:
-        return None, None
+        return None, None, None
 
 
 def _probe_stream_optional(url: str) -> tuple[str | None, float | None]:

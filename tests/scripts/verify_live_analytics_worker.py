@@ -25,13 +25,14 @@ from sqlalchemy import func
 from sqlmodel import select
 
 from analytics.modules import MODULE_ENTRY_EXIT, MODULE_ZONES
-from backend.app.services.live_analytics_worker import (
+from inference.pipeline.live_analytics_worker import (
     _start_live_analytics_worker,
     _stop_live_analytics_worker,
     get_io_worker_diagnostics,
     get_running_live_camera_ids,
     list_live_io_thread_names,
     reconcile_live_cameras,
+    stop_live_workers_for_org,
 )
 from database.models import Camera, CountingLine, Event, Organization, Store, Zone
 from database.seed import ORG_ID, STORE_ID, seed_reference_data
@@ -219,8 +220,6 @@ def main() -> int:
             "diagnostics:",
             get_io_worker_diagnostics(),
         )
-
-        from backend.app.services.live_analytics_worker import stop_live_workers_for_org
 
         stopped_count = stop_live_workers_for_org(ORG_ID)
         running_after = get_running_live_camera_ids()

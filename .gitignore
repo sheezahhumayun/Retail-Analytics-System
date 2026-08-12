@@ -31,6 +31,9 @@ tests/videos/*
 # Heatmap hour-bucket accumulators (Module 8)
 data/heatmaps/
 
+# Backend runtime state (PID files, locks)
+data/run/
+
 # OS
 .DS_Store
 Thumbs.db

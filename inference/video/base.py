@@ -18,6 +18,7 @@ from __future__ import annotations
 import abc
 import math
 import time
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -75,6 +76,21 @@ def resize_long_side(frame: "np.ndarray", target_long_side: int) -> "np.ndarray"
     new_w = max(1, int(round(w * scale)))
     new_h = max(1, int(round(h * scale)))
     return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def anchor_timestamp(
+    media_or_wall_ts: float,
+    is_live: bool,
+    recording_start: datetime | None,
+) -> float:
+    """Map file media seconds to epoch seconds when ``recording_start`` is set.
+
+    Live sources or missing ``recording_start``: return ``media_or_wall_ts`` unchanged.
+    File replays: ``recording_start`` wall time + elapsed media seconds.
+    """
+    if is_live or recording_start is None:
+        return media_or_wall_ts
+    return recording_start.timestamp() + media_or_wall_ts
 
 
 def compute_frame_interval(source_fps: float, target_fps: float) -> int:

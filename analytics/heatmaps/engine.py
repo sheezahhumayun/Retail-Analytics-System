@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -15,6 +16,8 @@ from .accumulator import HeatmapAccumulator
 from .renderer import render_heatmap_overlay
 from .storage import HeatmapStore, _normalize_timezone
 from .types import HeatmapFrameSpec, HourBucketKey
+
+logger = logging.getLogger(__name__)
 
 
 class HeatmapEngine:
@@ -105,8 +108,23 @@ class HeatmapEngine:
             return
         existing = self._store.load(self._current_key)
         if existing is not None:
-            existing.merge_inplace(self._live)
-            self._store.save(self._current_key, existing)
+            if existing.spec != self._live.spec:
+                logger.warning(
+                    "Frame spec changed for camera %s hour bucket %s: "
+                    "replacing %dx%d (grid_scale=%d) with %dx%d (grid_scale=%d)",
+                    self._camera_id,
+                    self._current_key,
+                    existing.spec.width,
+                    existing.spec.height,
+                    existing.spec.grid_scale,
+                    self._live.spec.width,
+                    self._live.spec.height,
+                    self._live.spec.grid_scale,
+                )
+                self._store.save(self._current_key, self._live)
+            else:
+                existing.merge_inplace(self._live)
+                self._store.save(self._current_key, existing)
         else:
             self._store.save(self._current_key, self._live)
         self._live.clear()

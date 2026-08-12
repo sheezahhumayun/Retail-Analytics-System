@@ -57,7 +57,7 @@ def pg_snapshot(label: str) -> str:
 
 
 def main() -> int:
-    from backend.app.services.live_analytics_worker import (
+    from inference.pipeline.live_analytics_worker import (
         _start_live_analytics_worker,
         _stop_live_analytics_worker,
         reconcile_live_cameras,

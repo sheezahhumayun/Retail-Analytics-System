@@ -77,8 +77,19 @@ class CameraTestResponse(BaseModel):
     latency_ms: int | None = None
     resolution: str | None = None
     fps: float | None = None
+    duration_seconds: float | None = Field(
+        default=None,
+        description="Video file duration in seconds (recorded/file sources only).",
+    )
     message: str | None = None
     camera_status: Literal["online", "offline", "error", "disabled", "processing"] | None = Field(
         default=None,
         description="Persisted camera status after this probe (live cameras only).",
+    )
+
+
+class CameraProcessRequest(BaseModel):
+    recording_start: str | None = Field(
+        default=None,
+        description="ISO datetime anchoring media t=0 for DB timestamps (optional).",
     )

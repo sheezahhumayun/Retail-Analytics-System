@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
 
 from fastapi import FastAPI
@@ -14,7 +15,11 @@ from .services.camera_health import (
     refresh_all_live_camera_statuses,
     refresh_all_recorded_camera_statuses,
 )
-from .services.camera_process import reconcile_orphaned_processing_runs
+from .services.camera_process import (
+    reconcile_orphaned_processing_runs,
+    start_live_analytics_subprocess,
+    stop_live_analytics_subprocess,
+)
 
 from .config import get_settings
 from .exceptions import register_exception_handlers
@@ -39,6 +44,8 @@ from .routers import (
 )
 
 settings = get_settings()
+
+_live_analytics_proc: subprocess.Popen[str] | None = None
 
 app = FastAPI(
     title=settings.app_name,
@@ -157,16 +164,17 @@ def log_database_pool_settings() -> None:
         MAX_OVERFLOW,
     )
     _start_camera_health_worker(settings.camera_health_interval_seconds)
-    from .services.live_analytics_worker import _start_live_analytics_worker
-
-    _start_live_analytics_worker(settings.live_analytics_reconcile_interval_seconds)
+    global _live_analytics_proc
+    _live_analytics_proc = start_live_analytics_subprocess(
+        settings.live_analytics_reconcile_interval_seconds,
+    )
 
 
 @app.on_event("shutdown")
 def shutdown_background_workers() -> None:
-    from .services.live_analytics_worker import _stop_live_analytics_worker
-
-    _stop_live_analytics_worker()
+    global _live_analytics_proc
+    stop_live_analytics_subprocess(_live_analytics_proc)
+    _live_analytics_proc = None
     _stop_camera_health_worker()
 
 

@@ -8,12 +8,12 @@ import type { CreateCameraData } from '@/lib/api/cameras';
 import {
   ANALYTICS_MODULES_LABELS,
   ensureStoresLoaded,
-  getCameraProcessStatus,
-  processCameraVideo,
   STORES,
 } from '@/lib/api/cameras';
 import { getProcessingRuns } from '@/lib/api/processing-runs';
 import { ProcessingRunPreviewModal } from '@/components/admin/processing-run-preview-modal';
+import { ProcessVideoModal } from '@/components/admin/process-video-modal';
+import { formatUtcDateTime } from '@/lib/format-datetime';
 
 interface CameraModalProps {
   camera?: AdminCamera;
@@ -72,8 +72,7 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
   const [storesLoading, setStoresLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [validationError, setValidationError] = useState('');
-  const [processing, setProcessing] = useState(false);
-  const [processMessage, setProcessMessage] = useState('');
+  const [processModalOpen, setProcessModalOpen] = useState(false);
   const [hasCompletedRun, setHasCompletedRun] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
 
@@ -84,7 +83,6 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
 
     let cancelled = false;
     setValidationError('');
-    setProcessMessage('');
 
     async function hydrateForm() {
       setStoresLoading(true);
@@ -200,35 +198,10 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
     }
   };
 
-  const handleProcessVideo = async () => {
+  const handleProcessVideo = () => {
     if (!camera || camera.sourceType !== 'recorded') return;
-    setProcessing(true);
-    setProcessMessage('Starting video processing…');
     setValidationError('');
-    try {
-      let status = await processCameraVideo(camera.id);
-      while (status.status === 'running') {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        status = await getCameraProcessStatus(camera.id);
-        setProcessMessage(status.message ?? 'Processing video…');
-      }
-      if (status.status === 'failed') {
-        setValidationError(status.message ?? 'Video processing failed');
-        return;
-      }
-      setProcessMessage('Video processed successfully.');
-      setHasCompletedRun(true);
-      onProcessed?.({
-        ...camera,
-        lastProcessedAt: status.finished_at ?? new Date().toISOString(),
-      });
-    } catch (err) {
-      setValidationError(
-        err instanceof Error ? err.message : 'Failed to process video',
-      );
-    } finally {
-      setProcessing(false);
-    }
+    setProcessModalOpen(true);
   };
 
   const toggleModule = (module: AnalyticsModule) => {
@@ -265,11 +238,6 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
           {validationError && (
             <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-400">
               {validationError}
-            </div>
-          )}
-          {processMessage && !validationError && (
-            <div className="rounded-lg border border-primary/30 bg-primary/10 px-4 py-3 text-sm text-foreground">
-              {processMessage}
             </div>
           )}
 
@@ -374,7 +342,7 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
                   <p className="text-sm font-medium text-foreground">Recorded video processing</p>
                   <p className="text-xs text-muted-foreground mt-1">
                     {camera.lastProcessedAt
-                      ? `Last processed: ${new Date(camera.lastProcessedAt).toLocaleString()}`
+                      ? `Last processed: ${formatUtcDateTime(camera.lastProcessedAt)}`
                       : 'Not yet processed'}
                   </p>
                 </div>
@@ -397,10 +365,9 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
                   <button
                     type="button"
                     onClick={handleProcessVideo}
-                    disabled={processing}
-                    className="px-3 py-1.5 rounded bg-primary text-primary-foreground text-sm hover:bg-primary/90 disabled:opacity-60"
+                    className="px-3 py-1.5 rounded bg-primary text-primary-foreground text-sm hover:bg-primary/90"
                   >
-                    {processing ? 'Processing…' : 'Process Video'}
+                    Process Video
                   </button>
                 </div>
               </div>
@@ -509,6 +476,17 @@ export function CameraModal({ camera, isOpen, onClose, onSave, onProcessed }: Ca
           cameraName={camera.name}
           isOpen={previewOpen}
           onClose={() => setPreviewOpen(false)}
+        />
+      )}
+      {camera && camera.sourceType === 'recorded' && (
+        <ProcessVideoModal
+          camera={camera}
+          isOpen={processModalOpen}
+          onClose={() => setProcessModalOpen(false)}
+          onComplete={(updated) => {
+            setHasCompletedRun(true);
+            onProcessed?.(updated);
+          }}
         />
       )}
     </div>

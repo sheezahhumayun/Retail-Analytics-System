@@ -19,6 +19,7 @@ from .base import (
     CameraState,
     VideoSource,
     VideoSourceError,
+    anchor_timestamp,
     compute_frame_interval,
     resize_long_side,
 )
@@ -44,4 +45,5 @@ __all__ = [
     "DEFAULT_SOURCE_FPS_FALLBACK",
     "resize_long_side",
     "compute_frame_interval",
+    "anchor_timestamp",
 ]

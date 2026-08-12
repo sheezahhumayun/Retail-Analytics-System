@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,6 +25,12 @@ from database.session import session_scope
 from .org_scope import cameras_for_org_stmt
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+PID_FILE = REPO_ROOT / "data" / "run" / "live_analytics_worker.pid"
+LOCK_FILE = REPO_ROOT / "data" / "run" / "live_analytics_worker.lock"
+LIVE_ANALYTICS_WORKER_CMD = "inference.pipeline.live_analytics_worker"
+_LOCK_RETRY_INTERVAL_SECONDS = 0.2
+_LOCK_TIMEOUT_SECONDS = 2.0
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +245,243 @@ def _terminate_proc(proc: subprocess.Popen[str]) -> None:
             pass
 
 
+_live_analytics_shutdown_requested = False
+
+
+def _acquire_cleanup_lock() -> int | None:
+    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            return os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            time.sleep(_LOCK_RETRY_INTERVAL_SECONDS)
+    return None
+
+
+def _release_cleanup_lock(lock_fd: int | None) -> None:
+    if lock_fd is not None:
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _is_process_alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        check = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return str(pid) in check.stdout and "No tasks" not in check.stdout
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _process_command_line(pid: int) -> str | None:
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        lines = [
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip() and line.strip() != "CommandLine"
+        ]
+        return lines[0] if lines else None
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+
+
+def _terminate_external_pid(pid: int) -> None:
+    if not _is_process_alive(pid):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T"],
+                capture_output=True,
+                check=False,
+            )
+        return
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _is_process_alive(pid):
+            return
+        time.sleep(0.1)
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                check=False,
+            )
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _remove_live_analytics_pid_file() -> None:
+    try:
+        PID_FILE.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Failed to remove live analytics PID file %s: %s", PID_FILE, exc)
+
+
+def _cleanup_stale_live_analytics_worker() -> None:
+    try:
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd: int | None = None
+        try:
+            lock_fd = _acquire_cleanup_lock()
+            if lock_fd is None:
+                logger.warning(
+                    "Could not acquire live analytics cleanup lock at %s within %.1fs; "
+                    "skipping stale worker cleanup",
+                    LOCK_FILE,
+                    _LOCK_TIMEOUT_SECONDS,
+                )
+                return
+
+            if not PID_FILE.is_file():
+                return
+
+            try:
+                pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring corrupt live analytics PID file %s: %s",
+                    PID_FILE,
+                    exc,
+                )
+                _remove_live_analytics_pid_file()
+                return
+
+            alive = _is_process_alive(pid)
+            cmdline = _process_command_line(pid) if alive else None
+            matches = (
+                alive
+                and cmdline is not None
+                and LIVE_ANALYTICS_WORKER_CMD in cmdline
+            )
+
+            if matches:
+                logger.info(
+                    "Cleaning up stale live analytics worker (pid=%s, cmdline=%r)",
+                    pid,
+                    cmdline,
+                )
+                _terminate_external_pid(pid)
+                if _is_process_alive(pid):
+                    logger.warning(
+                        "Stale live analytics worker pid=%s may still be running "
+                        "after termination attempt",
+                        pid,
+                    )
+                else:
+                    logger.info(
+                        "Terminated stale live analytics worker pid=%s "
+                        "(verified cmdline contained %r)",
+                        pid,
+                        LIVE_ANALYTICS_WORKER_CMD,
+                    )
+            elif alive:
+                logger.info(
+                    "Live analytics PID file referenced pid=%s but cmdline did not match "
+                    "%r (%r); not killing",
+                    pid,
+                    LIVE_ANALYTICS_WORKER_CMD,
+                    cmdline,
+                )
+            else:
+                logger.info(
+                    "Live analytics PID file referenced stale pid=%s "
+                    "(process not running); removing PID file",
+                    pid,
+                )
+
+            _remove_live_analytics_pid_file()
+        finally:
+            _release_cleanup_lock(lock_fd)
+    except Exception:
+        logger.warning("Stale live analytics worker cleanup failed", exc_info=True)
+
+
+def start_live_analytics_subprocess(
+    reconcile_interval_seconds: int,
+) -> subprocess.Popen[str]:
+    """Launch the continuous live-analytics worker in the inference venv."""
+    global _live_analytics_shutdown_requested
+    _live_analytics_shutdown_requested = False
+
+    _cleanup_stale_live_analytics_worker()
+
+    python = _inference_python()
+    proc = subprocess.Popen(
+        [
+            str(python),
+            "-m",
+            "inference.pipeline.live_analytics_worker",
+            "--reconcile-interval",
+            str(reconcile_interval_seconds),
+        ],
+        cwd=str(REPO_ROOT),
+    )
+    logger.info(
+        "Started live analytics worker subprocess (pid=%s, python=%s)",
+        proc.pid,
+        python,
+    )
+
+    try:
+        PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(f"{proc.pid}\n", encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Failed to write live analytics PID file %s: %s", PID_FILE, exc)
+
+    def _watch() -> None:
+        code = proc.wait()
+        if not _live_analytics_shutdown_requested:
+            logger.error(
+                "Live analytics worker subprocess exited unexpectedly (code=%s)",
+                code,
+            )
+
+    threading.Thread(
+        target=_watch,
+        daemon=True,
+        name="live-analytics-watchdog",
+    ).start()
+    return proc
+
+
+def stop_live_analytics_subprocess(proc: subprocess.Popen[str] | None) -> None:
+    """Terminate the live-analytics worker subprocess."""
+    global _live_analytics_shutdown_requested
+    if proc is None:
+        return
+    _live_analytics_shutdown_requested = True
+    _terminate_proc(proc)
+    _remove_live_analytics_pid_file()
+
+
 def kill_processing_runs_for_org(org_id: str) -> int:
     """Terminate in-flight recorded-video workers for ``org_id`` and mark runs failed."""
     with session_scope() as session:
@@ -287,23 +533,30 @@ def kill_processing_runs_for_org(org_id: str) -> int:
     return killed
 
 
-def _run_subprocess(run_id: str, camera_id: str) -> None:
+def _run_subprocess(
+    run_id: str,
+    camera_id: str,
+    recording_start: str | None = None,
+) -> None:
     python = _inference_python()
     status = "failed"
     message = "Processing failed"
     preview_frame_path: str | None = None
     proc: subprocess.Popen[str] | None = None
     try:
+        cmd = [
+            str(python),
+            "-m",
+            "inference.pipeline.process_recorded",
+            "--camera-id",
+            camera_id,
+            "--run-id",
+            run_id,
+        ]
+        if recording_start is not None:
+            cmd.extend(["--recording-start", recording_start])
         proc = subprocess.Popen(
-            [
-                str(python),
-                "-m",
-                "inference.pipeline.process_recorded",
-                "--camera-id",
-                camera_id,
-                "--run-id",
-                run_id,
-            ],
+            cmd,
             cwd=str(REPO_ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -338,12 +591,16 @@ def _run_subprocess(run_id: str, camera_id: str) -> None:
         _unregister_worker(camera_id, current_thread)
 
 
-def start_recorded_processing(camera_id: str) -> str:
+def start_recorded_processing(
+    camera_id: str,
+    *,
+    recording_start: str | None = None,
+) -> str:
     """Claim a DB run row, then spawn the background subprocess thread."""
     run_id = claim_processing_run(camera_id)
     thread = threading.Thread(
         target=_run_subprocess,
-        args=(run_id, camera_id),
+        args=(run_id, camera_id, recording_start),
         name=f"process-camera-{camera_id}",
         daemon=True,
     )

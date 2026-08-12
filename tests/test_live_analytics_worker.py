@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from backend.app.services import live_analytics_worker as law
+from inference.pipeline import live_analytics_worker as law
 
 
 def test_stop_live_workers_for_org_targets_org_cameras(monkeypatch):

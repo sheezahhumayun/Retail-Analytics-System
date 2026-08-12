@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 
@@ -19,23 +20,29 @@ POOL_TIMEOUT = 30
 POOL_RECYCLE = 1800
 
 _engine: Engine | None = None
+_engine_url: str | None = None
+_engine_lock = threading.Lock()
 
 
 def get_engine(*, database_url: str | None = None, echo: bool = False) -> Engine:
     """Return a process-wide SQLAlchemy engine."""
-    global _engine
+    global _engine, _engine_url
     url = database_url or get_database_url()
-    if _engine is None or str(_engine.url) != url:
-        _engine = create_engine(
-            url,
-            echo=echo,
-            pool_pre_ping=True,
-            pool_size=POOL_SIZE,
-            max_overflow=MAX_OVERFLOW,
-            pool_timeout=POOL_TIMEOUT,
-            pool_recycle=POOL_RECYCLE,
-        )
-    return _engine
+    with _engine_lock:
+        if _engine is None or _engine_url != url:
+            if _engine is not None:
+                _engine.dispose()
+            _engine = create_engine(
+                url,
+                echo=echo,
+                pool_pre_ping=True,
+                pool_size=POOL_SIZE,
+                max_overflow=MAX_OVERFLOW,
+                pool_timeout=POOL_TIMEOUT,
+                pool_recycle=POOL_RECYCLE,
+            )
+            _engine_url = url
+        return _engine
 
 
 def log_pool_settings(engine: Engine | None = None) -> None:
@@ -54,10 +61,11 @@ def log_pool_settings(engine: Engine | None = None) -> None:
 
 def reset_engine() -> None:
     """Drop cached engine (tests)."""
-    global _engine
+    global _engine, _engine_url
     if _engine is not None:
         _engine.dispose()
     _engine = None
+    _engine_url = None
 
 
 def create_all(*, database_url: str | None = None) -> None:

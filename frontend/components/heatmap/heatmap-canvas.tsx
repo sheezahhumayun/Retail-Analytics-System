@@ -56,9 +56,24 @@ function DecorativeFloorPlan() {
   );
 }
 
+function polygonCentroid(points: { x: number; y: number }[]): { x: number; y: number } {
+  let x = 0;
+  let y = 0;
+  for (const point of points) {
+    x += point.x;
+    y += point.y;
+  }
+  const count = points.length;
+  return { x: x / count, y: y / count };
+}
+
+function pctYToViewBox(yPct: number): number {
+  return (yPct / 100) * 56.25;
+}
+
 /**
  * Renders a store floor-plan grid with SVG radial-gradient heat blobs on top.
- * All coordinates are in viewBox percentage units so it scales freely.
+ * Zone overlays use polygon vertices in 0–100% frame space; heat blobs use their own viewBox.
  */
 export function HeatmapCanvas({
   blobs,
@@ -105,32 +120,38 @@ export function HeatmapCanvas({
         aria-hidden
       >
         {zones.map((z) => {
-          const sx = (z.x / 100) * 100;
-          const sy = (z.y / 100) * 56.25;
-          const sw = (z.w / 100) * 100;
-          const sh = (z.h / 100) * 56.25;
+          if (z.points.length < 3) {
+            return null;
+          }
+          const pointsAttr = z.points
+            .map((point) => `${point.x},${pctYToViewBox(point.y)}`)
+            .join(' ');
           return (
-            <rect
+            <polygon
               key={z.id}
-              x={sx} y={sy} width={sw} height={sh}
+              points={pointsAttr}
               fill="none"
               stroke="#3a4060"
               strokeWidth="0.35"
               strokeDasharray="1.5,1"
-              rx="0.4"
             />
           );
         })}
 
         {zones.map((z) => {
-          const lx = ((z.x + z.w / 2) / 100) * 100;
-          const ly = ((z.y + 2.5) / 100) * 56.25;
+          if (z.points.length < 3) {
+            return null;
+          }
+          const centroid = polygonCentroid(z.points);
+          const lx = centroid.x;
+          const ly = pctYToViewBox(centroid.y);
           return (
             <text
               key={`lbl-${z.id}`}
               x={lx}
               y={ly}
               textAnchor="middle"
+              dominantBaseline="middle"
               fontSize="2"
               fill="#5a6080"
               fontFamily="ui-sans-serif, system-ui, sans-serif"
@@ -159,10 +180,10 @@ export function HeatmapCanvas({
               r="50%"
               gradientUnits="objectBoundingBox"
             >
-              <stop offset="0%"   stopColor={b.color}    stopOpacity={b.intensity} />
-              <stop offset="35%"  stopColor={b.color}    stopOpacity={b.intensity * 0.65} />
-              <stop offset="65%"  stopColor={midColor(b.color)} stopOpacity={b.intensity * 0.3} />
-              <stop offset="100%" stopColor="#0044ff"    stopOpacity="0" />
+              <stop offset="0%" stopColor={b.color} stopOpacity="0.92" />
+              <stop offset="40%" stopColor={b.color} stopOpacity="0.58" />
+              <stop offset="72%" stopColor={b.color} stopOpacity="0.22" />
+              <stop offset="100%" stopColor={b.color} stopOpacity="0" />
             </radialGradient>
           ))}
         </defs>
@@ -181,6 +202,12 @@ export function HeatmapCanvas({
         </g>
       </svg>
 
+      {zones.length === 0 && (
+        <div className="absolute bottom-3 left-3 rounded-md border border-white/10 bg-black/60 px-2.5 py-1 text-[10px] text-muted-foreground backdrop-blur-sm">
+          No zones configured for this camera
+        </div>
+      )}
+
       <div className="absolute top-3 right-3 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 backdrop-blur-sm border border-white/10">
         <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
         <span className="text-[10px] font-medium tracking-wider text-green-400 uppercase">Live</span>
@@ -191,19 +218,3 @@ export function HeatmapCanvas({
   );
 }
 
-/** Produce a warm intermediate colour between hot red→orange and cool blue */
-function midColor(hotColor: string): string {
-  const warm: Record<string, string> = {
-    "#ff2200": "#ff6600",
-    "#ff1100": "#ff5500",
-    "#ff5500": "#ffaa00",
-    "#ff8800": "#ffcc44",
-    "#ffbb00": "#88dd88",
-    "#ffcc00": "#44ddaa",
-    "#44ddff": "#0088ff",
-    "#00aaff": "#0055cc",
-    "#0088ff": "#0044aa",
-    "#44eebb": "#00bbaa",
-  };
-  return warm[hotColor] ?? "#ffaa00";
-}

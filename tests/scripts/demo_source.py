@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from inference.video import VideoSource, create_video_source
+from inference.video import VideoSource, anchor_timestamp, create_video_source
 
 _LIVE_SCHEMES = ("rtsp://", "rtsps://", "rtmp://")
 
@@ -156,9 +156,7 @@ def analytics_timestamp(
     recording_start: datetime | None,
 ) -> float:
     """File replays: epoch = recording_start + media time. Live: wall clock as-is."""
-    if src.is_live() or recording_start is None:
-        return media_or_wall_ts
-    return recording_start.timestamp() + media_or_wall_ts
+    return anchor_timestamp(media_or_wall_ts, src.is_live(), recording_start)
 
 
 def current_hour_window(

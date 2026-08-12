@@ -210,6 +210,10 @@ export function AlertThresholdsModal({ isOpen, onClose }: AlertThresholdsModalPr
             <p className="text-sm text-muted-foreground">Loading alert thresholds…</p>
           ) : loadError ? (
             <p className="text-sm text-red-400">{loadError}</p>
+          ) : rules.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No alert rules configured for this organization yet.
+            </p>
           ) : (
             <div className="space-y-3">
               {rules.map((rule) => (

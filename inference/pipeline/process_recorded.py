@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import cv2
@@ -38,6 +39,7 @@ from database import AnalyticsDbWriter, DbWriterConfig, session_scope
 from database.models import Camera, CountingLine as DbCountingLine, Zone as DbZone
 from inference.detection import create_detector
 from inference.tracking import Tracker
+from inference.video import anchor_timestamp
 from inference.video import create_video_source
 from tests.scripts.demo_source import iter_frames, warmup_source
 
@@ -50,6 +52,28 @@ def _resolve_video_path(rtsp_url: str) -> Path:
     if candidate.is_file():
         return candidate
     raise FileNotFoundError(f"Video file not found: {rtsp_url}")
+
+
+def _parse_recording_start(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _default_recording_start(media_duration: float | None) -> datetime:
+    """Anchor file replay so the video timeline ends near the current moment."""
+    now = datetime.now(timezone.utc)
+    duration: float | None = None
+    if isinstance(media_duration, (int, float)):
+        duration = float(media_duration)
+        if not math.isfinite(duration) or duration <= 0:
+            duration = None
+    if duration is None:
+        return now
+    return now - timedelta(seconds=duration)
 
 
 def _zone_from_db(row: DbZone) -> Zone:
@@ -96,6 +120,8 @@ def process_recorded_camera(
     run_id: str | None = None,
     backend: str = "ultralytics",
     target_fps: float = 10.0,
+    recording_start: datetime | None = None,
+    explicit_recording_start: bool = False,
 ) -> dict[str, object]:
     """Run detect→track→analytics→DB for a recorded camera's video file."""
     with session_scope() as session:
@@ -200,8 +226,26 @@ def process_recorded_camera(
                 detector=detector,
                 camera_id=camera_id,
             )
+            media_duration = src.get_media_duration()
+            if explicit_recording_start:
+                if recording_start is None:
+                    raise ValueError("recording_start is required when explicitly requested")
+                recording_start_dt = recording_start
+            else:
+                recording_start_dt = (
+                    recording_start
+                    if recording_start is not None
+                    else _default_recording_start(media_duration)
+                )
+
             try:
                 for frame, ts in iter_frames(src, duration=None, preview=False):
+                    anchored_ts = anchor_timestamp(
+                        ts,
+                        src.is_live(),
+                        recording_start_dt,
+                    )
+
                     if preview_frame_path is None and run_id is not None:
                         preview_frame_path = _save_preview_frame(camera_id, run_id, frame)
 
@@ -217,7 +261,7 @@ def process_recorded_camera(
                         )
                         heatmap_engine.set_reference_frame(frame)
 
-                    dets = detector.detect(frame, camera_id=camera_id, timestamp=ts)
+                    dets = detector.detect(frame, camera_id=camera_id, timestamp=anchored_ts)
                     tracks = tracker.update(dets)
                     if counter is not None:
                         counter.update(tracks)
@@ -225,8 +269,8 @@ def process_recorded_camera(
                         for ze in zone_detector.update(tracks):
                             engine.process_zone_event(ze)
                     if heatmap_engine is not None:
-                        heatmap_engine.update(tracks, ts)
-                    engine.close_stale_dwell_sessions(ts)
+                        heatmap_engine.update(tracks, anchored_ts)
+                    engine.close_stale_dwell_sessions(anchored_ts)
                     frames_processed += 1
             finally:
                 if heatmap_engine is not None:
@@ -250,6 +294,7 @@ def process_recorded_camera(
             "events_published": events_published,
             "processed_at": processed_at.isoformat(),
             "preview_frame_path": preview_frame_path,
+            "recording_start": recording_start_dt.isoformat(),
         }
     finally:
         db_writer.close()
@@ -265,7 +310,15 @@ def main() -> int:
     )
     parser.add_argument("--backend", choices=["ultralytics", "onnx"], default="ultralytics")
     parser.add_argument("--target-fps", type=float, default=10.0)
+    parser.add_argument(
+        "--recording-start",
+        default=None,
+        help="ISO datetime anchoring media t=0 for DB timestamps (optional)",
+    )
     args = parser.parse_args()
+
+    explicit = args.recording_start is not None
+    recording_start = _parse_recording_start(args.recording_start) if explicit else None
 
     try:
         result = process_recorded_camera(
@@ -273,6 +326,8 @@ def main() -> int:
             run_id=args.run_id,
             backend=args.backend,
             target_fps=args.target_fps,
+            recording_start=recording_start,
+            explicit_recording_start=explicit,
         )
     except (ValueError, FileNotFoundError) as exc:
         print(str(exc), file=sys.stderr)

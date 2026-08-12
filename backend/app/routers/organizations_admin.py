@@ -20,6 +20,7 @@ from ..schemas.extended.organizations_admin import (
 )
 from ..schemas.extended.users import UserResponse
 from ..schemas.stores import StoreResponse
+from ..services.alert_rules import seed_org_wide_default_alert_rules
 from ..services.camera_process import kill_processing_runs_for_org
 from ..services.org_delete import delete_organization_cascade
 from ..services.org_scope import stores_for_org_stmt
@@ -53,6 +54,15 @@ def create_organization(
     session.add(org)
     session.flush()
     session.refresh(org)
+    try:
+        seed_org_wide_default_alert_rules(session, org.id)
+    except Exception:
+        logger.warning(
+            "Failed to seed org-wide alert_rules for organization %s; org created but "
+            "threshold defaults will be missing until backfilled",
+            org.id,
+            exc_info=True,
+        )
     return _to_response(org)
 
 
@@ -148,20 +158,11 @@ def toggle_organization(
     if new_status == ORG_STATUS_DISABLED:
         session.commit()
         killed = kill_processing_runs_for_org(org_id)
-        from ..services.live_analytics_worker import stop_live_workers_for_org
-
-        stopped_live = stop_live_workers_for_org(org_id)
         if killed:
             logger.info(
                 "Disabled organization %s; cancelled %d in-flight processing run(s)",
                 org_id,
                 killed,
-            )
-        if stopped_live:
-            logger.info(
-                "Disabled organization %s; stopped %d live analytics camera(s)",
-                org_id,
-                stopped_live,
             )
     return _to_response(org)
 

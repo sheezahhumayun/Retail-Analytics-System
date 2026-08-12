@@ -129,9 +129,6 @@ export type Camera = {
   status: LiveCameraStatus;
   /** Structured as a prop so a real MJPEG/HLS stream URL can be dropped in later. */
   frameUrl: string | null;
-  occupancy: number;
-  entriesToday: number;
-  exitsToday: number;
   boundingBoxes: BoundingBox[];
   zones: Zone[];
   countingLines: CountingLine[];
@@ -155,7 +152,7 @@ export type HeatmapCamera = {
  * Each blob represents a radial heat concentration.
  *   cx, cy : centre as % of container (0–100)
  *   r      : radius as % of container width
- *   intensity: 0–1 (maps to opacity of the heat gradient)
+ *   intensity: 0–1 normalized density (maps to position on the heat color scale)
  */
 export type HeatBlob = {
   id: string;
@@ -171,11 +168,8 @@ export type HeatBlob = {
 export type FloorZone = {
   id: string;
   label: string;
-  /** 0–100 percentage coords inside the floor plan container */
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+  /** Polygon vertices as 0–100% of camera frame width/height */
+  points: Point[];
 };
 
 export type ZoneRow = {

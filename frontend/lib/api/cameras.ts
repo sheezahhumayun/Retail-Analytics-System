@@ -3,7 +3,7 @@ import {
   getStatusColor,
   getStatusLabel,
 } from "@/lib/admin-cameras-data";
-import type { AdminCamera, Camera, CameraStatus, Resolution } from "@/lib/types";
+import type { AdminCamera, Camera, CameraStatus, Resolution, CameraSourceType } from "@/lib/types";
 import type { BackendCamera, BackendCameraStatus, BackendCountingLine, BackendZoneShape } from "@/lib/api/mappers";
 import {
   analyticsModulesToBackend,
@@ -32,6 +32,7 @@ export type TestCameraSuccess = {
   resolution: Resolution;
   fps: number;
   latency_ms: number;
+  duration_seconds?: number | null;
   camera_status?: CameraStatus;
 };
 
@@ -233,9 +234,17 @@ export async function deleteCamera(id: string): Promise<AdminCamera | null> {
   }
 }
 
-export async function processCameraVideo(id: string): Promise<ProcessCameraStatus> {
+export async function processCameraVideo(
+  id: string,
+  options?: { recording_start?: string },
+): Promise<ProcessCameraStatus> {
+  const body =
+    options?.recording_start !== undefined
+      ? { recording_start: options.recording_start }
+      : undefined;
   return apiRequest<ProcessCameraStatus>(`/api/cameras/${id}/process`, {
     method: "POST",
+    body,
   });
 }
 
@@ -249,6 +258,7 @@ export async function testCamera(id: string): Promise<TestCameraResult> {
     latency_ms?: number | null;
     resolution?: string | null;
     fps?: number | null;
+    duration_seconds?: number | null;
     message?: string | null;
     camera_status?: CameraStatus | null;
   }>(`/api/cameras/${id}/test`, { method: "POST" });
@@ -270,6 +280,7 @@ export async function testCamera(id: string): Promise<TestCameraResult> {
     resolution: (response.resolution as Resolution) ?? "1080p",
     fps: response.fps ?? 0,
     latency_ms: response.latency_ms ?? 0,
+    duration_seconds: response.duration_seconds ?? null,
     camera_status: cameraStatus,
   };
 }

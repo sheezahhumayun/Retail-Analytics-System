@@ -44,6 +44,8 @@ from .report_eligibility import eligible_cameras_for_store
 
 _ENTRY_EVENT = "ENTRY"
 _EXIT_EVENT = "EXIT"
+_ZONE_ENTER_EVENT = "ZONE_ENTER"
+_ZONE_EXIT_EVENT = "ZONE_EXIT"
 
 
 def _normalize_timezone(tz: str | ZoneInfo | dt_timezone) -> ZoneInfo | dt_timezone:
@@ -68,32 +70,34 @@ def _local_parts(ts: datetime, tz: ZoneInfo | dt_timezone) -> tuple[date, int]:
     return local.date(), local.hour
 
 
-def _traffic_buckets(
+def _traffic_buckets_from_events(
     session: Session,
     *,
-    camera_ids: list[str],
+    where_clauses: list,
+    entry_type: str,
+    exit_type: str,
     start: datetime,
     end: datetime,
 ) -> list[TrafficBucket]:
+    """Hourly entry/exit buckets from raw events (camera line or zone boundary)."""
     settings = get_settings()
     tz = _normalize_timezone(settings.store_timezone)
     buckets_map: dict[tuple[date, int], dict[str, int]] = {}
-    if camera_ids:
-        events = session.exec(
-            select(Event).where(
-                col(Event.camera_id).in_(camera_ids),
-                col(Event.event_type).in_([_ENTRY_EVENT, _EXIT_EVENT]),
-                Event.timestamp >= start,
-                Event.timestamp <= end,
-            )
-        ).all()
-        for event in events:
-            metric_date, hour = _local_parts(event.timestamp, tz)
-            bucket = buckets_map.setdefault((metric_date, hour), {"entries": 0, "exits": 0})
-            if event.event_type == _ENTRY_EVENT:
-                bucket["entries"] += 1
-            else:
-                bucket["exits"] += 1
+    events = session.exec(
+        select(Event).where(
+            *where_clauses,
+            col(Event.event_type).in_([entry_type, exit_type]),
+            Event.timestamp >= start,
+            Event.timestamp <= end,
+        )
+    ).all()
+    for event in events:
+        metric_date, hour = _local_parts(event.timestamp, tz)
+        bucket = buckets_map.setdefault((metric_date, hour), {"entries": 0, "exits": 0})
+        if event.event_type == entry_type:
+            bucket["entries"] += 1
+        else:
+            bucket["exits"] += 1
 
     sorted_keys = sorted(buckets_map.keys())
     return [
@@ -105,6 +109,43 @@ def _traffic_buckets(
         )
         for metric_date, hour in sorted_keys
     ]
+
+
+def _traffic_buckets(
+    session: Session,
+    *,
+    camera_ids: list[str],
+    start: datetime,
+    end: datetime,
+) -> list[TrafficBucket]:
+    if not camera_ids:
+        return []
+    return _traffic_buckets_from_events(
+        session,
+        where_clauses=[col(Event.camera_id).in_(camera_ids)],
+        entry_type=_ENTRY_EVENT,
+        exit_type=_EXIT_EVENT,
+        start=start,
+        end=end,
+    )
+
+
+def _zone_traffic_buckets(
+    session: Session,
+    *,
+    zone_id: str,
+    start: datetime,
+    end: datetime,
+) -> list[TrafficBucket]:
+    """Zone-scoped traffic from ZONE_ENTER/ZONE_EXIT (same visit semantics as ZoneMetric.visitors)."""
+    return _traffic_buckets_from_events(
+        session,
+        where_clauses=[Event.zone_id == zone_id],
+        entry_type=_ZONE_ENTER_EVENT,
+        exit_type=_ZONE_EXIT_EVENT,
+        start=start,
+        end=end,
+    )
 
 
 def _visitor_metric_buckets(
@@ -321,36 +362,11 @@ def read_traffic_for_scope(
         if camera is None:
             raise ApiError(404, "camera_not_found", f"Camera '{zone.camera_id}' not found")
         require_camera_module(camera, MODULE_ENTRY_EXIT)
-        # For zone-specific traffic, we still need to aggregate from events
-        # Filter by both zone and camera to ensure we only get events in that zone
-        settings = get_settings()
-        tz = _normalize_timezone(settings.store_timezone)
-        buckets_map: dict[tuple[date, int], dict[str, int]] = {}
-        events = session.exec(
-            select(Event).where(
-                Event.zone_id == zone_id,
-                col(Event.event_type).in_([_ENTRY_EVENT, _EXIT_EVENT]),
-                Event.timestamp >= start,
-                Event.timestamp <= end,
-            )
-        ).all()
-        for event in events:
-            metric_date, hour = _local_parts(event.timestamp, tz)
-            bucket = buckets_map.setdefault((metric_date, hour), {"entries": 0, "exits": 0})
-            if event.event_type == _ENTRY_EVENT:
-                bucket["entries"] += 1
-            else:
-                bucket["exits"] += 1
-        sorted_keys = sorted(buckets_map.keys())
-        buckets = [
-            TrafficBucket(
-                metric_date=metric_date.isoformat(),
-                hour=hour,
-                entries=buckets_map[(metric_date, hour)]["entries"],
-                exits=buckets_map[(metric_date, hour)]["exits"],
-            )
-            for metric_date, hour in sorted_keys
-        ]
+        # Zone visit traffic: ZONE_ENTER/EXIT carry zone_id (line ENTRY/EXIT never do).
+        # Matches ZoneAnalytics.traffic_by_hour / ZoneMetric.visitors semantics.
+        buckets = _zone_traffic_buckets(
+            session, zone_id=zone_id, start=start, end=end
+        )
         eligible = [camera]
         camera_ids = [camera.id]
     elif camera_id is not None:
