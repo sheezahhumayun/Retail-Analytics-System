@@ -142,6 +142,7 @@ def _process_response(session: DbSession, camera_id: str) -> CameraProcessRespon
     job = get_process_job(session, camera_id)
     status_map = {
         ProcessJobState.IDLE: "idle",
+        ProcessJobState.PENDING: "pending",
         ProcessJobState.RUNNING: "running",
         ProcessJobState.COMPLETED: "completed",
         ProcessJobState.FAILED: "failed",
@@ -162,7 +163,7 @@ def _process_response(session: DbSession, camera_id: str) -> CameraProcessRespon
     description=(
         "Run inference→analytics→persistence on a recorded camera's video file. "
         "Admin only. Applies only to `source_type=recorded` cameras. "
-        "Runs in a background thread (sample videos take 30–60+ seconds)."
+        "Queued for the inference worker; sample videos take 30–60+ seconds once picked up."
     ),
 )
 def process_recorded_video(

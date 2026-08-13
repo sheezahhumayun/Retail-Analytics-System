@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-ProcessingRunStatus = Literal["running", "completed", "failed"]
+ProcessingRunStatus = Literal["pending", "running", "completed", "failed"]
 
 
 class ProcessingRunSummary(BaseModel):

@@ -8,6 +8,7 @@ import math
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 import cv2
 
@@ -43,6 +44,10 @@ from inference.tracking import Tracker
 from inference.video import anchor_timestamp
 from inference.video import create_video_source
 from tests.scripts.demo_source import iter_frames, warmup_source
+
+
+class ProcessingCancelledError(Exception):
+    """Raised when a cooperative cancellation flag is set on the run."""
 
 
 def _resolve_video_path(rtsp_url: str) -> Path:
@@ -123,6 +128,7 @@ def process_recorded_camera(
     target_fps: float = 10.0,
     recording_start: datetime | None = None,
     explicit_recording_start: bool = False,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
     """Run detect→track→analytics→DB for a recorded camera's video file."""
     with session_scope() as session:
@@ -245,6 +251,11 @@ def process_recorded_camera(
 
             try:
                 for frame, ts in iter_frames(src, duration=None, preview=False):
+                    if cancel_check is not None and cancel_check():
+                        raise ProcessingCancelledError(
+                            "Cancelled: organization disabled"
+                        )
+
                     anchored_ts = anchor_timestamp(
                         ts,
                         src.is_live(),

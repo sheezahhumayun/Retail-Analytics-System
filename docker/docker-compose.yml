@@ -4,17 +4,71 @@ services:
     container_name: retail-analytics-postgres
     ports:
       - "5433:5432"
+    env_file:
+      - ../.env
     environment:
-      POSTGRES_USER: retail
-      POSTGRES_PASSWORD: retail
-      POSTGRES_DB: retail_analytics
+      POSTGRES_USER: ${POSTGRES_USER:-retail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-retail}
+      POSTGRES_DB: ${POSTGRES_DB:-retail_analytics}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U retail -d retail_analytics"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-retail} -d ${POSTGRES_DB:-retail_analytics}",
+        ]
       interval: 5s
       timeout: 5s
       retries: 5
 
+  inference:
+    build:
+      context: ..
+      dockerfile: inference/Dockerfile
+    container_name: retail-analytics-inference
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-retail}:${POSTGRES_PASSWORD:-retail}@postgres:5432/${POSTGRES_DB:-retail_analytics}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - retail_data:/app/data
+      - inference_models:/app/inference/models
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: retail-analytics-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-retail}:${POSTGRES_PASSWORD:-retail}@postgres:5432/${POSTGRES_DB:-retail_analytics}
+      SPAWN_INFERENCE_SUBPROCESS: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - retail_data:/app/data
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    container_name: retail-analytics-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      BACKEND_INTERNAL_URL: http://backend:8000
+    depends_on:
+      - backend
+
 volumes:
   pgdata:
+  retail_data:
+  inference_models:

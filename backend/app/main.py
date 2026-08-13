@@ -165,9 +165,15 @@ def log_database_pool_settings() -> None:
     )
     _start_camera_health_worker(settings.camera_health_interval_seconds)
     global _live_analytics_proc
-    _live_analytics_proc = start_live_analytics_subprocess(
-        settings.live_analytics_reconcile_interval_seconds,
-    )
+    if settings.spawn_inference_subprocess:
+        _live_analytics_proc = start_live_analytics_subprocess(
+            settings.live_analytics_reconcile_interval_seconds,
+        )
+    else:
+        _health_logger.info(
+            "Skipping inference subprocess spawn (SPAWN_INFERENCE_SUBPROCESS=false); "
+            "expect a separate inference worker container/process",
+        )
 
 
 @app.on_event("shutdown")

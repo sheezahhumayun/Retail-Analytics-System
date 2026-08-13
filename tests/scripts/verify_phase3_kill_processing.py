@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import select
 
 from backend.app.main import app
-from backend.app.services.camera_process import ORG_DISABLE_CANCEL_MESSAGE, _processing_procs
+from backend.app.services.camera_process import ORG_DISABLE_CANCEL_MESSAGE
 from database.models import Camera, Organization, ProcessingRun, Store, User, Zone
 from database.session import create_all, reset_engine, session_scope
 from backend.app.services.passwords import hash_password
@@ -121,34 +121,45 @@ def main() -> int:
                 .where(ProcessingRun.camera_id == CAMERA_ID)
                 .order_by(ProcessingRun.started_at.desc())  # type: ignore[attr-defined]
             ).first()
-            assert run is not None and run.status == "running"
+            assert run is not None
             run_id = run.id
 
-        pid: int | None = None
-        deadline = time.monotonic() + 30.0
+        deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
-            proc = _processing_procs.get(CAMERA_ID)
-            if proc is not None and proc.poll() is None:
-                pid = proc.pid
-                break
+            with session_scope() as session:
+                run = session.get(ProcessingRun, run_id)
+                if run is not None and run.status == "running":
+                    break
             time.sleep(0.2)
-        print(f"\n--- subprocess PID while running ---")
-        print(f"pid={pid} in_registry={CAMERA_ID in _processing_procs}")
+        else:
+            raise AssertionError("processing run never reached running state")
 
         with session_scope() as session:
             run = session.get(ProcessingRun, run_id)
             session.refresh(run)
             _print_run("BEFORE toggle (DB)", run)
             assert run is not None and run.status == "running", run
-
-        assert pid is not None, "processing subprocess never registered or already exited"
+            assert run.cancel_requested is False
 
         disable = client.post(f"/api/organizations/{ORG_ID}/toggle", headers=sa_headers)
         print("\n--- POST toggle (disable) ---")
         print(f"status={disable.status_code} body={disable.json()}")
         assert disable.status_code == 200, disable.text
 
-        time.sleep(1.0)
+        deadline = time.monotonic() + 120.0
+        while time.monotonic() < deadline:
+            with session_scope() as session:
+                run = session.get(ProcessingRun, run_id)
+                if (
+                    run is not None
+                    and run.status == "failed"
+                    and run.message == ORG_DISABLE_CANCEL_MESSAGE
+                ):
+                    break
+            time.sleep(0.5)
+        else:
+            raise AssertionError("run was not cooperatively cancelled")
+
         with session_scope() as session:
             run = session.get(ProcessingRun, run_id)
             session.refresh(run)
@@ -157,26 +168,6 @@ def main() -> int:
             assert run.status == "failed", run.status
             assert run.message == ORG_DISABLE_CANCEL_MESSAGE, run.message
             assert run.finished_at is not None
-
-        import subprocess as sp
-
-        if sys.platform == "win32":
-            check = sp.run(
-                ["tasklist", "/FI", f"PID eq {pid}"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            pid_gone = str(pid) not in check.stdout or "No tasks" in check.stdout
-            print(f"\n--- tasklist /FI PID eq {pid} ---")
-            print(check.stdout.strip())
-        else:
-            check = sp.run(["ps", "-p", str(pid)], capture_output=True, text=True, check=False)
-            pid_gone = check.returncode != 0
-            print(f"\n--- ps -p {pid} (exit {check.returncode}) ---")
-
-        print(f"pid_gone={pid_gone}")
-        assert pid_gone, f"process {pid} still running after org disable"
 
         enable = client.post(f"/api/organizations/{ORG_ID}/toggle", headers=sa_headers)
         print("\n--- POST toggle (re-enable) ---")

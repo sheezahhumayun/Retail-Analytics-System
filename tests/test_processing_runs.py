@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -13,6 +14,8 @@ from fastapi.testclient import TestClient
 from sqlmodel import select
 from sqlalchemy import text
 
+os.environ.setdefault("SPAWN_INFERENCE_SUBPROCESS", "false")
+
 from backend.app.main import app
 from database.models import ProcessingRun, Zone
 from database.seed import STORE_ID, seed_reference_data
@@ -22,7 +25,46 @@ pytestmark = [pytest.mark.api, pytest.mark.api_extended, pytest.mark.database]
 
 
 @pytest.fixture(scope="module")
-def processing_api_client():
+def recorded_job_poller():
+    stop = threading.Event()
+
+    def _loop() -> None:
+        from inference.pipeline.recorded_jobs import poll_recorded_jobs
+
+        while not stop.is_set():
+            try:
+                poll_recorded_jobs()
+            except Exception:
+                pass
+            stop.wait(0.05)
+
+    thread = threading.Thread(target=_loop, name="test-recorded-poller", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+
+def _mock_process_result(camera_id: str, **kwargs) -> dict[str, object]:
+    run_id = kwargs.get("run_id")
+    preview = (
+        f"data/frame-previews/{camera_id}/{run_id}.jpg" if run_id else None
+    )
+    return {
+        "camera_id": camera_id,
+        "status": "completed",
+        "frames_processed": 1,
+        "events_published": 0,
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+        "preview_frame_path": preview,
+        "recording_start": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@pytest.fixture(scope="module")
+def processing_api_client(recorded_job_poller):
     try:
         create_all()
         seed_reference_data(force=True)
@@ -30,9 +72,9 @@ def processing_api_client():
             session.exec(
                 text(
                     """
-                    CREATE UNIQUE INDEX IF NOT EXISTS uq_processing_runs_one_running_per_camera
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_processing_runs_one_active_per_camera
                     ON processing_runs (camera_id)
-                    WHERE status = 'running'
+                    WHERE status IN ('running', 'pending')
                     """
                 )
             )
@@ -90,7 +132,7 @@ def _create_zone(processing_api_client: TestClient, processing_admin_headers: di
     return zone_id
 
 
-def _wait_for_latest_run(camera_id: str, *, timeout_sec: float = 5.0) -> ProcessingRun:
+def _wait_for_latest_run(camera_id: str, *, timeout_sec: float = 10.0) -> ProcessingRun:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
         with session_scope() as session:
@@ -107,24 +149,11 @@ def _wait_for_latest_run(camera_id: str, *, timeout_sec: float = 5.0) -> Process
     raise AssertionError(f"Timed out waiting for processing run on camera {camera_id}")
 
 
-def _subprocess_success(*_args, **_kwargs):
-    class _MockProc:
-        returncode = 0
-
-        def communicate(self, timeout=None):
-            return ("ok", "")
-
-        def kill(self):
-            pass
-
-        def poll(self):
-            return 0
-
-    return _MockProc()
-
-
 class TestProcessingRuns:
-    @patch("backend.app.services.camera_process.subprocess.Popen", side_effect=_subprocess_success)
+    @patch(
+        "inference.pipeline.recorded_jobs.process_recorded_camera",
+        side_effect=lambda camera_id, **kwargs: _mock_process_result(camera_id, **kwargs),
+    )
     def test_snapshots_match_zones_at_run_start(
         self,
         _mock_run,
@@ -151,7 +180,10 @@ class TestProcessingRuns:
         assert snap["name"] == expected_name
         assert snap["zone_type"] == expected_type
 
-    @patch("backend.app.services.camera_process.subprocess.Popen", side_effect=_subprocess_success)
+    @patch(
+        "inference.pipeline.recorded_jobs.process_recorded_camera",
+        side_effect=lambda camera_id, **kwargs: _mock_process_result(camera_id, **kwargs),
+    )
     def test_deleted_zone_does_not_change_run_snapshot(
         self,
         _mock_run,
@@ -183,35 +215,22 @@ class TestProcessingRuns:
             assert zone is not None
             assert zone.status == "disabled"
 
-    def test_concurrent_process_returns_409_and_spawns_one_subprocess(
+    def test_concurrent_process_returns_409_and_starts_one_job(
         self,
         processing_api_client: TestClient,
         processing_admin_headers: dict,
     ):
         camera_id = _create_recorded_camera(processing_api_client, processing_admin_headers)
         release = threading.Event()
-        spawn_count = {"value": 0}
+        active = {"count": 0}
         lock = threading.Lock()
 
-        def counting_popen(*_args, **_kwargs):
+        def slow_process(camera_id: str, **kwargs):
             with lock:
-                spawn_count["value"] += 1
-
-            class _MockProc:
-                returncode = 0
-
-                def communicate(self, timeout=None):
-                    if not release.wait(timeout=5):
-                        raise TimeoutError("subprocess mock timed out waiting for release")
-                    return ("ok", "")
-
-                def kill(self):
-                    pass
-
-                def poll(self):
-                    return None
-
-            return _MockProc()
+                active["count"] += 1
+            if not release.wait(timeout=5):
+                raise TimeoutError("slow_process timed out waiting for release")
+            return _mock_process_result(camera_id, **kwargs)
 
         results: list[int] = []
 
@@ -219,25 +238,29 @@ class TestProcessingRuns:
             resp = processing_api_client.post(f"/api/cameras/{camera_id}/process", headers=processing_admin_headers)
             results.append(resp.status_code)
 
-        with patch("backend.app.services.camera_process.subprocess.Popen", side_effect=counting_popen):
+        with patch(
+            "inference.pipeline.recorded_jobs.process_recorded_camera",
+            side_effect=slow_process,
+        ):
             t1 = threading.Thread(target=post_process)
             t2 = threading.Thread(target=post_process)
             t1.start()
             t2.start()
+            time.sleep(0.3)
             t1.join(timeout=10)
             t2.join(timeout=10)
 
         assert sorted(results) == [200, 409]
-        assert spawn_count["value"] == 1
+        assert active["count"] == 1
 
         with session_scope() as session:
-            running = session.exec(
+            active_runs = session.exec(
                 select(ProcessingRun).where(
                     ProcessingRun.camera_id == camera_id,
-                    ProcessingRun.status == "running",
+                    ProcessingRun.status.in_(("pending", "running")),  # type: ignore[attr-defined]
                 )
             ).all()
-            assert len(running) <= 1
+            assert len(active_runs) <= 1
 
         release.set()
         _wait_for_latest_run(camera_id)
@@ -280,13 +303,20 @@ class TestProcessingRuns:
             assert run.finished_at is not None
             assert run.message == RESTART_INTERRUPT_MESSAGE
 
-        process_resp = processing_api_client.post(
-            f"/api/cameras/{camera_id}/process",
-            headers=processing_admin_headers,
-        )
-        assert process_resp.status_code == 200, process_resp.text
+        with patch(
+            "inference.pipeline.recorded_jobs.process_recorded_camera",
+            side_effect=lambda camera_id, **kwargs: _mock_process_result(camera_id, **kwargs),
+        ):
+            process_resp = processing_api_client.post(
+                f"/api/cameras/{camera_id}/process",
+                headers=processing_admin_headers,
+            )
+            assert process_resp.status_code == 200, process_resp.text
 
-    @patch("backend.app.services.camera_process.subprocess.Popen", side_effect=_subprocess_success)
+    @patch(
+        "inference.pipeline.recorded_jobs.process_recorded_camera",
+        side_effect=lambda camera_id, **kwargs: _mock_process_result(camera_id, **kwargs),
+    )
     def test_video_range_request_returns_206(
         self,
         _mock_run,
@@ -338,7 +368,10 @@ class TestProcessingRuns:
         assert resp.json()["error"]["code"] == "source_video_unavailable"
         assert "no longer available" in resp.json()["error"]["message"].lower()
 
-    @patch("backend.app.services.camera_process.subprocess.Popen", side_effect=_subprocess_success)
+    @patch(
+        "inference.pipeline.recorded_jobs.process_recorded_camera",
+        side_effect=lambda camera_id, **kwargs: _mock_process_result(camera_id, **kwargs),
+    )
     def test_list_and_detail_endpoints(
         self,
         _mock_run,

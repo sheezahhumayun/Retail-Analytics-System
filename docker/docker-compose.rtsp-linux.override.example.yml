@@ -1,0 +1,18 @@
+# Linux-only: give the inference container the host network stack for LAN RTSP.
+# UNTESTED in this repo — validate on your Linux host before production use.
+#
+# Usage (from repo root):
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.rtsp-linux.override.example.yml up -d
+#
+# On Docker Desktop for Windows/Mac, network_mode: host is NOT supported.
+
+services:
+  inference:
+    network_mode: host
+    # Host networking has no bridge DNS — point at localhost Postgres published on 5433:
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-retail}:${POSTGRES_PASSWORD:-retail}@127.0.0.1:5433/${POSTGRES_DB:-retail_analytics}
+    # Published ports on other services are reached via localhost, not service names.
+    depends_on:
+      postgres:
+        condition: service_healthy

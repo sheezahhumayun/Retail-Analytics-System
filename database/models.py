@@ -144,6 +144,8 @@ class ProcessingRun(SQLModel, table=True):
         sa_column=Column(JSONB, nullable=False, server_default="[]"),
     )
     preview_frame_path: str | None = Field(default=None, max_length=1024)
+    cancel_requested: bool = Field(default=False, nullable=False)
+    recording_start: str | None = Field(default=None, max_length=64)
 
 
 class Track(SQLModel, table=True):

@@ -227,7 +227,7 @@ class CameraProcessResponse(BaseModel):
 
     camera_id: str
 
-    status: Literal["running", "completed", "failed", "idle"]
+    status: Literal["pending", "running", "completed", "failed", "idle"]
 
     message: str | None = None
 

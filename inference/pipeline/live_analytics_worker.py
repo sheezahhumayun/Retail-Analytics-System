@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
@@ -48,6 +49,7 @@ from database.writer import AnalyticsDbWriter, DbWriterConfig
 from inference.detection import create_detector
 from inference.opencv_io import opencv_io
 from inference.pipeline.process_recorded import _line_from_db, _zone_from_db
+from inference.pipeline.recorded_jobs import poll_recorded_jobs
 from inference.tracking import Tracker
 from inference.video import create_video_source
 from inference.video.base import DEFAULT_LONG_SIDE, DEFAULT_TARGET_FPS
@@ -59,6 +61,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+PID_FILE = REPO_ROOT / "data" / "run" / "live_analytics_worker.pid"
+_RECORDED_JOB_POLL_SEC = 2
+
 _LIVE_SCHEMES = ("rtsp://", "rtsps://", "http://", "https://")
 _IDLE_SLEEP_SEC = 0.05
 _DEFAULT_RECONCILE_INTERVAL_SECONDS = 30
@@ -67,7 +72,7 @@ _DEFAULT_ORG_DISABLE_POLL_INTERVAL_SECONDS = 5
 _stop_event = threading.Event()
 _coordinator_thread: threading.Thread | None = None
 _org_disable_thread: threading.Thread | None = None
-_processing_thread: threading.Thread | None = None
+_recorded_jobs_thread: threading.Thread | None = None
 _worker_thread_lock = threading.Lock()
 
 _registry_lock = threading.Lock()
@@ -523,6 +528,18 @@ def stop_live_workers_for_org(org_id: str) -> int:
     return len(targets)
 
 
+def _recorded_jobs_loop() -> None:
+    while not _stop_event.is_set():
+        try:
+            started = poll_recorded_jobs()
+            if started:
+                logger.info("Recorded-job poller started %d job(s)", started)
+        except Exception:
+            logger.exception("Recorded-job poll failed")
+        if _stop_event.wait(timeout=_RECORDED_JOB_POLL_SEC):
+            break
+
+
 def _coordinator_loop(reconcile_interval_seconds: int) -> None:
     while not _stop_event.is_set():
         try:
@@ -567,7 +584,7 @@ def _start_live_analytics_worker(
     *,
     org_disable_poll_interval_seconds: int = _DEFAULT_ORG_DISABLE_POLL_INTERVAL_SECONDS,
 ) -> None:
-    global _coordinator_thread, _org_disable_thread, _processing_thread, _shared_writer, _shared_detector, _shared_heatmap_store
+    global _coordinator_thread, _org_disable_thread, _processing_thread, _recorded_jobs_thread, _shared_writer, _shared_detector, _shared_heatmap_store
 
     with _worker_thread_lock:
         if reconcile_interval_seconds <= 0 or _coordinator_thread is not None:
@@ -613,6 +630,13 @@ def _start_live_analytics_worker(
         )
         _org_disable_thread.start()
 
+        _recorded_jobs_thread = threading.Thread(
+            target=_recorded_jobs_loop,
+            name="recorded-jobs-poller",
+            daemon=True,
+        )
+        _recorded_jobs_thread.start()
+
         logger.info(
             "Live analytics worker started (python=%s, reconcile_interval=%ds, "
             "org_disable_poll_interval=%ds)",
@@ -623,7 +647,7 @@ def _start_live_analytics_worker(
 
 
 def _stop_live_analytics_worker() -> None:
-    global _coordinator_thread, _org_disable_thread, _processing_thread, _shared_writer, _shared_detector, _shared_heatmap_store
+    global _coordinator_thread, _org_disable_thread, _processing_thread, _recorded_jobs_thread, _shared_writer, _shared_detector, _shared_heatmap_store
 
     _stop_event.set()
 
@@ -633,12 +657,18 @@ def _stop_live_analytics_worker() -> None:
         _stop_camera(camera_id)
 
     with _worker_thread_lock:
-        for thread in (_coordinator_thread, _org_disable_thread, _processing_thread):
+        for thread in (
+            _coordinator_thread,
+            _org_disable_thread,
+            _processing_thread,
+            _recorded_jobs_thread,
+        ):
             if thread is not None and thread.is_alive():
                 thread.join(timeout=5)
         _coordinator_thread = None
         _org_disable_thread = None
         _processing_thread = None
+        _recorded_jobs_thread = None
 
     if _shared_detector is not None:
         try:
@@ -719,11 +749,22 @@ def main() -> int:
     )
 
     try:
+        PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        logger.info("Wrote live analytics worker PID file %s", PID_FILE)
+    except OSError as exc:
+        logger.warning("Failed to write live analytics PID file %s: %s", PID_FILE, exc)
+
+    try:
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
         logger.info("Live analytics worker interrupted")
     finally:
+        try:
+            PID_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
         _stop_live_analytics_worker()
 
     return 0
