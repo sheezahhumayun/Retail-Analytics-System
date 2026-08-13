@@ -41,6 +41,7 @@ from backend.app.services.alert_rules import (
     get_queue_duration_thresholds,
     get_queue_length_thresholds,
 )
+from database.config import get_store_timezone
 from database.models import Camera, CountingLine as DbCountingLine, Organization, Store, Zone as DbZone
 from database.session import session_scope
 from database.writer import AnalyticsDbWriter, DbWriterConfig
@@ -434,7 +435,7 @@ def _process_camera_frame(
                     h,
                     grid_scale=4,
                     store=heatmap_store,
-                    timezone="UTC",
+                    timezone=get_store_timezone(),
                 )
                 state.heatmap_engine.set_reference_frame(frame)
             state.heatmap_engine.update(tracks, ts)
@@ -579,13 +580,14 @@ def _start_live_analytics_worker(
                 camera_store_map={},
                 zones=[],
                 camera_modules={},
+                timezone=get_store_timezone(),
             )
         )
         _shared_detector = create_detector()
         _shared_detector.__enter__()
         _shared_heatmap_store = HeatmapStore(
             str(REPO_ROOT / "data" / "heatmaps"),
-            timezone="UTC",
+            timezone=get_store_timezone(),
         )
 
         _processing_thread = threading.Thread(

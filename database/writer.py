@@ -24,7 +24,7 @@ from analytics.modules import (
 from analytics.queues.types import is_queue_zone
 from analytics.zones.types import Zone, ZoneEvent, ZoneEventType
 
-from backend.app.services.alert_rules import get_occupancy_severity
+from backend.app.services.alert_rules import get_occupancy_severity, get_zone_alert_severity
 
 from .models import (
     Alert,
@@ -373,12 +373,40 @@ class AnalyticsDbWriter:
             zone_id = event.zone_id
         elif event.event_type == AnalyticsEventType.OCCUPANCY_THRESHOLD.value:
             store_id = str(event.metadata.get("store_id", self._config.store_id))
-            severity = get_occupancy_severity(store_id, session=self._session)
+            severity = get_occupancy_severity(store_id, session=session)
             camera_id = None
             zone_id = None
+        elif event.event_type == AnalyticsEventType.DWELL_THRESHOLD.value:
+            store_id = self._config.camera_store_map.get(
+                event.camera_id, self._config.store_id
+            )
+            severity = get_zone_alert_severity(
+                "DWELL_THRESHOLD",
+                event.zone_id,
+                store_id,
+                session=session,
+            )
+            camera_id = event.camera_id
+            zone_id = event.zone_id
+        elif event.event_type == AnalyticsEventType.QUEUE_THRESHOLD.value:
+            store_id = self._config.camera_store_map.get(
+                event.camera_id, self._config.store_id
+            )
+            threshold_kind = str(event.metadata.get("threshold_kind", "length"))
+            rule_type = (
+                "QUEUE_THRESHOLD_DURATION"
+                if threshold_kind == "duration"
+                else "QUEUE_THRESHOLD"
+            )
+            severity = get_zone_alert_severity(
+                rule_type,
+                event.zone_id,
+                store_id,
+                session=session,
+            )
+            camera_id = event.camera_id
+            zone_id = event.zone_id
         else:
-            # DWELL_THRESHOLD / QUEUE_THRESHOLD: severity still hardcoded; loading
-            # from alert_rules would require a per-zone DB lookup here.
             severity = "warning"
             camera_id = event.camera_id
             zone_id = event.zone_id

@@ -29,6 +29,10 @@ import {
 import { getDefaultStoreId, getDefaultZoneId, getOrganization } from "@/lib/api/stores";
 import { getIntervalLabel } from "@/lib/analytics-data";
 import {
+  formatUtcLocalDateYMD,
+  formatUtcLocalTimeHHMM,
+} from "@/lib/format-datetime";
+import {
   localHeatmapRangeToUtcSegments,
   type UtcHeatmapQuerySegment,
 } from "@/lib/heatmap-query";
@@ -703,7 +707,9 @@ export async function getOverviewKpis(
       value: peakOcc,
       unit: "",
       label: "Peak Occupancy",
-      subtext: peakPoint?.timestamp?.slice(11, 16) ?? "—",
+      subtext: peakPoint
+        ? formatUtcLocalTimeHHMM(peakPoint.timestamp)
+        : "—",
       icon: "zap",
     },
     dwellTime: {
@@ -786,7 +792,7 @@ export async function getOccupancyTrend(
     { query: { store_id } },
   );
   return response.trend.map((point) => ({
-    day: point.timestamp.slice(0, 10),
+    day: formatUtcLocalDateYMD(point.timestamp),
     occupancy: point.current_occupancy,
   }));
 }
@@ -926,10 +932,18 @@ export async function getHeatmapCameras(): Promise<HeatmapCamera[]> {
     .map((camera) => ({ id: camera.id, label: camera.name }));
 }
 
+export type ZonePerformanceParams = {
+  store_id?: string;
+  zone_id?: string;
+  from: string;
+  to: string;
+  compare?: boolean;
+};
+
 export async function getZonePerformance(
-  params: { store_id?: string; zone_id?: string } = {},
+  params: ZonePerformanceParams,
 ): Promise<ZoneRow[]> {
-  const { from, to } = dateRangeForKey("week");
+  const { from, to, compare = true } = params;
   const store_id = params.store_id ?? (await getDefaultStoreId());
 
   const [cameras, allZones] = await Promise.all([
@@ -986,9 +1000,18 @@ export async function getZonePerformance(
     }
 
     try {
+      const query: Record<string, string> = {
+        store_id,
+        zone_id: shape.id,
+        from,
+        to,
+      };
+      if (compare) {
+        query.compare = "true";
+      }
       const analytics = await apiRequest<BackendZoneAnalyticsResponse>(
         "/api/analytics/zones",
-        { query: { store_id, zone_id: shape.id, from, to, compare: "true" } },
+        { query },
       );
       const priorBuckets =
         analytics.comparison?.status === "ok" ? (analytics.prior_buckets ?? []) : [];

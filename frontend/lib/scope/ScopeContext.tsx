@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { getOrganization } from "@/lib/api/stores";
+import { useAuth } from "@/lib/auth/AuthContext";
 import { DEPLOYMENT_ORG_ID } from "@/lib/scope-data";
 import { getStoreCameraIds } from "@/lib/scope/scope-filters";
 import type {
@@ -40,14 +41,27 @@ export type ScopeContextValue = {
 const ScopeContext = createContext<ScopeContextValue | null>(null);
 
 export function ScopeProvider({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+  const scopeEnabled =
+    user != null && user.accountType !== "superadmin";
   const [organization, setOrganization] = useState<Organization | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(scopeEnabled);
   const [storeId, setStoreIdState] = useState<string | null>(null);
   const [cameraId, setCameraIdState] = useState<string | null>(null);
   const [zoneId, setZoneIdState] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!scopeEnabled) {
+      setOrganization(null);
+      setStoreIdState(null);
+      setCameraIdState(null);
+      setZoneIdState(null);
+      setIsLoading(false);
+      return;
+    }
+
     let cancelled = false;
+    setIsLoading(true);
 
     async function load() {
       try {
@@ -73,7 +87,7 @@ export function ScopeProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [scopeEnabled]);
 
   const orgId = organization?.id ?? DEPLOYMENT_ORG_ID;
 

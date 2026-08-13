@@ -4,12 +4,23 @@ import { useEffect, useState } from 'react';
 import { DashboardShell } from '@/components/dashboard/dashboard-shell';
 import { ZonePerformance } from '@/components/heatmap/zone-performance';
 import { getZonePerformance } from '@/lib/api/analytics';
+import {
+  localWallClockRangeToUtcIso,
+  resolveZonePerformanceCalendarDates,
+  type ZonePerformanceDateRange,
+} from '@/lib/heatmap-query';
 import { useScope } from '@/lib/scope/ScopeContext';
 import type { ZoneRow } from '@/lib/types';
 import { LayoutGrid, Clock, CalendarDays } from 'lucide-react';
 
-const DATE_RANGES = ['Today', 'Yesterday', 'Last 7 days', 'Last 30 days', 'Custom'] as const;
-type DateRange = typeof DATE_RANGES[number];
+const DATE_RANGES = [
+  'Today',
+  'Yesterday',
+  'Last 7 days',
+  'Last 30 days',
+  'Custom',
+] as const satisfies readonly ZonePerformanceDateRange[];
+type DateRange = (typeof DATE_RANGES)[number];
 
 const COMPARE_OPTIONS = ['Previous period', 'Previous year', 'None'] as const;
 type CompareOption = typeof COMPARE_OPTIONS[number];
@@ -34,9 +45,23 @@ export default function ZonePerformancePage() {
 
     async function load() {
       setLoading(true);
+      const { fromDate, toDate } = resolveZonePerformanceCalendarDates(
+        dateRange,
+        customFrom,
+        customTo,
+      );
+      const { from, to } = localWallClockRangeToUtcIso(
+        fromDate,
+        toDate,
+        timeFrom,
+        timeTo,
+      );
       const rows = await getZonePerformance({
         store_id: storeId ?? undefined,
         zone_id: zoneId ?? undefined,
+        from,
+        to,
+        compare: compare === 'Previous period',
       });
       if (!cancelled) {
         setZoneRows(rows);
@@ -48,7 +73,16 @@ export default function ZonePerformancePage() {
     return () => {
       cancelled = true;
     };
-  }, [storeId, zoneId]);
+  }, [
+    storeId,
+    zoneId,
+    dateRange,
+    customFrom,
+    customTo,
+    timeFrom,
+    timeTo,
+    compare,
+  ]);
 
   const totalVisits = zoneRows.reduce((s, r) => s + r.visits, 0);
   const avgDwellSeconds = zoneRows.length

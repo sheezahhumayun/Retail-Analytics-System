@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -106,8 +106,8 @@ class TestZoneAggregationQueueExclusion:
             session.commit()
 
             # Now query camera-level "all zones" aggregation
-            start = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
-            end = start + timedelta(hours=1)
+            start = datetime.combine(yesterday, time(12, 0), tzinfo=timezone.utc)
+            end = datetime.combine(yesterday, time(12, 59, 59), tzinfo=timezone.utc)
             
             buckets, eligible = read_zones_for_scope(
                 session,
@@ -219,8 +219,8 @@ class TestZoneAggregationQueueExclusion:
             session.commit()
 
             # Query store-level "all zones" aggregation
-            start = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
-            end = start + timedelta(hours=1)
+            start = datetime.combine(yesterday, time(12, 0), tzinfo=timezone.utc)
+            end = datetime.combine(yesterday, time(12, 59, 59), tzinfo=timezone.utc)
             
             buckets, eligible = read_zones_for_scope(
                 session,
@@ -281,8 +281,8 @@ class TestZoneAggregationQueueExclusion:
                 session.commit()
 
             # Query the queue zone directly
-            start = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
-            end = start + timedelta(hours=1)
+            start = datetime.combine(yesterday, time(12, 0), tzinfo=timezone.utc)
+            end = datetime.combine(yesterday, time(12, 59, 59), tzinfo=timezone.utc)
             
             buckets, eligible = read_zones_for_scope(
                 session,

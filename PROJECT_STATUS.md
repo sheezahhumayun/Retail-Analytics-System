@@ -4014,3 +4014,93 @@ management — all built and verified, both API and UI.
   having no zones yet, the other from 0→6 rows covering its 2 existing zones); backfill script
   confirmed idempotent (safe re-run reports nothing left to do). Existing alert-rules test suite (7
   tests) and frontend tests (28 tests) pass unchanged.
+
+---
+
+## 2026-08-13 — Datetime serialization, alert severity, timezone bucketing, ScopeProvider, and Zone Performance range — DONE
+
+### DONE
+
+- Fixed naive-vs-aware datetime serialization for five API fields that were still emitting
+  timezone-less ISO strings. Root cause was two-fold: (a) dev-DB schema drift —
+  `SQLModel.metadata.create_all()` ran before Alembic on this DB, so the `create_table` DDL in
+  `011_processing_runs.py` and `003_module_12_5.py` (which correctly specify `timezone=True`) was
+  skipped by their `if not _has_table(...)` guards, leaving `processing_runs.started_at` /
+  `finished_at` and `zone_shapes.created_at` as `timestamp without time zone`; (b) a genuine
+  migration bug in `006_alert_rules.py`, which never specified `timezone=True` for
+  `alert_rules.created_at` / `updated_at` in any environment. Fix: new migration
+  `018_timestamptz_datetime_columns.py` altering all five columns to `timestamp with time zone` (safe
+  on both drifted and fresh DBs via `AT TIME ZONE 'UTC'` cast), plus
+  `sa_column=Column(DateTime(timezone=True), ...)` added to the affected model fields in
+  `database/models.py` so `create_all()` generates the correct type going forward too. Verified via
+  live API JSON (all five fields now show `+00:00`) and `information_schema.columns`.
+- Fixed dwell/queue alert severity ignoring per-zone/store/org configuration. Added
+  `get_zone_alert_severity()` in `backend/app/services/alert_rules.py` with per-zone → store →
+  org-default fallback (same pattern as occupancy's existing lookup). Dwell/queue writers in
+  `database/writer.py` now use it instead of hardcoded `severity="warning"`. Confirmed dwell/queue
+  fire far less frequently than ENTRY/EXIT crossings, so no caching was needed (unlike occupancy's
+  per-crossing threshold lookup). Verified via 5 new integration tests confirming `Alert.severity`
+  matches the configured rule after a real dwell/queue alert fires.
+- **Item 2 (zones-table sync) — decided NOT needed:** the app never edits zones after creation, so
+  `PUT /api/zones/{id}` not syncing the analytics `zones` table is a non-issue. Removed from active
+  TODO; do not carry forward.
+- Fixed post-login frontend crash: `Uncaught Error: useScope must be used within a ScopeProvider`
+  (thrown from `frontend/lib/scope/ScopeContext.tsx`, triggered by `app/page.tsx` and other scoped
+  pages). Root cause: a `ScopeWhenAuthenticated` wrapper in `frontend/components/providers.tsx`
+  (introduced in the superadmin UI work) conditionally rendered `{children}` **without**
+  `ScopeProvider` whenever `!user` or `user.accountType === "superadmin"`, while many routes call
+  `useScope()` unconditionally. Fix: restored the documented unconditional provider chain
+  (`AuthProvider` → `AuthGuard` → `ScopeProvider`) in `frontend/components/providers.tsx` and moved
+  the org-user-only org fetch / scope reset logic into `ScopeProvider` itself via a `scopeEnabled`
+  flag in `frontend/lib/scope/ScopeContext.tsx` (superadmin and logged-out users get a safe empty
+  context instead of omitting the provider). Verified in browser after login as
+  `admin@demo-retail.local`: Overview, Admin → Cameras, and Analytics → Queues all load with no
+  console error.
+- Fixed sitewide UTC display bug (except heatmap, which was already correct). Timestamps were shown
+  as raw UTC instead of the user's local time. Two independent root causes: (1) Overview/Occupancy
+  pages did raw `.slice()` on UTC ISO strings instead of local conversion — fixed with new
+  `formatUtcLocalDateYMD` / `formatUtcLocalTimeHHMM` helpers in `frontend/lib/format-datetime.ts`;
+  (2) Traffic/Zones/Overview hour-bucket charts depend on backend-side bucketing via
+  `STORE_TIMEZONE`, which was unset (defaulting to UTC) — fixed by setting
+  `STORE_TIMEZONE=Asia/Karachi` in `.env` / `.env.example` and wiring it through
+  `analytics_read.py`, `process_recorded.py`, and `live_analytics_worker.py`.
+- Fixed cross-venv import bug found while testing the `STORE_TIMEZONE` fix:
+  `process_recorded.py` / `live_analytics_worker.py` importing `backend.app.config` pulled in
+  `pydantic_settings`, not installed in `inference/.venv`, breaking the two-venv separation. Fixed
+  by adding `get_store_timezone()` to `database/config.py` (plain `os.getenv`, matching that file's
+  existing pattern) instead of importing backend's settings stack. Verified via a real recorded-video
+  processing run completing successfully.
+- Fixed Zone Performance date/time controls (previously deprioritized). `getZonePerformance()` ignored
+  the page's date/time controls entirely and hardcoded a 7-day range; investigation also found
+  `_zone_buckets` in `backend/app/services/analytics_read.py` wasn't filtering by time-of-day at all
+  despite the endpoint accepting `from` / `to` datetimes. Fix: wired the page controls through
+  local→UTC conversion (reusing heatmap's existing `parseLocalDateTime` / range helpers in
+  `frontend/lib/heatmap-query.ts`), passed UTC `from` / `to` through `getZonePerformance()`, and
+  added hourly overlap filtering to `_zone_buckets`. Verified with real numbers — for zone `store1`
+  with hourly metrics 5 / 20 / 8 visitors at hours 10 / 12 / 14, a wide UTC window (09:00–21:00)
+  totals **33** visits while a narrow window (11:00–13:00, noon hour only) totals **20** visits;
+  frontend unit tests (36 passed) and backend bucket-range unit test (1 passed) confirm the behavior.
+  API/DB integration test for the range fix was written but skipped when Postgres was not running on
+  `:5433` during verification (see TODO).
+
+### TODO (not yet fixed / still open)
+
+- **Known caveat — historical metric bucketing:** pre-existing `VisitorMetric` / `ZoneMetric` rows
+  were bucketed under UTC before the `STORE_TIMEZONE=Asia/Karachi` fix and will **NOT** retroactively
+  correct — only new data written after the backend restart buckets correctly. Reprocessing historical
+  data is an open decision, not yet done.
+- Re-run backend API/DB integration test for the Zone Performance range fix
+  (`tests/test_api.py::TestAnalytics::test_zones_datetime_range_filters_hourly_metrics`) with Postgres
+  up on `:5433` before considering that fix fully verified end-to-end (skipped during this session).
+- No background polling on Admin → Cameras page (stale until manual refresh).
+- No background polling on any dashboard/analytics page (Overview, Traffic, Occupancy, Zones, Dwell,
+  Heatmap, Zone Performance).
+- Known architectural limitation, unchanged from earlier entries: the live-analytics worker assumes a
+  single backend instance, with no per-instance partitioning or leader election — not scheduled,
+  explicitly deferred.
+- Superadmin account CRUD (create/edit/disable/delete via API/UI) — **STATUS UPDATE:** descoped, will
+  NOT be built in this version of the app. The only way to create a superadmin account remains the
+  seed script / manual test script mentioned in earlier entries.
+
+**Removed from TODO (explicit decision this session):** zones-table sync on `PUT /api/zones/{id}` —
+  not needed because the app never edits zones after creation.

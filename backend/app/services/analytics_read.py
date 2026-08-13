@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone as dt_timezone
+from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlmodel import Session, col, select
@@ -68,6 +68,27 @@ def _local_parts(ts: datetime, tz: ZoneInfo | dt_timezone) -> tuple[date, int]:
         ts = ts.replace(tzinfo=dt_timezone.utc)
     local = ts.astimezone(tz)
     return local.date(), local.hour
+
+
+def _bucket_start(metric_date: date, hour: int, tz: ZoneInfo | dt_timezone) -> datetime:
+    return datetime.combine(metric_date, time(hour, 0), tzinfo=tz)
+
+
+def _bucket_overlaps_range(
+    metric_date: date,
+    hour: int,
+    start: datetime,
+    end: datetime,
+    tz: ZoneInfo | dt_timezone,
+) -> bool:
+    """True when the store-local hourly rollup overlaps ``[start, end]`` (UTC-aware)."""
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=dt_timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=dt_timezone.utc)
+    bucket_start = _bucket_start(metric_date, hour, tz)
+    bucket_end = bucket_start + timedelta(hours=1)
+    return bucket_start < end and bucket_end > start
 
 
 def _traffic_buckets_from_events(
@@ -193,12 +214,16 @@ def _zone_buckets(
     start: datetime,
     end: datetime,
 ) -> list[ZoneMetricBucket]:
+    settings = get_settings()
+    tz = _normalize_timezone(settings.store_timezone)
+    start_date = _local_parts(start, tz)[0]
+    end_date = _local_parts(end, tz)[0]
     rows = session.exec(
         select(ZoneMetric)
         .where(
             ZoneMetric.zone_id == zone_id,
-            ZoneMetric.metric_date >= start.date(),
-            ZoneMetric.metric_date <= end.date(),
+            ZoneMetric.metric_date >= start_date,
+            ZoneMetric.metric_date <= end_date,
         )
         .order_by(ZoneMetric.metric_date, ZoneMetric.hour)
     ).all()
@@ -213,6 +238,7 @@ def _zone_buckets(
             dwell_count=r.dwell_count,
         )
         for r in rows
+        if _bucket_overlaps_range(r.metric_date, r.hour, start, end, tz)
     ]
 
 

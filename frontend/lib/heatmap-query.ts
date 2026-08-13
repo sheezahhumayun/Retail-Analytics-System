@@ -85,3 +85,80 @@ export function localHeatmapRangeToUtcSegments(
 
   return segments;
 }
+
+/** UTC ISO-8601 instant from a local calendar date + wall-clock time. */
+export function localWallClockToUtcIso(date: string, time: string): string {
+  return parseLocalDateTime(date, time).toISOString();
+}
+
+/**
+ * Map a local calendar date range + daily wall-clock window to UTC `from`/`to`
+ * ISO datetimes for analytics endpoints (`GET /api/analytics/zones`, traffic, etc.).
+ *
+ * Uses the same local parsing as {@link localHeatmapRangeToUtcSegments}; unlike
+ * heatmap, a single contiguous UTC range is returned (no per-day splitting).
+ */
+export function localWallClockRangeToUtcIso(
+  fromDate: string,
+  toDate: string,
+  fromTime: string,
+  toTime: string,
+): { from: string; to: string } {
+  const start = parseLocalDateTime(fromDate, fromTime);
+  let end = parseLocalDateTime(toDate, toTime);
+  if (end.getTime() <= start.getTime()) {
+    end = parseLocalDateTime(toDate, '23:59');
+  }
+  return { from: start.toISOString(), to: end.toISOString() };
+}
+
+export type ZonePerformanceDateRange =
+  | 'Today'
+  | 'Yesterday'
+  | 'Last 7 days'
+  | 'Last 30 days'
+  | 'Custom';
+
+function formatLocalCalendarDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/** Resolve zone-performance pill labels to local calendar start/end dates. */
+export function resolveZonePerformanceCalendarDates(
+  dateRange: ZonePerformanceDateRange,
+  customFrom: string,
+  customTo: string,
+  now: Date = new Date(),
+): { fromDate: string; toDate: string } {
+  const todayStr = formatLocalCalendarDate(now);
+
+  switch (dateRange) {
+    case 'Today':
+      return { fromDate: todayStr, toDate: todayStr };
+    case 'Yesterday': {
+      const yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yStr = formatLocalCalendarDate(yesterday);
+      return { fromDate: yStr, toDate: yStr };
+    }
+    case 'Last 7 days': {
+      const from = new Date(now);
+      from.setDate(from.getDate() - 7);
+      return { fromDate: formatLocalCalendarDate(from), toDate: todayStr };
+    }
+    case 'Last 30 days': {
+      const from = new Date(now);
+      from.setDate(from.getDate() - 30);
+      return { fromDate: formatLocalCalendarDate(from), toDate: todayStr };
+    }
+    case 'Custom':
+      return { fromDate: customFrom, toDate: customTo };
+    default: {
+      const _exhaustive: never = dateRange;
+      return _exhaustive;
+    }
+  }
+}

@@ -22,6 +22,12 @@ def get_database_url() -> str:
     return os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
 
 
+@lru_cache(maxsize=1)
+def get_store_timezone() -> str:
+    """IANA timezone for hourly rollups and event bucketing (``STORE_TIMEZONE`` env)."""
+    return os.getenv("STORE_TIMEZONE", "UTC")
+
+
 def get_raw_event_retention_days() -> int:
     """Days to keep raw ``events`` rows before pruning (PRD §35)."""
     raw = os.getenv("RAW_EVENT_RETENTION_DAYS", "90")

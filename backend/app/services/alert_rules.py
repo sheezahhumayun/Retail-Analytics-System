@@ -125,6 +125,27 @@ def get_occupancy_severity(
     return "warning"
 
 
+def get_zone_alert_severity(
+    rule_type: str,
+    zone_id: str,
+    store_id: str | None = None,
+    *,
+    session: Session | None = None,
+) -> str:
+    """Severity from the matched zone-level alert rule (default ``warning``).
+
+    Lookup order matches :func:`get_dwell_thresholds` / queue threshold loaders:
+    per-zone rule, then store-specific, then org-wide default.
+    """
+    if session is not None:
+        matched = _find_zone_alert_rule(session, rule_type, zone_id, store_id)
+        return matched.severity if matched is not None else "warning"
+
+    with session_scope() as sess:
+        matched = _find_zone_alert_rule(sess, rule_type, zone_id, store_id)
+        return matched.severity if matched is not None else "warning"
+
+
 def get_camera_offline_duration_rule(
     camera_id: str,
     store_id: str,
@@ -249,6 +270,44 @@ def _load_thresholds(
     )
 
 
+def _index_zone_alert_rules(
+    all_rules: list[AlertRule],
+) -> tuple[dict[str, AlertRule], dict[str, AlertRule], AlertRule | None]:
+    zone_rules: dict[str, AlertRule] = {}
+    store_rules: dict[str, AlertRule] = {}
+    org_default: AlertRule | None = None
+
+    for rule in all_rules:
+        if rule.zone_id is not None:
+            zone_rules[rule.zone_id] = rule
+        elif rule.store_id is not None:
+            store_rules[rule.store_id] = rule
+        else:
+            org_default = rule
+
+    return zone_rules, store_rules, org_default
+
+
+def _find_zone_alert_rule(
+    session: Session,
+    rule_type: str,
+    zone_id: str,
+    store_id: str | None = None,
+) -> AlertRule | None:
+    stmt = select(AlertRule).where(
+        AlertRule.rule_type == rule_type,
+        AlertRule.enabled == True,
+    )
+    all_rules = session.exec(stmt).all()
+    zone_rules, store_rules, org_default = _index_zone_alert_rules(all_rules)
+
+    if zone_id in zone_rules:
+        return zone_rules[zone_id]
+    if store_id and store_id in store_rules:
+        return store_rules[store_id]
+    return org_default
+
+
 def _load_thresholds_from_session(
     session: Session,
     rule_type: str,
@@ -263,18 +322,7 @@ def _load_thresholds_from_session(
         AlertRule.enabled == True,
     )
     all_rules = session.exec(stmt).all()
-
-    zone_rules: dict[str, AlertRule] = {}
-    store_rules: dict[str, AlertRule] = {}
-    org_default: AlertRule | None = None
-
-    for rule in all_rules:
-        if rule.zone_id is not None:
-            zone_rules[rule.zone_id] = rule
-        elif rule.store_id is not None:
-            store_rules[rule.store_id] = rule
-        else:
-            org_default = rule
+    zone_rules, store_rules, org_default = _index_zone_alert_rules(all_rules)
 
     if zone_ids:
         for zid in zone_ids:

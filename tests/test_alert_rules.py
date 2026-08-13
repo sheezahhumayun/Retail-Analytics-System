@@ -19,10 +19,12 @@ from backend.app.services.alert_rules import (
     get_occupancy_threshold,
     get_queue_duration_thresholds,
     get_queue_length_thresholds,
+    get_zone_alert_severity,
 )
-from database.models import AlertRule
+from database.models import Alert, AlertRule
 from database.seed import ORG_ID, STORE_ID, seed_reference_data
 from database.session import create_all, reset_engine, session_scope
+from database.writer import AnalyticsDbWriter, DbWriterConfig
 
 pytestmark = pytest.mark.database
 
@@ -458,3 +460,207 @@ class TestOccupancyThresholdWithAlertRules:
     def test_load_occupancy_threshold_org_default(self, db_ready):
         """Verify org-wide occupancy threshold is returned (seeded 30)."""
         assert get_occupancy_threshold(STORE_ID) == 30.0
+
+
+class TestAlertSeverityFromRules:
+    """Verify alert severity is loaded from alert_rules when persisting alerts."""
+
+    def _set_zone_rule_severity(
+        self,
+        rule_type: str,
+        zone_id: str,
+        severity: str,
+    ) -> None:
+        with session_scope() as session:
+            from sqlalchemy import delete
+
+            session.exec(
+                delete(AlertRule).where(
+                    AlertRule.rule_type == rule_type,
+                    AlertRule.zone_id == zone_id,
+                )
+            )
+            session.add(
+                AlertRule(
+                    org_id=ORG_ID,
+                    rule_type=rule_type,
+                    store_id=None,
+                    zone_id=zone_id,
+                    threshold=30.0,
+                    severity=severity,
+                    enabled=True,
+                )
+            )
+
+    def test_get_zone_alert_severity_zone_rule(self, db_ready):
+        self._set_zone_rule_severity("DWELL_THRESHOLD", DWELL_ZONE.zone_id, "critical")
+        assert (
+            get_zone_alert_severity("DWELL_THRESHOLD", DWELL_ZONE.zone_id, STORE_ID)
+            == "critical"
+        )
+
+    def test_get_zone_alert_severity_org_default_fallback(self, db_ready):
+        with session_scope() as session:
+            from sqlalchemy import delete
+
+            session.exec(
+                delete(AlertRule).where(
+                    AlertRule.rule_type == "DWELL_THRESHOLD",
+                    AlertRule.zone_id == DWELL_ZONE.zone_id,
+                )
+            )
+        assert get_zone_alert_severity("DWELL_THRESHOLD", DWELL_ZONE.zone_id, STORE_ID) == "warning"
+
+    def test_dwell_alert_persists_rule_severity(self, db_ready):
+        self._set_zone_rule_severity("DWELL_THRESHOLD", DWELL_ZONE.zone_id, "critical")
+        thresholds = get_dwell_thresholds([DWELL_ZONE.zone_id])
+
+        writer = AnalyticsDbWriter(
+            DbWriterConfig(
+                store_id=STORE_ID,
+                camera_store_map={"test_camera": STORE_ID},
+                zones=[DWELL_ZONE],
+            )
+        )
+        try:
+            bus = EventBus()
+            writer.subscribe(bus)
+            engine = AnalyticsEngine(
+                bus,
+                AnalyticsEngineConfig(
+                    camera_ids=["test_camera"],
+                    zones=[DWELL_ZONE],
+                    store_id=STORE_ID,
+                    dwell_thresholds=thresholds,
+                    db_writer=writer,
+                ),
+            )
+            engine.process_zone_event(_zone_event(ZoneEventType.ZONE_ENTER, 1000.0))
+            engine.process_zone_event(_zone_event(ZoneEventType.ZONE_PRESENCE, 1031.0))
+
+            with session_scope() as session:
+                alert = session.exec(
+                    select(Alert)
+                    .where(
+                        Alert.alert_type == "DWELL_THRESHOLD",
+                        Alert.zone_id == DWELL_ZONE.zone_id,
+                    )
+                    .order_by(Alert.id.desc())  # type: ignore[attr-defined]
+                ).first()
+                assert alert is not None
+                assert alert.severity == "critical"
+        finally:
+            writer.close()
+
+    def test_queue_length_alert_persists_rule_severity(self, db_ready):
+        self._set_zone_rule_severity("QUEUE_THRESHOLD", QUEUE_ZONE.zone_id, "info")
+        length_thresholds = get_queue_length_thresholds([QUEUE_ZONE.zone_id])
+        threshold = length_thresholds[QUEUE_ZONE.zone_id]
+        assert threshold is not None
+
+        writer = AnalyticsDbWriter(
+            DbWriterConfig(
+                store_id=STORE_ID,
+                camera_store_map={"test_camera": STORE_ID},
+                zones=[QUEUE_ZONE],
+            )
+        )
+        try:
+            bus = EventBus()
+            writer.subscribe(bus)
+            engine = AnalyticsEngine(
+                bus,
+                AnalyticsEngineConfig(
+                    camera_ids=["test_camera"],
+                    zones=[QUEUE_ZONE],
+                    store_id=STORE_ID,
+                    queue_length_thresholds=length_thresholds,
+                    db_writer=writer,
+                ),
+            )
+            for i in range(1, threshold + 1):
+                engine.process_zone_event(
+                    _zone_event(
+                        ZoneEventType.ZONE_ENTER,
+                        1000.0 + i,
+                        zone_id=QUEUE_ZONE.zone_id,
+                        zone_name=QUEUE_ZONE.zone_name,
+                        track_id=i,
+                    )
+                )
+
+            with session_scope() as session:
+                alert = session.exec(
+                    select(Alert)
+                    .where(
+                        Alert.alert_type == "QUEUE_THRESHOLD",
+                        Alert.zone_id == QUEUE_ZONE.zone_id,
+                    )
+                    .order_by(Alert.id.desc())  # type: ignore[attr-defined]
+                ).first()
+                assert alert is not None
+                assert alert.severity == "info"
+        finally:
+            writer.close()
+
+    def test_queue_duration_alert_persists_rule_severity(self, db_ready):
+        self._set_zone_rule_severity(
+            "QUEUE_THRESHOLD_DURATION", QUEUE_ZONE.zone_id, "critical"
+        )
+        duration_thresholds = get_queue_duration_thresholds([QUEUE_ZONE.zone_id])
+        threshold = duration_thresholds[QUEUE_ZONE.zone_id]
+        assert threshold is not None
+
+        writer = AnalyticsDbWriter(
+            DbWriterConfig(
+                store_id=STORE_ID,
+                camera_store_map={"test_camera": STORE_ID},
+                zones=[QUEUE_ZONE],
+            )
+        )
+        try:
+            bus = EventBus()
+            writer.subscribe(bus)
+            engine = AnalyticsEngine(
+                bus,
+                AnalyticsEngineConfig(
+                    camera_ids=["test_camera"],
+                    zones=[QUEUE_ZONE],
+                    store_id=STORE_ID,
+                    queue_duration_thresholds=duration_thresholds,
+                    db_writer=writer,
+                ),
+            )
+            engine.process_zone_event(
+                _zone_event(
+                    ZoneEventType.ZONE_ENTER,
+                    100.0,
+                    zone_id=QUEUE_ZONE.zone_id,
+                    zone_name=QUEUE_ZONE.zone_name,
+                    track_id=1,
+                )
+            )
+            engine.process_zone_event(
+                _zone_event(
+                    ZoneEventType.ZONE_PRESENCE,
+                    100.0 + threshold,
+                    zone_id=QUEUE_ZONE.zone_id,
+                    zone_name=QUEUE_ZONE.zone_name,
+                    track_id=1,
+                )
+            )
+
+            with session_scope() as session:
+                alert = session.exec(
+                    select(Alert)
+                    .where(
+                        Alert.alert_type == "QUEUE_THRESHOLD",
+                        Alert.zone_id == QUEUE_ZONE.zone_id,
+                    )
+                    .order_by(Alert.id.desc())  # type: ignore[attr-defined]
+                ).first()
+                assert alert is not None
+                assert alert.severity == "critical"
+                assert alert.metadata_.get("threshold_kind") == "duration"
+        finally:
+            writer.close()

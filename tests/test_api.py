@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import select
 
 from backend.app.main import app
+from database.models import ZoneMetric
 from database.seed import STORE_ID, seed_reference_data
-from database.session import create_all, reset_engine
+from database.session import create_all, reset_engine, session_scope
 
 pytestmark = [pytest.mark.api, pytest.mark.database]
 
@@ -354,6 +356,75 @@ class TestAnalytics:
         )
         assert resp.status_code == 200
         assert resp.json()["zone_id"] == "store1"
+
+    def test_zones_datetime_range_filters_hourly_metrics(
+        self,
+        api_client: TestClient,
+        auth_headers: dict,
+    ):
+        """Narrow UTC time windows must change aggregated zone visitor totals."""
+        metric_date = datetime.now(timezone.utc).date() - timedelta(days=1)
+
+        with session_scope() as session:
+            for hour, visitors in ((10, 5), (12, 20), (14, 8)):
+                row = session.exec(
+                    select(ZoneMetric).where(
+                        ZoneMetric.zone_id == "store1",
+                        ZoneMetric.metric_date == metric_date,
+                        ZoneMetric.hour == hour,
+                    )
+                ).first()
+                if row is None:
+                    session.add(
+                        ZoneMetric(
+                            zone_id="store1",
+                            metric_date=metric_date,
+                            hour=hour,
+                            visitors=visitors,
+                            avg_dwell=30.0,
+                            max_dwell=60.0,
+                            min_dwell=10.0,
+                            dwell_count=visitors,
+                        )
+                    )
+                else:
+                    row.visitors = visitors
+                    row.dwell_count = visitors
+            session.commit()
+
+        wide_from = datetime.combine(metric_date, time(9, 0), tzinfo=timezone.utc).isoformat()
+        wide_to = datetime.combine(metric_date, time(21, 0), tzinfo=timezone.utc).isoformat()
+        narrow_from = datetime.combine(metric_date, time(11, 0), tzinfo=timezone.utc).isoformat()
+        narrow_to = datetime.combine(metric_date, time(13, 0), tzinfo=timezone.utc).isoformat()
+
+        wide = api_client.get(
+            "/api/analytics/zones",
+            headers=auth_headers,
+            params={
+                "store_id": STORE_ID,
+                "zone_id": "store1",
+                "from": wide_from,
+                "to": wide_to,
+            },
+        )
+        narrow = api_client.get(
+            "/api/analytics/zones",
+            headers=auth_headers,
+            params={
+                "store_id": STORE_ID,
+                "zone_id": "store1",
+                "from": narrow_from,
+                "to": narrow_to,
+            },
+        )
+        assert wide.status_code == 200, wide.text
+        assert narrow.status_code == 200, narrow.text
+
+        wide_visitors = sum(b["visitors"] for b in wide.json()["buckets"])
+        narrow_visitors = sum(b["visitors"] for b in narrow.json()["buckets"])
+        assert wide_visitors == 33, f"expected 5+20+8 visits in 09:00–21:00, got {wide_visitors}"
+        assert narrow_visitors == 20, f"expected noon hour only (20), got {narrow_visitors}"
+        assert wide_visitors != narrow_visitors
 
     def test_dwell(self, api_client: TestClient, auth_headers: dict):
         resp = api_client.get(

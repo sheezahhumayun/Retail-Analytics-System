@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, Index, String, UniqueConstraint
+from sqlalchemy import Column, DateTime, Index, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -87,8 +87,7 @@ class ZoneShape(SQLModel, table=True):
     polygon_points: list[Any] = Field(sa_column=Column(JSONB, nullable=False))
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-        index=True,
+        sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
     )
 
 
@@ -127,8 +126,13 @@ class ProcessingRun(SQLModel, table=True):
     id: str = Field(primary_key=True, max_length=64)
     camera_id: str = Field(foreign_key="cameras.id", nullable=False, index=True)
     status: str = Field(max_length=32, nullable=False)
-    started_at: datetime = Field(nullable=False, index=True)
-    finished_at: datetime | None = Field(default=None)
+    started_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
+    )
+    finished_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     message: str | None = Field(default=None)
     source_path: str = Field(max_length=1024, nullable=False)
     zones_snapshot: list[Any] = Field(
@@ -321,10 +325,9 @@ class AlertRule(SQLModel, table=True):
     enabled: bool = Field(default=True, nullable=False, index=True)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-        index=True,
+        sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
     )
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
     )

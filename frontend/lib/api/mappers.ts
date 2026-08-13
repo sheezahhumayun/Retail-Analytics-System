@@ -28,6 +28,10 @@ import type {
 } from "@/lib/types";
 import { ZONE_TYPE_COLORS } from "@/lib/zones-lines-data";
 import { getIntervalLabel as intervalLabelForRange } from "@/lib/analytics-data";
+import {
+  formatUtcLocalDateYMD,
+  formatUtcLocalTimeHHMM,
+} from "@/lib/format-datetime";
 import type { DateRangeKey } from "@/lib/types";
 import type { HeatBlob } from "@/lib/types";
 import {
@@ -445,11 +449,11 @@ export function mapOccupancyTrend(
     (p) => p.current_occupancy,
   );
   const multiDay =
-    new Set(uniqueTrend.map((p) => p.timestamp.slice(0, 10))).size > 1;
+    new Set(uniqueTrend.map((p) => formatUtcLocalDateYMD(p.timestamp))).size > 1;
 
   const result = uniqueTrend.map((point, index) => {
-    const datePart = point.timestamp.slice(0, 10);
-    const timePart = point.timestamp.slice(11, 16) || "00:00";
+    const datePart = formatUtcLocalDateYMD(point.timestamp);
+    const timePart = formatUtcLocalTimeHHMM(point.timestamp);
     return {
       id: point.timestamp,
       label: multiDay ? `${datePart} ${timePart}` : timePart,

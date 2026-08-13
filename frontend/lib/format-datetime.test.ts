@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatUtcDateTime, parseUtcDateTime } from './format-datetime';
+import {
+  formatUtcDateTime,
+  formatUtcLocalDateYMD,
+  formatUtcLocalTimeHHMM,
+  parseUtcDateTime,
+} from './format-datetime';
 
 describe('parseUtcDateTime', () => {
   it('treats naive ISO strings as UTC', () => {
@@ -44,5 +49,26 @@ describe('formatUtcDateTime', () => {
       hour12: true,
     });
     expect(naive).toBe(aware);
+  });
+});
+
+describe('formatUtcLocalDateYMD / formatUtcLocalTimeHHMM', () => {
+  const utcNearBoundary = '2026-08-12T20:00:00+00:00';
+
+  it('derives local date and time from parsed UTC instant', () => {
+    const date = parseUtcDateTime(utcNearBoundary);
+    expect(formatUtcLocalDateYMD(utcNearBoundary)).toBe(
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`,
+    );
+    expect(formatUtcLocalTimeHHMM(utcNearBoundary)).toBe(
+      `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`,
+    );
+  });
+
+  it('matches offset-aware and naive UTC strings', () => {
+    const aware = '2026-08-12T20:00:00+00:00';
+    const naive = '2026-08-12T20:00:00';
+    expect(formatUtcLocalTimeHHMM(naive)).toBe(formatUtcLocalTimeHHMM(aware));
+    expect(formatUtcLocalDateYMD(naive)).toBe(formatUtcLocalDateYMD(aware));
   });
 });

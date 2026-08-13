@@ -36,6 +36,7 @@ from backend.app.services.alert_rules import (
     get_queue_length_thresholds,
 )
 from database import AnalyticsDbWriter, DbWriterConfig, session_scope
+from database.config import get_store_timezone
 from database.models import Camera, CountingLine as DbCountingLine, Zone as DbZone
 from inference.detection import create_detector
 from inference.tracking import Tracker
@@ -184,6 +185,7 @@ def process_recorded_camera(
             camera_store_map={camera_id: store_id},
             zones=pipeline_zones,
             camera_modules={camera_id: enabled},
+            timezone=get_store_timezone(),
         )
     )
     db_writer.subscribe(bus)
@@ -213,7 +215,10 @@ def process_recorded_camera(
         heatmap_engine: HeatmapEngine | None = None
         heatmap_store: HeatmapStore | None = None
         if needs_heatmap:
-            heatmap_store = HeatmapStore(str(REPO_ROOT / "data" / "heatmaps"), timezone="UTC")
+            heatmap_store = HeatmapStore(
+                str(REPO_ROOT / "data" / "heatmaps"),
+                timezone=get_store_timezone(),
+            )
 
         frames_processed = 0
         events_published = 0
@@ -257,7 +262,7 @@ def process_recorded_camera(
                             h,
                             grid_scale=4,
                             store=heatmap_store,
-                            timezone="UTC",
+                            timezone=get_store_timezone(),
                         )
                         heatmap_engine.set_reference_frame(frame)
 
